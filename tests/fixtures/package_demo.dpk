@@ -1,0 +1,10 @@
+package DemoPkg;
+
+requires
+  rtl, vcl;
+
+contains
+  UnitOne in 'UnitOne.pas',
+  UnitTwo in 'UnitTwo.pas';
+
+end.

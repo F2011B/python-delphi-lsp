@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "python-delphi-lsp"
+version = "0.1.0"
+description = "Python Delphi/Object Pascal parser, semantic indexer, and language server."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MPL-2.0"
+license-files = ["LICENSE"]
+authors = [
+  { name = "F2011B" },
+]
+keywords = ["delphi", "object-pascal", "pascal", "lsp", "language-server", "parser"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Software Development :: Compilers",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+  "lark>=1.1.9",
+]
+
+[project.optional-dependencies]
+lsp = [
+  "pygls>=1.3.0,<2.0",
+  "lsprotocol>=2023.0.1",
+]
+test = [
+  "pytest>=8.0.0",
+]
+dev = [
+  "build>=1.2.0",
+  "twine>=5.0.0",
+  "pygls>=1.3.0,<2.0",
+  "lsprotocol>=2023.0.1",
+  "pytest>=8.0.0",
+]
+
+[project.scripts]
+delphi-lsp = "delphiast.lsp_server:main"
+
+[project.urls]
+Homepage = "https://github.com/F2011B/python-delphi-lsp"
+Repository = "https://github.com/F2011B/python-delphi-lsp"
+Issues = "https://github.com/F2011B/python-delphi-lsp/issues"
+
+[tool.setuptools]
+packages = ["delphiast"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
