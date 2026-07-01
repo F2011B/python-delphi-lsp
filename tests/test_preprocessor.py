@@ -29,6 +29,29 @@ end.
         self.assertIn('ActiveValue = 1', result.preprocessed.text)
         self.assertNotIn('ActiveValue = 2', result.preprocessed.text)
 
+    def test_include_bom_is_ignored(self) -> None:
+        text = '''
+unit IncludeBomDemo;
+
+interface
+
+{$I bom.inc}
+
+implementation
+
+end.
+'''.strip()
+
+        def include_loader(parent_file: str, include_name: str):
+            if include_name == 'bom.inc':
+                return ('\ufeffconst IncludedValue = 1;\n', 'bom.inc')
+            return None
+
+        result = parse(text, 'include_bom_demo.pas', include_loader=include_loader)
+
+        self.assertIn('const IncludedValue = 1;', result.preprocessed.text)
+        self.assertNotIn('\ufeff', result.preprocessed.text)
+
     def test_pushopt_popopt_restores_state(self) -> None:
         text = '''
 unit PushPopOptDemo;
@@ -94,6 +117,72 @@ end.
         self.assertIn('InlineMode = 1', result.preprocessed.text)
         self.assertNotIn('RangeChecks = 1', result.preprocessed.text)
         self.assertNotIn('InlineMode = 2', result.preprocessed.text)
+
+    def test_modern_delphi_defaults_enable_conditional_expressions(self) -> None:
+        text = '''
+unit ModernCompilerDefaultsDemo;
+
+interface
+
+{$IFDEF CONDITIONALEXPRESSIONS}
+const Supported = 1;
+{$ELSE}
+Unsupported Compiler Version
+{$ENDIF}
+
+implementation
+
+end.
+'''.strip()
+
+        result = parse(text, 'modern_compiler_defaults_demo.pas')
+
+        self.assertIn('Supported = 1', result.preprocessed.text)
+        self.assertNotIn('Unsupported Compiler Version', result.preprocessed.text)
+
+    def test_modern_delphi_defaults_define_compiler_version_symbol(self) -> None:
+        text = '''
+unit ModernCompilerVersionSymbolDemo;
+
+interface
+
+{$IFDEF VER360}
+const Supported = 1;
+{$ELSE}
+Unsupported Compiler Version
+{$ENDIF}
+
+implementation
+
+end.
+'''.strip()
+
+        result = parse(text, 'modern_compiler_version_symbol_demo.pas')
+
+        self.assertIn('Supported = 1', result.preprocessed.text)
+        self.assertNotIn('Unsupported Compiler Version', result.preprocessed.text)
+
+    def test_modern_delphi_defaults_include_unicode(self) -> None:
+        text = '''
+unit ModernUnicodeDefaultsDemo;
+
+interface
+
+{$IFDEF UNICODE}
+type TText = string;
+{$ELSE}
+type TText = AnsiString;
+{$ENDIF}
+
+implementation
+
+end.
+'''.strip()
+
+        result = parse(text, 'modern_unicode_defaults_demo.pas')
+
+        self.assertIn('TText = string', result.preprocessed.text)
+        self.assertNotIn('TText = AnsiString', result.preprocessed.text)
 
 
 if __name__ == '__main__':

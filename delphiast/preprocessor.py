@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
+from .source_reader import read_source_text
+
 
 IncludeLoader = Callable[[str, str], Optional[tuple[str, str]]]
 
@@ -54,8 +56,8 @@ class PreprocessedSource:
 @dataclass
 class PreprocessorOptions:
     use_defines: bool = True
-    compiler_version: float = 0.0
-    rtl_version: float = 0.0
+    compiler_version: float = 36.0
+    rtl_version: float = 36.0
     scoped_enums: bool = False
     option_states: dict[str, bool] = field(default_factory=dict)
 
@@ -139,6 +141,7 @@ class Preprocessor:
         self.include_paths = [Path(p) for p in include_paths]
         self.include_loader = include_loader or self._default_include_loader
         self.options = options or PreprocessorOptions()
+        self._apply_default_compiler_defines()
         self.scoped_enums = self.options.scoped_enums
         self._option_values: dict[str, str] = {}
         self._option_stack: list[tuple[dict[str, str], bool]] = []
@@ -258,6 +261,17 @@ class Preprocessor:
             problems=self._problems,
             comments=self._comments,
         )
+
+    def _apply_default_compiler_defines(self) -> None:
+        if not self.options.use_defines:
+            return
+        if 'FPC' in self.defines:
+            return
+        if self.options.compiler_version >= 20.0:
+            self.defines.add('CONDITIONALEXPRESSIONS')
+            self.defines.add('UNICODE')
+            version_define = int(round(self.options.compiler_version * 10))
+            self.defines.add(f'VER{version_define}')
 
     def _emit_text(
         self,
@@ -787,15 +801,16 @@ class Preprocessor:
         return ''.join('\n' if ch == '\n' else ' ' for ch in text)
 
     def _normalize_newlines(self, text: str) -> str:
-        return text.replace('\r\n', '\n').replace('\r', '\n')
+        return text.replace('\ufeff', '').replace('\r\n', '\n').replace('\r', '\n')
 
     def _default_include_loader(self, parent_file: str, include_name: str) -> Optional[tuple[str, str]]:
         parent_path = Path(parent_file)
+        include_path = Path(include_name.replace('\\', '/'))
         search_paths = [parent_path.parent] + self.include_paths
         for base in search_paths:
-            candidate = (base / include_name).resolve()
+            candidate = (base / include_path).resolve()
             if candidate.exists():
-                return (candidate.read_text(encoding='utf-8', errors='replace'), str(candidate))
+                return (read_source_text(candidate), str(candidate))
         return None
 
     def _record_comment(

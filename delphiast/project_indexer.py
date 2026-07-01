@@ -9,6 +9,7 @@ from .consts import AttributeName, SyntaxNodeType
 from .nodes import SyntaxNode
 from .parser import DelphiParser
 from .preprocessor import IncludeLoader
+from .source_reader import read_source_text
 
 
 class ProjectProblemType(str, Enum):
@@ -189,7 +190,7 @@ class ProjectIndexer:
 
     def _read_file(self, file_path: Path) -> Optional[str]:
         try:
-            return file_path.read_text(encoding='utf-8', errors='replace')
+            return read_source_text(file_path)
         except OSError as exc:
             self._problems.append(
                 ProjectProblem(
@@ -286,12 +287,13 @@ class ProjectIndexer:
 
     def _default_include_loader(self, parent_file: str, include_name: str) -> Optional[tuple[str, str]]:
         parent = Path(parent_file).resolve().parent
+        include_path = Path(include_name.replace('\\', '/'))
         search_roots = [parent, self._project_folder, *self.include_paths, *self.search_paths]
         for root in search_roots:
-            candidate = (root / include_name).resolve()
+            candidate = (root / include_path).resolve()
             if candidate.exists() and candidate.is_file():
                 try:
-                    content = candidate.read_text(encoding='utf-8', errors='replace')
+                    content = read_source_text(candidate)
                 except OSError:
                     continue
                 return content, str(candidate)

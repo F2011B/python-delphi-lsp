@@ -23,3 +23,7 @@ env/
 
 # Packaging
 .python-version
+
+# Local integration artifacts
+test_projects/
+output/

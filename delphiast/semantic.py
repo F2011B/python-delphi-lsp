@@ -360,10 +360,16 @@ class SymbolIndex:
             return []
         return unit_scope.lookup_local(symbol_name)
 
-    def _index_scope(self, scope: Scope) -> None:
+    def _index_scope(self, scope: Scope, seen: set[int] | None = None) -> None:
+        if seen is None:
+            seen = set()
+        scope_id = id(scope)
+        if scope_id in seen:
+            return
+        seen.add(scope_id)
         for symbols in scope.symbols.values():
             for symbol in symbols:
                 key = normalize_name(symbol.name)
                 self.name_index.setdefault(key, []).append(symbol)
         for child_scope in scope.imports:
-            self._index_scope(child_scope)
+            self._index_scope(child_scope, seen)

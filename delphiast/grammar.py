@@ -8,11 +8,15 @@ GRAMMAR_RULES = r'''
       | program_file
       | library_file
       | package_file
+      | include_file
 
 unit_file: unit_header interface_section implementation_section? initialization_section? finalization_section? END "."
+         | unit_header interface_section implementation_section? bare_initialization_section "."
 program_file: program_header program_body "."
 library_file: library_header program_body "."
 package_file: package_header package_body END "."
+include_file: uses_clause? implementation_decl_sections
+            | literal
 
 unit_header: UNIT qualified_name unit_directive_list? ";" uses_clause?
 program_header: PROGRAM qualified_name program_params? ";" uses_clause?
@@ -29,32 +33,42 @@ program_params: "(" name_list ")"
 program_body: block
 package_body: requires_clause? contains_clause?
 
-interface_section: INTERFACE uses_clause? interface_decl_sections
+interface_section: INTERFACE interface_preamble? uses_clause? interface_decl_sections
 implementation_section: IMPLEMENTATION uses_clause? implementation_decl_sections
 initialization_section: INITIALIZATION statement_list?
 finalization_section: FINALIZATION statement_list?
+bare_initialization_section: compound_statement
+
+interface_preamble: ignored_compiler_error_line+
 
 interface_decl_sections: (label_section | const_section | resourcestring_section | type_section | var_section
                         | threadvar_section | routine_decl | property_decl | exports_section)*
 implementation_decl_sections: (label_section | const_section | resourcestring_section | type_section | var_section
-                             | threadvar_section | routine_impl | property_decl | exports_section)*
+                             | threadvar_section | routine_impl | property_decl | exports_section
+                             | ignored_proc_type_directive | ignored_compiler_error_line)*
+ignored_proc_type_directive: proc_type_decl_directive ";"?
+ignored_compiler_error_line: COMPILER_ERROR_TEXT
 
-uses_clause: USES uses_item ("," uses_item)* ";"
+uses_clause: EMPTY_USES_BEFORE_IMPLEMENTATION
+           | USES uses_item ("," uses_item)* ";"
 uses_item: qualified_name (IN STRING_LITERAL)?
 
 label_section: LABEL label_list ";"
 label_list: label ("," label)*
-label: NAME | INT
+label: NAME | INT | EXIT
 
 const_section: CONST const_decl+
 resourcestring_section: RESOURCESTRING const_decl+
-const_decl: attribute_sections? NAME (":" type_spec)? "=" const_value decl_directive_list? ";"
+const_decl: attribute_sections? NAME (":" type_spec)? "=" const_value? decl_directive_list? ";"
 
 type_section: TYPE type_decl+
-type_decl: attribute_sections? type_decl_name type_params? "=" forward_class_decl decl_directive_list? ";"
-         | attribute_sections? type_decl_name type_params? "=" type_spec decl_directive_list? ";"
+type_decl: attribute_sections? type_decl_name type_params? "=" forward_type_decl decl_directive_list? ";"
+         | attribute_sections? type_decl_name type_params? "=" type_spec proc_type_decl_directive? decl_directive_list? ";"
+         | attribute_sections? type_decl_name type_params? "=" -> incomplete_type_decl
 type_decl_name: NAME | GENERIC_NAME
-forward_class_decl: CLASS type_heritage
+forward_type_decl: CLASS class_modifiers? type_heritage? -> forward_class_decl
+                 | INTERFACE type_heritage? -> forward_interface_decl
+                 | DISPINTERFACE type_heritage? -> forward_dispinterface_decl
 
 decl_directive_list: decl_directive+
 decl_directive: DEPRECATED (STRING_LITERAL)?
@@ -64,7 +78,7 @@ decl_directive: DEPRECATED (STRING_LITERAL)?
 
 var_section: VAR var_decl+
 threadvar_section: THREADVAR var_decl+
-var_decl: attribute_sections? name_list ":" type_spec absolute_spec? ("=" const_value)? ";"
+var_decl: attribute_sections? name_list ":" type_spec proc_type_decl_directive? absolute_spec? ("=" const_value)? ";"
 absolute_spec: ABSOLUTE expr
 
 exports_section: EXPORTS exports_item ("," exports_item)* ";"
@@ -90,12 +104,22 @@ property_directive: READ expr
                   | DISPID expr
 
 routine_decl: resolution_decl
+            | routine_heading proc_type_decl_directive ";" directive_list?
             | routine_heading ";" directive_list?
 
 resolution_decl: (procedure_decl | function_decl | operator_decl | qualified_name) "=" qualified_name ";"
 
-routine_impl: routine_heading ";" body_directive_list? routine_body ";"?
+routine_impl: routine_heading proc_type_decl_directive ";" body_directive_list? routine_body ";"?
+            | routine_heading ";" body_directive_list? routine_body ";"?
+            | routine_heading proc_type_decl_directive ";" body_directive_list EXTERNAL external_spec? (";" directive)* ";"?
+            | routine_heading proc_type_decl_directive EXTERNAL external_spec? (";" directive)* ";"?
+            | routine_heading ";" body_directive_list EXTERNAL external_spec? (";" directive)* ";"?
+            | routine_heading proc_type_decl_directive proc_type_decl_directive ";" EXTERNAL external_spec? (";" directive)* ";"?
+            | routine_heading proc_type_decl_directive ";" body_directive_list FORWARD (";" directive)* ";"?
+            | routine_heading ";" body_directive_list FORWARD (";" directive)* ";"?
+            | routine_heading proc_type_decl_directive ";" FORWARD (";" directive)* ";"?
             | routine_heading ";" FORWARD (";" directive)* ";"?
+            | routine_heading proc_type_decl_directive ";" EXTERNAL external_spec? (";" directive)* ";"?
             | routine_heading ";" EXTERNAL external_spec? (";" directive)* ";"?
 
 routine_heading: procedure_decl
@@ -104,30 +128,34 @@ routine_heading: procedure_decl
                | destructor_decl
                | operator_decl
 
-procedure_decl: attribute_sections? CLASS? PROCEDURE qualified_name type_params? formal_parameters?
-function_decl: attribute_sections? CLASS? FUNCTION qualified_name type_params? formal_parameters? (":" type_spec)?
-constructor_decl: attribute_sections? CLASS? CONSTRUCTOR qualified_name type_params? formal_parameters?
-destructor_decl: attribute_sections? CLASS? DESTRUCTOR qualified_name type_params? formal_parameters?
-operator_decl: attribute_sections? CLASS? OPERATOR operator_target type_params? formal_parameters? (":" type_spec)?
+procedure_decl: attribute_sections? CLASS? PROCEDURE qualified_name type_params? formal_parameters? routine_heading_directive_list?
+function_decl: attribute_sections? CLASS? FUNCTION qualified_name type_params? formal_parameters? (":" type_spec)? routine_heading_directive_list?
+constructor_decl: attribute_sections? CLASS? CONSTRUCTOR qualified_name type_params? formal_parameters? routine_heading_directive_list?
+destructor_decl: attribute_sections? CLASS? DESTRUCTOR qualified_name type_params? formal_parameters? routine_heading_directive_list?
+operator_decl: attribute_sections? CLASS? OPERATOR operator_target type_params? formal_parameters? (":" type_spec)? routine_heading_directive_list?
 operator_target: operator_name | qualified_name
+routine_heading_directive_list: routine_heading_directive+
+routine_heading_directive: VARARGS
 
 operator_name: "+" | "-" | "*" | "/" | "=" | "<" | ">" | "<=" | ">=" | "<>" | IN | IS | AS
 
 routine_body: block
-            | asm_statement
+            | asm_block
+asm_block: block_decl_sections? asm_statement
 block: block_decl_sections? compound_statement
 block_decl_sections: (label_section | const_section | resourcestring_section | type_section | var_section
                     | threadvar_section | routine_impl | exports_section)*
 
 formal_parameters: "(" param_list? ")"
 param_list: param (";" param)*
-param: attribute_sections? param_modifier? attribute_sections? name_list ":" type_spec param_default?
+param: attribute_sections? param_modifier? attribute_sections? name_list (":" type_spec)? param_default?
 param_modifier: CONST | VAR | OUT
 param_default: "=" expr
 
-name_list: NAME ("," NAME)*
+name_list: (NAME | STRICT_NAME) ("," (NAME | STRICT_NAME))*
 
 ?type_spec: simple_type
+          | distinct_type
           | pointer_type
           | array_type
           | array_of_const_type
@@ -143,9 +171,12 @@ name_list: NAME ("," NAME)*
           | packed_type
 
 packed_type: PACKED type_spec
+distinct_type: TYPE type_spec
 simple_type: type_name
-type_name: qualified_name type_args?
+type_name: qualified_name type_args? codepage_spec?
+codepage_spec: "(" expr ")"
 pointer_type: "^" type_spec
+            | POINTER_CHAR
 array_type: ARRAY ("[" array_bounds "]")? OF type_spec
 array_of_const_type: ARRAY OF CONST
 array_bounds: array_bound ("," array_bound)*
@@ -176,10 +207,11 @@ interface_body: interface_member*
 
 class_member: visibility_spec
             | visibility_spec? class_member_item
-class_member_item: field_decl ";"
+class_member_item: field_decl ";"?
                  | routine_decl
                  | property_decl
                  | class_var_section
+                 | class_threadvar_section
                  | class_const_section
                  | class_type_section
                  | var_section
@@ -189,6 +221,7 @@ class_member_item: field_decl ";"
                  | variant_part
 
 class_var_section: CLASS VAR var_decl+
+class_threadvar_section: CLASS THREADVAR var_decl+
 class_const_section: CLASS CONST const_decl+
 class_type_section: CLASS TYPE type_decl+
 
@@ -204,10 +237,12 @@ variant_part: CASE variant_selector? OF variant_section (";" variant_section)* "
 variant_selector: NAME ":" type_spec
                 | type_spec
 variant_section: case_label_list ":" "(" field_list? ")"
-field_list: field_decl (";" field_decl)* ";"?
-field_decl: attribute_sections? name_list ":" type_spec
+field_list: record_field (";" record_field)* ";"?
+record_field: field_decl | variant_part
+field_decl: attribute_sections? name_list ":" type_spec proc_type_decl_directive?
 
-proc_type: (PROCEDURE | FUNCTION) formal_parameters? (":" type_spec)? directive_list? of_object?
+proc_type: (PROCEDURE | FUNCTION) formal_parameters? (":" type_spec)? of_object?
+proc_type_decl_directive: PROC_TYPE_DIRECTIVE
 of_object: OF OBJECT
 
 type_heritage: "(" type_name ("," type_name)* ")"
@@ -226,8 +261,8 @@ attribute_name: qualified_name | attribute_keyword
 attribute_keyword: IN | OUT | CONST | VAR | UNSAFE
 attribute_arguments: "(" arg_list? ")"
 
-directive_list: directive (";" directive)* ";"?
-body_directive_list: body_directive (";" body_directive)* ";"?
+directive_list: directive ((";" directive) | proc_type_decl_directive)* ";"?
+body_directive_list: body_directive ((";" body_directive) | proc_type_decl_directive)* ";"?
 body_directive: OVERLOAD | OVERRIDE | VIRTUAL | DYNAMIC | ABSTRACT | INLINE | REINTRODUCE | STATIC | FINAL | SEALED
               | STDCALL | CDECL | PASCAL | REGISTER | SAFECALL | WINAPI | MESSAGE expr
               | DEPRECATED (STRING_LITERAL)?
@@ -264,14 +299,16 @@ external_spec: external_item+
 external_item: INDEX expr | DELAYED | expr
 
 const_value: expr | array_const | record_const
-array_const: "(" expr_list? ")"
-record_const: "(" record_const_item ("," record_const_item)* ")"
+array_const: "(" const_value_list? ")"
+const_value_list: const_value ("," const_value)*
+record_const: "(" record_const_item ((","|";") record_const_item)* ";"? ")"
 record_const_item: NAME ":" const_value
 set_const: "[" set_element_list? "]"
 set_element_list: set_element ("," set_element)*
 set_element: expr (".." expr)?
 
-?statement_list: statement (";" statement)* ";"?
+?statement_list: ";"* statement (";"+ statement)* ";"*
+               | ";"+
 
 ?statement: compound_statement
           | if_statement
@@ -288,26 +325,29 @@ set_element: expr (".." expr)?
           | inline_const_section
           | goto_statement
           | label_statement
-          | inherited_statement
+          | address_assignment
           | assignment
+          | comparison_statement
           | call_statement
           | break_statement
           | continue_statement
           | exit_statement
 
 compound_statement: BEGIN statement_list? END
-if_statement: IF expr THEN statement (ELSE statement)?
-while_statement: WHILE expr DO statement
+if_statement: IF expr THEN statement? (ELSE statement?)?
+while_statement: WHILE expr DO statement?
 for_statement: FOR for_init (TO|DOWNTO) expr DO statement
              | FOR for_in DO statement
 for_init: NAME ASSIGN expr
         | VAR NAME ASSIGN expr
+        | VAR NAME ":" type_spec ASSIGN expr
 for_in: NAME IN expr
       | VAR NAME IN expr
-repeat_statement: REPEAT statement_list UNTIL expr
+      | VAR NAME ":" type_spec IN expr
+repeat_statement: REPEAT statement_list? UNTIL expr
 case_statement: CASE expr OF case_selector_list case_else? END
 case_selector_list: case_selector (";" case_selector)* ";"?
-case_selector: case_label_list ":" statement
+case_selector: case_label_list ":" statement?
 case_label_list: case_label ("," case_label)*
 case_label: expr (".." expr)?
 case_else: ELSE statement_list?
@@ -320,13 +360,15 @@ exception_handler: ON qualified_name (":" qualified_name)? DO statement_list?
 finally_block: FINALLY statement_list?
 raise_statement: RAISE expr? (AT expr)?
 goto_statement: GOTO label
-label_statement: label ":" statement
+label_statement: label ":" statement?
 inherited_statement: INHERITED call_statement?
 break_statement: BREAK
 continue_statement: CONTINUE
-exit_statement: EXIT (expr)?
+exit_statement: EXIT
+              | EXIT "(" ")"
+              | EXIT expr
 asm_statement: ASM asm_item* END
-asm_item: NAME | INT | HEX_INT | BIN_INT | FLOAT | STRING_LITERAL | CHAR_CODE | "." | "," | ":" | "+" | "-" | "*" | "/" | "[" | "]" | "(" | ")" | "@" | "^" | "="
+asm_item: NAME | INT | HEX_INT | BIN_INT | FLOAT | STRING_LITERAL | CHAR_CODE | "." | "," | ":" | ";" | "+" | "-" | "*" | "/" | "[" | "]" | "(" | ")" | "@" | "^" | "="
 inline_statement: INLINE "(" inline_number ("/" inline_number)* ")"
 inline_number: INT | HEX_INT
 inline_const_section: CONST inline_const_decl
@@ -334,7 +376,9 @@ inline_const_decl: attribute_sections? NAME (":" type_spec)? "=" const_value
 inline_var_section: VAR inline_var_decl
 inline_var_decl: attribute_sections? name_list (":" type_spec)? (ASSIGN expr)?
 
+address_assignment: "@" postfix_expr ASSIGN expr
 assignment: postfix_expr ASSIGN expr
+comparison_statement: postfix_expr rel_op expr
 call_statement: postfix_expr
 
 ?expr_list: expr ("," expr)*
@@ -357,34 +401,56 @@ is_not_op: IS NOT
 ?postfix_expr: primary (call_suffix | index_suffix | field_suffix | deref_suffix)*
 call_suffix: "(" arg_list? ")"
 index_suffix: "[" expr_list "]"
-field_suffix: "." NAME
+field_suffix: "." (NAME | GENERIC_NAME | ADD | REMOVE | READ | WRITE | DEFAULT | STORED | INDEX | MESSAGE | DISPID | ABSOLUTE)
 deref_suffix: "^"
 arg_list: argument ("," argument)*
-argument: NAME ":" expr | expr
+argument: named_formatted_argument | formatted_argument | NAME ":" expr | NAME ASSIGN expr | expr
+named_formatted_argument: NAME ":" expr ":" expr
+formatted_argument: expr ":" expr (":" expr)?
 
 ?primary: literal
         | expr_qualified_name
         | set_const
         | anonymous_method
+        | inherited_expr
         | "(" expr ")"
         | NIL
         | TRUE
         | FALSE
         | SELF
 
+inherited_expr: INHERITED postfix_expr?
 anonymous_method: (PROCEDURE formal_parameters? | FUNCTION formal_parameters? ":" type_spec) block
 
-literal: STRING_BLOCK5 | STRING_BLOCK3 | STRING_LITERAL | CHAR_CODE | POINTER_CHAR | FLOAT | HEX_INT | BIN_INT | INT
+literal: string_literal_sequence | numeric_literal
+string_literal_sequence: string_literal_part+
+string_literal_part: STRING_BLOCK5 | STRING_BLOCK3 | STRING_LITERAL | CHAR_CODE | POINTER_CHAR
+numeric_literal: FLOAT | HEX_INT | BIN_INT | INT
 
 expr_qualified_name: expr_identifier ("." expr_identifier)*
-expr_identifier: NAME | GENERIC_NAME
+expr_identifier: NAME | GENERIC_NAME | SPACED_GENERIC_NAME
+               | ADD | REMOVE | READ | WRITE | DEFAULT | STORED | INDEX | MESSAGE | DISPID | ABSOLUTE
 
 qualified_name: qualified_name_part ("." qualified_name_part)*
 qualified_name_part: NAME | GENERIC_NAME
 
-?range_expr: range_unary
-?range_unary: ("+"|"-") range_unary | range_primary
-?range_primary: literal | qualified_name | "(" range_expr ")"
+?range_expr: range_add
+?range_add: range_mul (range_add_op range_mul)* -> add_expr
+range_add_op: "+" -> op_add
+            | "-" -> op_sub
+?range_mul: range_unary (range_mul_op range_unary)* -> mul_expr
+range_mul_op: "*" -> op_mul
+            | "/" -> op_fdiv
+            | DIV -> op_div
+            | MOD -> op_mod
+            | SHL -> op_shl
+            | SHR -> op_shr
+?range_unary: ("+"|"-") range_unary -> unary_expr
+            | range_postfix
+range_postfix: range_primary range_call_suffix*
+range_call_suffix: "(" range_arg_list? ")"
+range_arg_list: range_expr ("," range_expr)*
+range_primary: literal | qualified_name | "(" range_expr ")"
 
 ASSIGN: ":="
 '''

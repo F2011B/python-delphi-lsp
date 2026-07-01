@@ -338,7 +338,7 @@ class SemanticBuilder:
         symbol = Symbol(
             name=name,
             kind=kind,
-            decl_range=self._node_range(node),
+            decl_range=self._node_tree_range(node),
             name_range=self._node_range(node),
             scope=scope,
             visibility=visibility,
@@ -498,8 +498,9 @@ class SemanticBuilder:
             elem = self._type_from_node(type_node.find_node(SyntaxNodeType.ntType))
             return SetTypeRef(element_type=elem), SymbolKind.TYPE
         if type_tag == 'array':
-            elem = self._type_from_node(type_node.find_node(SyntaxNodeType.ntType))
-            return ArrayTypeRef(element_type=elem, is_dynamic=True), SymbolKind.TYPE
+            return self._type_from_node(type_node), SymbolKind.TYPE
+        if type_tag == 'distinct':
+            return self._type_from_node(type_node), SymbolKind.TYPE
         if name_tag == 'subrange':
             lower, upper = self._subrange_bounds(type_node)
             return SubrangeTypeRef(lower=lower, upper=upper), SymbolKind.TYPE
@@ -595,6 +596,9 @@ class SemanticBuilder:
         if type_tag == 'packed':
             target = node.find_node(SyntaxNodeType.ntType)
             return self._type_from_node(target)
+        if type_tag == 'distinct':
+            target = node.find_node(SyntaxNodeType.ntType)
+            return self._type_from_node(target)
         if type_tag in {'procedure', 'function'}:
             return self._proc_type_from_node(node, type_tag)
         if name == 'subrange':
@@ -603,7 +607,7 @@ class SemanticBuilder:
 
         type_args_node = node.find_node(SyntaxNodeType.ntTypeArgs)
         if name:
-            base = self._named_type_ref(name)
+            base = self._type_ref_from_name(name)
             if type_args_node is not None:
                 args = tuple(
                     self._type_from_node(child)
@@ -614,6 +618,88 @@ class SemanticBuilder:
                     return GenericInstanceTypeRef(base=base, args=args)
             return base
         return UnknownTypeRef('unresolved type')
+
+    def _type_ref_from_name(self, name: str) -> TypeRef:
+        generic = self._generic_name_parts(name)
+        if generic is None:
+            return self._named_type_ref(name)
+        base_name, arg_names = generic
+        base = self._named_type_ref(base_name)
+        args = tuple(self._type_ref_from_name(arg_name) for arg_name in arg_names)
+        if isinstance(base, NamedTypeRef):
+            return GenericInstanceTypeRef(base=base, args=args)
+        return self._named_type_ref(name)
+
+    def _generic_name_parts(self, name: str) -> Optional[tuple[str, tuple[str, ...]]]:
+        text = name.strip()
+        open_index = text.find('<')
+        if open_index <= 0 or not text.endswith('>'):
+            return None
+        depth = 0
+        for index, ch in enumerate(text[open_index:], start=open_index):
+            if ch == '<':
+                depth += 1
+            elif ch == '>':
+                depth -= 1
+                if depth == 0 and index != len(text) - 1:
+                    return None
+                if depth < 0:
+                    return None
+        if depth != 0:
+            return None
+        base_name = text[:open_index].strip()
+        if not base_name:
+            return None
+        args = self._split_top_level_type_args(text[open_index + 1 : -1])
+        if not args:
+            return None
+        return base_name, tuple(args)
+
+    def _split_top_level_type_args(self, text: str) -> list[str]:
+        args: list[str] = []
+        current: list[str] = []
+        angle = 0
+        square = 0
+        round_ = 0
+        in_string = False
+        index = 0
+        while index < len(text):
+            ch = text[index]
+            if ch == "'":
+                current.append(ch)
+                if in_string and index + 1 < len(text) and text[index + 1] == "'":
+                    current.append(text[index + 1])
+                    index += 2
+                    continue
+                in_string = not in_string
+                index += 1
+                continue
+            if not in_string:
+                if ch == '<':
+                    angle += 1
+                elif ch == '>':
+                    angle = max(0, angle - 1)
+                elif ch == '[':
+                    square += 1
+                elif ch == ']':
+                    square = max(0, square - 1)
+                elif ch == '(':
+                    round_ += 1
+                elif ch == ')':
+                    round_ = max(0, round_ - 1)
+                elif ch == ',' and angle == 0 and square == 0 and round_ == 0:
+                    arg = ''.join(current).strip()
+                    if arg:
+                        args.append(arg)
+                    current = []
+                    index += 1
+                    continue
+            current.append(ch)
+            index += 1
+        arg = ''.join(current).strip()
+        if arg:
+            args.append(arg)
+        return args
 
     def _proc_type_from_node(self, node: SyntaxNode, kind: str) -> TypeRef:
         params = node.find_node(SyntaxNodeType.ntParameters)
@@ -1175,6 +1261,85 @@ class SemanticBuilder:
         name = node.get_attribute(AttributeName.anName)
         if name:
             return name
+        binary_ops = {
+            SyntaxNodeType.ntAdd: '+',
+            SyntaxNodeType.ntSub: '-',
+            SyntaxNodeType.ntMul: '*',
+            SyntaxNodeType.ntFDiv: '/',
+            SyntaxNodeType.ntDiv: 'div',
+            SyntaxNodeType.ntMod: 'mod',
+            SyntaxNodeType.ntShl: 'shl',
+            SyntaxNodeType.ntShr: 'shr',
+            SyntaxNodeType.ntAnd: 'and',
+            SyntaxNodeType.ntOr: 'or',
+            SyntaxNodeType.ntXor: 'xor',
+            SyntaxNodeType.ntEqual: '=',
+            SyntaxNodeType.ntNotEqual: '<>',
+            SyntaxNodeType.ntLower: '<',
+            SyntaxNodeType.ntLowerEqual: '<=',
+            SyntaxNodeType.ntGreater: '>',
+            SyntaxNodeType.ntGreaterEqual: '>=',
+            SyntaxNodeType.ntIn: 'in',
+            SyntaxNodeType.ntIs: 'is',
+            SyntaxNodeType.ntAs: 'as',
+            SyntaxNodeType.ntNotIn: 'not in',
+            SyntaxNodeType.ntIsNot: 'is not',
+        }
+        if node.typ in binary_ops and len(node.child_nodes) >= 2:
+            left = self._expr_to_text(node.child_nodes[0])
+            right = self._expr_to_text(node.child_nodes[1])
+            if left and right:
+                return f'{left} {binary_ops[node.typ]} {right}'
+        if node.typ == SyntaxNodeType.ntUnaryMinus and node.child_nodes:
+            inner = self._expr_to_text(node.child_nodes[0])
+            return f'-{inner}' if inner else ''
+        if node.typ == SyntaxNodeType.ntNot and node.child_nodes:
+            inner = self._expr_to_text(node.child_nodes[0])
+            return f'not {inner}' if inner else ''
+        if node.typ in {SyntaxNodeType.ntAddr, SyntaxNodeType.ntDeref} and node.child_nodes:
+            inner = self._expr_to_text(node.child_nodes[0])
+            if not inner:
+                return ''
+            return f'@{inner}' if node.typ == SyntaxNodeType.ntAddr else f'^{inner}'
+        if node.typ == SyntaxNodeType.ntCall and node.child_nodes:
+            callee = self._expr_to_text(node.child_nodes[0])
+            args_node = node.find_node(SyntaxNodeType.ntArguments)
+            args = []
+            if args_node is not None:
+                for child in args_node.child_nodes:
+                    text = self._expr_to_text(child)
+                    if text:
+                        args.append(text)
+            return f'{callee}({", ".join(args)})' if callee else ''
+        if node.typ == SyntaxNodeType.ntNamedArgument and node.child_nodes:
+            arg_name = self._attr(node, AttributeName.anName)
+            value = self._expr_to_text(node.child_nodes[0])
+            if arg_name and value:
+                return f'{arg_name}: {value}'
+        if node.typ == SyntaxNodeType.ntPositionalArgument and node.child_nodes:
+            return self._expr_to_text(node.child_nodes[0])
+        if node.typ == SyntaxNodeType.ntDot and len(node.child_nodes) >= 2:
+            left = self._expr_to_text(node.child_nodes[0])
+            right = self._expr_to_text(node.child_nodes[1])
+            if left and right:
+                return f'{left}.{right}'
+        if node.typ == SyntaxNodeType.ntIndexed and node.child_nodes:
+            base = self._expr_to_text(node.child_nodes[0])
+            exprs_node = node.find_node(SyntaxNodeType.ntExpressions)
+            parts = []
+            if exprs_node is not None:
+                for child in exprs_node.child_nodes:
+                    text = self._expr_to_text(child)
+                    if text:
+                        parts.append(text)
+            return f'{base}[{", ".join(parts)}]' if base else ''
+        if node.typ == SyntaxNodeType.ntExpression and self._attr(node, AttributeName.anKind) == 'format':
+            parts = []
+            for child in node.child_nodes:
+                text = self._expr_to_text(child)
+                if text:
+                    parts.append(text)
+            return ':'.join(parts)
         return ''
 
     def _node_range(self, node: SyntaxNode) -> SourceRange:
@@ -1193,6 +1358,20 @@ class SemanticBuilder:
             end_line=node.line,
             end_col=node.col,
         )
+
+    def _node_tree_range(self, node: SyntaxNode) -> SourceRange:
+        result = self._node_range(node)
+        for child in node.child_nodes:
+            child_range = self._node_tree_range(child)
+            if (child_range.end_line, child_range.end_col) > (result.end_line, result.end_col):
+                result = SourceRange(
+                    file_name=result.file_name,
+                    start_line=result.start_line,
+                    start_col=result.start_col,
+                    end_line=child_range.end_line,
+                    end_col=child_range.end_col,
+                )
+        return result
 
     def _visibility_map(self) -> dict[SyntaxNodeType, Visibility]:
         return {

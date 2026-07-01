@@ -28,6 +28,8 @@ classifiers = [
 ]
 dependencies = [
   "lark>=1.1.9",
+  "pygls>=1.3.0,<2.0",
+  "lsprotocol>=2023.0.1",
 ]
 
 [project.optional-dependencies]

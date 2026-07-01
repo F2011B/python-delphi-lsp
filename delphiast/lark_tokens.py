@@ -196,19 +196,25 @@ KEYWORD_TERMINALS = "\n".join(_keyword_terminal(k) for k in KEYWORDS)
 
 
 BASE_TERMINALS = r"""
+PROC_TYPE_DIRECTIVE.3: /;[ \t\r\n]*(?i:(cdecl|stdcall|pascal|register|safecall|winapi|varargs))(?:[ \t\r\n]+(?i:varargs))?(?!\w)/
+EMPTY_USES_BEFORE_IMPLEMENTATION.4: /(?i:uses)(?=[ \t\r\n]+implementation\b)/
+COMPILER_ERROR_TEXT.1: /(?![^\r\n]*[:;=])(?:[A-Za-z]+[ \t]+){2,}[A-Za-z][^\r\n]*/
+
 // literals
-STRING_BLOCK5: /(?s:'''''(?:.*?)''''')/
-STRING_BLOCK3: /(?s:'''(?:.*?)''')/
+STRING_BLOCK5: /(?s:'''''(?=\r?\n).*?''''')/
+STRING_BLOCK3: /(?s:'''(?=\r?\n).*?''')/
 STRING_LITERAL: /(?s:'(?:''|[^'])*')/
 CHAR_CODE: /#\$[0-9A-Fa-f_]+|#[0-9_]+/
-POINTER_CHAR: /\^[A-Za-z\\]/
+POINTER_CHAR.0: /\^[A-Za-z\\](?![A-Za-z0-9_])/
 HEX_INT: /\$[0-9A-Fa-f_]+/
 BIN_INT: /%[01_]+/
 FLOAT: /(?:[0-9][0-9_]*\.(?!\.)[0-9_]*([eE][+-]?[0-9_]+)?|[0-9][0-9_]*[eE][+-]?[0-9_]+)/
 INT: /[0-9][0-9_]*/
 
 // identifiers
-GENERIC_NAME: /&?(?:[_]|[^\W\d_])[\w]*<(?:[^<>\r\n]+|<(?:[^<>\r\n]+|<(?:[^<>\r\n]+|<[^<>\r\n]*>)*>)*>)*>/
+STRICT_NAME.3: /(?i:strict)(?=\s*[:,])/
+SPACED_GENERIC_NAME: /&?(?:[_]|[^\W\d_])[\w]*\s*<[^;\r\n]*>\s*(?=\.)/
+GENERIC_NAME: /&?(?:[_]|[^\W\d_])[\w]*<(?:[^<>\r\n]+|<(?:[^<>\r\n]+|<(?:[^<>\r\n]+|<[^<>\r\n]*>)*>)*>)+>/
 NAME: /&?(?:[_]|[^\W\d_])[\w]*/
 
 // comments

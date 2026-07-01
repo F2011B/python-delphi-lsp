@@ -1,0 +1,245 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "ollama/ornith-lspctx",
+  "small_model": "ollama/ornith-lspctx",
+  "agent": {
+    "vllm-lsp": {
+      "description": "Use only the Delphi LSP tool for vLLM verification.",
+      "tools": {
+        "lsp": true,
+        "bash": false,
+        "read": false,
+        "glob": false,
+        "grep": false,
+        "edit": false,
+        "write": false,
+        "task": false,
+        "webfetch": false,
+        "todowrite": false,
+        "skill": false
+      }
+    },
+    "vllm-lsp-edit": {
+      "description": "Use Delphi LSP first, then allow a focused edit for vLLM verification.",
+      "tools": {
+        "lsp": true,
+        "edit": true,
+        "bash": false,
+        "read": false,
+        "glob": false,
+        "grep": false,
+        "write": true,
+        "task": false,
+        "webfetch": false,
+        "todowrite": false,
+        "skill": false
+      }
+    }
+  },
+  "provider": {
+    "vllm": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Ornith via local vLLM Metal endpoint",
+      "options": {
+        "baseURL": "http://127.0.0.1:8001/v1",
+        "apiKey": "vllm",
+        "timeout": false,
+        "headerTimeout": false,
+        "chunkTimeout": 120000
+      },
+      "models": {
+        "ornith-vllm-metal": {
+          "id": "ornith-vllm-metal",
+          "name": "Ornith 1.0 9B via vLLM Metal 262k endpoint",
+          "attachment": false,
+          "reasoning": false,
+          "temperature": true,
+          "tool_call": true,
+          "limit": {
+            "context": 262144,
+            "output": 4096
+          },
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          }
+        },
+        "ornith-smallctx": {
+          "id": "ornith-vllm-metal",
+          "name": "Ornith 1.0 9B via vLLM Metal with 32768-token opencode test limit",
+          "attachment": false,
+          "reasoning": false,
+          "temperature": true,
+          "tool_call": true,
+          "limit": {
+            "context": 32768,
+            "output": 2048
+          },
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          }
+        },
+        "ornith-lspctx": {
+          "id": "ornith-vllm-metal",
+          "name": "Ornith 1.0 9B via vLLM Metal with verified 44352-token LSP context alias",
+          "attachment": false,
+          "reasoning": false,
+          "temperature": true,
+          "tool_call": true,
+          "limit": {
+            "context": 44352,
+            "output": 4096
+          },
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          }
+        }
+      }
+    },
+    "ollama": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Ollama Ornith local OpenAI-compatible endpoint",
+      "options": {
+        "baseURL": "http://127.0.0.1:11434/v1",
+        "apiKey": "ollama",
+        "timeout": false,
+        "headerTimeout": false,
+        "chunkTimeout": 120000
+      },
+      "models": {
+        "ornith:latest": {
+          "id": "ornith:latest",
+          "name": "Ornith latest via Ollama OpenAI-compatible endpoint",
+          "attachment": false,
+          "reasoning": true,
+          "temperature": true,
+          "tool_call": true,
+          "limit": {
+            "context": 262144,
+            "output": 4096
+          },
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          }
+        },
+        "ornith-smallctx": {
+          "id": "ornith-smallctx:latest",
+          "name": "Ornith latest via Ollama local 32768-token context alias",
+          "attachment": false,
+          "reasoning": true,
+          "temperature": true,
+          "tool_call": true,
+          "limit": {
+            "context": 32768,
+            "output": 2048
+          },
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          }
+        },
+        "ornith-lspctx": {
+          "id": "ornith-lspctx:latest",
+          "name": "Ornith latest via Ollama local 131072-token LSP context alias",
+          "attachment": false,
+          "reasoning": true,
+          "temperature": true,
+          "tool_call": true,
+          "limit": {
+            "context": 131072,
+            "output": 4096
+          },
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          }
+        }
+      }
+    },
+    "lmstudio": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "LM Studio Ornith local endpoint",
+      "options": {
+        "baseURL": "http://127.0.0.1:1234/v1",
+        "apiKey": "lm-studio",
+        "timeout": false,
+        "headerTimeout": false,
+        "chunkTimeout": 120000
+      },
+      "models": {
+        "ornith-1.0-9b-mlx": {
+          "id": "ornith-1.0-9b-mlx",
+          "name": "Ornith 1.0 9B MLX via local OpenAI-compatible endpoint",
+          "attachment": false,
+          "reasoning": false,
+          "temperature": true,
+          "tool_call": true,
+          "limit": {
+            "context": 8192,
+            "output": 4096
+          },
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "lsp": {
+    "delphi": {
+      "command": [
+        ".venv/bin/python",
+        "-m",
+        "delphiast.lsp_server"
+      ],
+      "extensions": [
+        ".pas",
+        ".dpr",
+        ".dpk",
+        ".inc"
+      ],
+      "env": {
+        "PYTHONPATH": "."
+      },
+      "initialization": {
+        "includePaths": [
+          "tests/fixtures",
+          "tests/fixtures/legacy_snippets"
+        ],
+        "defines": []
+      }
+    }
+  }
+}

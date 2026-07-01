@@ -27,6 +27,8 @@ def build_syntax_tree(
         if token_type is None or token_type in {
             'NAME',
             'GENERIC_NAME',
+            'SPACED_GENERIC_NAME',
+            'STRICT_NAME',
             'STRING_LITERAL',
             'STRING_BLOCK3',
             'STRING_BLOCK5',
@@ -73,6 +75,15 @@ def build_syntax_tree(
             root.set_attribute(AttributeName.anName, unit_name)
             self._apply_decl_directives(root, directives)
             for child in children:
+                if isinstance(child, SyntaxNode):
+                    root.add_child(child)
+            return root
+
+        def include_file(self, meta: Any, *children: Any) -> SyntaxNode:
+            name = file_name.replace('\\', '/').rsplit('/', 1)[-1].rsplit('.', 1)[0] or 'include'
+            root = self._make_node(SyntaxNodeType.ntUnit, meta)
+            root.set_attribute(AttributeName.anName, name)
+            for child in self._flatten(children):
                 if isinstance(child, SyntaxNode):
                     root.add_child(child)
             return root
@@ -149,6 +160,9 @@ def build_syntax_tree(
                             node.add_child(item)
             return node
 
+        def interface_preamble(self, meta: Any, *_: Any) -> None:
+            return None
+
         def implementation_section(self, meta: Any, *children: Any) -> SyntaxNode:
             node = self._make_compound(SyntaxNodeType.ntImplementation, meta)
             for child in children:
@@ -170,6 +184,9 @@ def build_syntax_tree(
                         if isinstance(item, SyntaxNode):
                             node.add_child(item)
             return node
+
+        def bare_initialization_section(self, meta: Any, *children: Any) -> SyntaxNode:
+            return self.initialization_section(meta, *children)
 
         def finalization_section(self, meta: Any, *children: Any) -> SyntaxNode:
             node = self._make_compound(SyntaxNodeType.ntFinalization, meta)
@@ -198,6 +215,12 @@ def build_syntax_tree(
 
         def implementation_decl_sections(self, meta: Any, *children: Any) -> list[SyntaxNode]:
             return self.decl_sections(meta, *children)
+
+        def ignored_proc_type_directive(self, meta: Any, *_: Any) -> None:
+            return None
+
+        def ignored_compiler_error_line(self, meta: Any, *_: Any) -> None:
+            return None
 
         def block_decl_sections(self, meta: Any, *children: Any) -> list[SyntaxNode]:
             return self.decl_sections(meta, *children)
@@ -307,12 +330,23 @@ def build_syntax_tree(
             node.set_attribute(AttributeName.anKind, 'threadvar')
             return node
 
+        def class_var_section(self, meta: Any, *children: Any) -> SyntaxNode:
+            node = self.var_section(meta, *children)
+            node.set_attribute(AttributeName.anKind, 'class var')
+            return node
+
+        def class_threadvar_section(self, meta: Any, *children: Any) -> SyntaxNode:
+            node = self.var_section(meta, *children)
+            node.set_attribute(AttributeName.anKind, 'class threadvar')
+            return node
+
         def var_decl(self, meta: Any, *children: Any) -> list[SyntaxNode]:
             names: list[str] = []
             type_node = None
             value_expr = None
             absolute_expr = None
             attributes: list[SyntaxNode] = []
+            directives: dict[str, str] = {}
             for child in children:
                 if isinstance(child, SyntaxNode) and child.typ == SyntaxNodeType.ntAttributes:
                     attributes.append(child)
@@ -320,6 +354,8 @@ def build_syntax_tree(
                     names = child
                 elif isinstance(child, SyntaxNode) and child.typ == SyntaxNodeType.ntType:
                     type_node = child
+                elif isinstance(child, dict):
+                    directives.update(child)
                 elif isinstance(child, SyntaxNode) and child.typ == SyntaxNodeType.ntAbsolute:
                     absolute_expr = child
                 elif isinstance(child, SyntaxNode):
@@ -327,6 +363,8 @@ def build_syntax_tree(
             variables: list[SyntaxNode] = []
             if type_node is None:
                 return variables
+            if directives:
+                self._apply_directives(type_node, directives)
             for name in names:
                 node = self._make_node(SyntaxNodeType.ntVariable, meta)
                 node.add_child(self._make_valued(SyntaxNodeType.ntName, name, meta))
@@ -342,9 +380,11 @@ def build_syntax_tree(
                 variables.append(node)
             return variables
 
-        def absolute_spec(self, meta: Any, expr: SyntaxNode) -> SyntaxNode:
+        def absolute_spec(self, meta: Any, *children: Any) -> SyntaxNode:
             node = self._make_node(SyntaxNodeType.ntAbsolute, meta)
-            node.add_child(expr)
+            for child in children:
+                if isinstance(child, SyntaxNode):
+                    node.add_child(child)
             return node
 
         def type_section(self, meta: Any, *children: Any) -> SyntaxNode:
@@ -386,8 +426,35 @@ def build_syntax_tree(
                 node.add_child(attr)
             if type_params is not None:
                 node.add_child(type_params)
+            if directives:
+                self._apply_directives(type_node, directives)
             node.add_child(type_node)
             self._apply_decl_directives(node, directives)
+            return node
+
+        def incomplete_type_decl(self, meta: Any, *children: Any) -> SyntaxNode:
+            name = None
+            type_params = None
+            attributes: list[SyntaxNode] = []
+            for child in children:
+                if isinstance(child, SyntaxNode) and child.typ == SyntaxNodeType.ntAttributes:
+                    attributes.append(child)
+                elif isinstance(child, SyntaxNode) and child.typ == SyntaxNodeType.ntTypeParams:
+                    type_params = child
+                elif self._is_text(child):
+                    name = child
+                elif is_token(child) and child.type in {'NAME', 'GENERIC_NAME'}:
+                    name = child.value
+            node = self._make_compound(SyntaxNodeType.ntTypeDecl, meta)
+            if name is not None:
+                node.set_attribute(AttributeName.anName, name)
+            for attr in attributes:
+                node.add_child(attr)
+            if type_params is not None:
+                node.add_child(type_params)
+            unknown = self._make_node(SyntaxNodeType.ntType, meta)
+            unknown.set_attribute(AttributeName.anType, 'unknown')
+            node.add_child(unknown)
             return node
 
         def type_decl_name(self, meta: Any, token: Any) -> str:
@@ -444,6 +511,18 @@ def build_syntax_tree(
         def pointer_type(self, meta: Any, *children: Any) -> SyntaxNode:
             node = self._make_node(SyntaxNodeType.ntType, meta)
             node.set_attribute(AttributeName.anType, 'pointer')
+            for child in children:
+                if isinstance(child, SyntaxNode):
+                    node.add_child(child)
+                elif is_token(child) and child.type == 'POINTER_CHAR':
+                    target = self._make_node(SyntaxNodeType.ntType, meta)
+                    target.set_attribute(AttributeName.anName, child.value[1:])
+                    node.add_child(target)
+            return node
+
+        def distinct_type(self, meta: Any, *children: Any) -> SyntaxNode:
+            node = self._make_node(SyntaxNodeType.ntType, meta)
+            node.set_attribute(AttributeName.anType, 'distinct')
             for child in children:
                 if isinstance(child, SyntaxNode):
                     node.add_child(child)
@@ -580,6 +659,30 @@ def build_syntax_tree(
         def forward_class_decl(self, meta: Any, *children: Any) -> SyntaxNode:
             node = self._make_node(SyntaxNodeType.ntType, meta)
             node.set_attribute(AttributeName.anType, 'class')
+            for child in children:
+                if isinstance(child, SyntaxNode):
+                    node.add_child(child)
+                elif isinstance(child, list):
+                    for item in child:
+                        if isinstance(item, SyntaxNode):
+                            node.add_child(item)
+            return node
+
+        def forward_interface_decl(self, meta: Any, *children: Any) -> SyntaxNode:
+            node = self._make_node(SyntaxNodeType.ntType, meta)
+            node.set_attribute(AttributeName.anType, 'interface')
+            for child in children:
+                if isinstance(child, SyntaxNode):
+                    node.add_child(child)
+                elif isinstance(child, list):
+                    for item in child:
+                        if isinstance(item, SyntaxNode):
+                            node.add_child(item)
+            return node
+
+        def forward_dispinterface_decl(self, meta: Any, *children: Any) -> SyntaxNode:
+            node = self._make_node(SyntaxNodeType.ntType, meta)
+            node.set_attribute(AttributeName.anType, 'dispinterface')
             for child in children:
                 if isinstance(child, SyntaxNode):
                     node.add_child(child)
@@ -763,6 +866,7 @@ def build_syntax_tree(
             names: list[str] = []
             type_node = None
             attributes: list[SyntaxNode] = []
+            directives: dict[str, str] = {}
             for child in children:
                 if isinstance(child, SyntaxNode) and child.typ == SyntaxNodeType.ntAttributes:
                     attributes.append(child)
@@ -770,9 +874,13 @@ def build_syntax_tree(
                     names = child
                 elif isinstance(child, SyntaxNode) and child.typ == SyntaxNodeType.ntType:
                     type_node = child
+                elif isinstance(child, dict):
+                    directives.update(child)
             fields: list[SyntaxNode] = []
             if type_node is None:
                 return fields
+            if directives:
+                self._apply_directives(type_node, directives)
             for name in names:
                 field = self._make_node(SyntaxNodeType.ntField, meta)
                 field.add_child(self._make_valued(SyntaxNodeType.ntName, name, meta))
@@ -802,6 +910,13 @@ def build_syntax_tree(
                 return_node.add_child(return_type)
                 node.add_child(return_node)
             return node
+
+        def proc_type_decl_directive(self, meta: Any, *children: Any) -> dict[str, str]:
+            for child in children:
+                if is_token(child):
+                    values = child.value.lstrip(';').strip().casefold().split()
+                    return self._proc_type_directive_attrs(values)
+            return {}
 
         def visibility_spec(self, meta: Any, *children: Any) -> SyntaxNode:
             token = None
@@ -1072,8 +1187,11 @@ def build_syntax_tree(
                         if isinstance(item, SyntaxNode):
                             nodes.append(item)
                 elif isinstance(child, SyntaxNode):
-                    nodes.append(child)
+                        nodes.append(child)
             return nodes
+
+        def asm_block(self, meta: Any, *children: Any) -> list[SyntaxNode]:
+            return self.block(meta, *children)
 
         def directive_list(self, meta: Any, *children: Any) -> dict[str, str]:
             attrs: dict[str, str] = {}
@@ -1081,12 +1199,26 @@ def build_syntax_tree(
                 if isinstance(child, tuple):
                     key, value = child
                     attrs[key] = value
+                elif isinstance(child, dict):
+                    attrs.update(child)
             return attrs
 
         def body_directive_list(self, meta: Any, *children: Any) -> dict[str, str]:
             return self.directive_list(meta, *children)
 
         def body_directive(self, meta: Any, *children: Any) -> tuple[str, str]:
+            return self.directive(meta, *children)
+
+        def routine_heading_directive_list(self, meta: Any, *children: Any) -> dict[str, str]:
+            attrs: dict[str, str] = {}
+            for child in children:
+                if isinstance(child, tuple):
+                    key, value = child
+                    if key:
+                        attrs[key] = value
+            return attrs
+
+        def routine_heading_directive(self, meta: Any, *children: Any) -> tuple[str, str]:
             return self.directive(meta, *children)
 
         def directive(self, meta: Any, *children: Any) -> tuple[str, str]:
@@ -1264,6 +1396,8 @@ def build_syntax_tree(
             return node
 
         def literal(self, meta: Any, token: Any) -> SyntaxNode:
+            if isinstance(token, SyntaxNode):
+                return token
             value = token_value(token)
             node = self._make_valued(SyntaxNodeType.ntLiteral, value, meta)
             if is_token(token):
@@ -1274,6 +1408,29 @@ def build_syntax_tree(
                     node.set_attribute(AttributeName.anType, 'char')
                 else:
                     node.set_attribute(AttributeName.anType, 'numeric')
+            return node
+
+        def string_literal_sequence(self, meta: Any, *children: Any) -> SyntaxNode:
+            parts: list[str] = []
+            for child in children:
+                if not is_token(child):
+                    continue
+                value = token_value(child)
+                if child.type in {'STRING_LITERAL', 'STRING_BLOCK3', 'STRING_BLOCK5'}:
+                    parts.append(self._dequote_string(value))
+                else:
+                    parts.append(value)
+            node = self._make_valued(SyntaxNodeType.ntLiteral, ''.join(parts), meta)
+            node.set_attribute(AttributeName.anType, 'string')
+            return node
+
+        def string_literal_part(self, meta: Any, token: Any) -> Any:
+            return token
+
+        def numeric_literal(self, meta: Any, token: Any) -> SyntaxNode:
+            value = token_value(token)
+            node = self._make_valued(SyntaxNodeType.ntLiteral, value, meta)
+            node.set_attribute(AttributeName.anType, 'numeric')
             return node
 
         def anonymous_method(self, meta: Any, *children: Any) -> SyntaxNode:
@@ -1471,6 +1628,51 @@ def build_syntax_tree(
                     args.extend(child)
             return ('call', args)
 
+        def range_postfix(self, meta: Any, *children: Any) -> SyntaxNode:
+            return self.postfix_expr(meta, *children)
+
+        def range_call_suffix(self, meta: Any, *children: Any) -> tuple[str, list[SyntaxNode]]:
+            args: list[SyntaxNode] = []
+            for child in children:
+                if isinstance(child, list):
+                    args.extend(child)
+            return ('call', args)
+
+        def range_arg_list(self, meta: Any, *children: Any) -> list[SyntaxNode]:
+            return [child for child in children if isinstance(child, SyntaxNode)]
+
+        def range_primary(self, meta: Any, child: Any) -> SyntaxNode:
+            if isinstance(child, SyntaxNode):
+                return child
+            if self._is_text(child):
+                parts = [self._make_expr_identifier(meta, part) for part in child.split('.')]
+                return self.expr_qualified_name(meta, *parts)
+            return self._ensure_expr_node(meta, child)
+
+        def op_add(self, meta: Any) -> str:
+            return '+'
+
+        def op_sub(self, meta: Any) -> str:
+            return '-'
+
+        def op_mul(self, meta: Any) -> str:
+            return '*'
+
+        def op_fdiv(self, meta: Any) -> str:
+            return '/'
+
+        def op_div(self, meta: Any, *_: Any) -> str:
+            return 'DIV'
+
+        def op_mod(self, meta: Any, *_: Any) -> str:
+            return 'MOD'
+
+        def op_shl(self, meta: Any, *_: Any) -> str:
+            return 'SHL'
+
+        def op_shr(self, meta: Any, *_: Any) -> str:
+            return 'SHR'
+
         def index_suffix(self, meta: Any, exprs: list[SyntaxNode]) -> tuple[str, list[SyntaxNode]]:
             return ('index', exprs)
 
@@ -1502,6 +1704,23 @@ def build_syntax_tree(
             node.add_child(lhs)
             node.add_child(rhs)
             return node
+
+        def address_assignment(self, meta: Any, *children: Any) -> SyntaxNode:
+            nodes: list[SyntaxNode] = []
+            for child in children:
+                if is_token(child) and child.type == 'ASSIGN':
+                    continue
+                if isinstance(child, SyntaxNode):
+                    nodes.append(child)
+                elif is_token(child) and child.type in {'NIL', 'TRUE', 'FALSE', 'SELF'}:
+                    nodes.append(self.primary(meta, child))
+                elif child is not None:
+                    nodes.append(self._ensure_expr_node(meta, child))
+            target = nodes[0] if nodes else self._make_node(SyntaxNodeType.ntExpression, meta)
+            value = nodes[1] if len(nodes) > 1 else self._make_node(SyntaxNodeType.ntExpression, meta)
+            addr = self._make_node(SyntaxNodeType.ntAddr, meta)
+            addr.add_child(target)
+            return self.assignment(meta, addr, value)
 
         def call_expr(self, meta: Any, name: str, *children: Any) -> SyntaxNode:
             node = self._make_node(SyntaxNodeType.ntCall, meta)
@@ -1583,14 +1802,32 @@ def build_syntax_tree(
             return variables
 
         def argument(self, meta: Any, *children: Any) -> SyntaxNode:
-            if len(children) == 2 and (self._is_text(children[0]) or is_token(children[0])):
+            if children and (self._is_text(children[0]) or is_token(children[0])):
                 name = token_value(children[0])
-                expr = children[1]
-                node = self._make_node(SyntaxNodeType.ntNamedArgument, meta)
-                node.set_attribute(AttributeName.anName, name)
-                node.add_child(expr)
-                return node
+                expr = next((child for child in children[1:] if isinstance(child, SyntaxNode)), None)
+                if expr is not None:
+                    node = self._make_node(SyntaxNodeType.ntNamedArgument, meta)
+                    node.set_attribute(AttributeName.anName, name)
+                    node.add_child(expr)
+                    return node
             node = self._make_node(SyntaxNodeType.ntPositionalArgument, meta)
+            for child in children:
+                if isinstance(child, SyntaxNode):
+                    node.add_child(child)
+            return node
+
+        def formatted_argument(self, meta: Any, *children: Any) -> SyntaxNode:
+            node = self._make_node(SyntaxNodeType.ntExpression, meta)
+            node.set_attribute(AttributeName.anKind, 'format')
+            for child in children:
+                if isinstance(child, SyntaxNode):
+                    node.add_child(child)
+            return node
+
+        def named_formatted_argument(self, meta: Any, name: Any, *children: Any) -> SyntaxNode:
+            node = self._make_node(SyntaxNodeType.ntExpression, meta)
+            node.set_attribute(AttributeName.anKind, 'format')
+            node.add_child(self._make_expr_identifier(meta, token_value(name)))
             for child in children:
                 if isinstance(child, SyntaxNode):
                     node.add_child(child)
@@ -1642,6 +1879,7 @@ def build_syntax_tree(
         def for_init(self, meta: Any, *children: Any) -> SyntaxNode:
             name = None
             expr = None
+            type_node = None
             is_var = any(is_token(child) and child.type == 'VAR' for child in children)
             for child in children:
                 if self._is_text(child) or is_token(child):
@@ -1649,12 +1887,17 @@ def build_syntax_tree(
                         continue
                     name = token_value(child)
                 elif isinstance(child, SyntaxNode):
-                    expr = child
+                    if child.typ == SyntaxNodeType.ntType and type_node is None:
+                        type_node = child
+                    else:
+                        expr = child
             if is_var:
                 node = self._make_node(SyntaxNodeType.ntVariable, meta)
                 node.set_attribute(AttributeName.anKind, 'inline')
                 if name is not None:
                     node.add_child(self._make_valued(SyntaxNodeType.ntName, name, meta))
+                if type_node is not None:
+                    node.add_child(type_node)
                 if expr is not None:
                     value_node = self._make_node(SyntaxNodeType.ntValue, meta)
                     value_node.add_child(expr)
@@ -1676,6 +1919,7 @@ def build_syntax_tree(
         def for_in(self, meta: Any, *children: Any) -> SyntaxNode:
             name = None
             expr = None
+            type_node = None
             is_var = any(is_token(child) and child.type == 'VAR' for child in children)
             for child in children:
                 if self._is_text(child) or is_token(child):
@@ -1683,13 +1927,18 @@ def build_syntax_tree(
                         continue
                     name = token_value(child)
                 elif isinstance(child, SyntaxNode):
-                    expr = child
+                    if child.typ == SyntaxNodeType.ntType and type_node is None:
+                        type_node = child
+                    else:
+                        expr = child
             node = self._make_node(SyntaxNodeType.ntIn, meta)
             if is_var:
                 var_node = self._make_node(SyntaxNodeType.ntVariable, meta)
                 var_node.set_attribute(AttributeName.anKind, 'inline')
                 if name is not None:
                     var_node.add_child(self._make_valued(SyntaxNodeType.ntName, name, meta))
+                if type_node is not None:
+                    var_node.add_child(type_node)
                 node.add_child(var_node)
             elif name is not None:
                 ident = self._make_node(SyntaxNodeType.ntIdentifier, meta)
@@ -1829,6 +2078,9 @@ def build_syntax_tree(
                 if isinstance(child, SyntaxNode):
                     node.add_child(child)
             return node
+
+        def inherited_expr(self, meta: Any, *children: Any) -> SyntaxNode:
+            return self.inherited_statement(meta, *children)
 
         def break_statement(self, meta: Any, *_: Any) -> SyntaxNode:
             node = self._make_node(SyntaxNodeType.ntStatement, meta)
@@ -1977,9 +2229,13 @@ def build_syntax_tree(
         def array_const(self, meta: Any, *children: Any) -> SyntaxNode:
             node = self._make_node(SyntaxNodeType.ntExpressions, meta)
             for child in children:
-                if isinstance(child, SyntaxNode):
-                    node.add_child(child)
+                for item in self._flatten(child):
+                    if isinstance(item, SyntaxNode):
+                        node.add_child(item)
             return node
+
+        def const_value_list(self, meta: Any, *children: Any) -> list[SyntaxNode]:
+            return [child for child in children if isinstance(child, SyntaxNode)]
 
         def record_const(self, meta: Any, *children: Any) -> SyntaxNode:
             node = self._make_node(SyntaxNodeType.ntUnknown, meta)
@@ -2058,6 +2314,7 @@ def build_syntax_tree(
                     'far': AttributeName.anFar,
                     'near': AttributeName.anNear,
                     'noreturn': AttributeName.anNoReturn,
+                    'varargs': AttributeName.anVarArgs,
                 }.get(key)
                 if attr is not None:
                     node.set_attribute(attr, value)
@@ -2381,6 +2638,17 @@ def build_syntax_tree(
 
         def _is_text(self, value: Any) -> bool:
             return isinstance(value, str) and not is_token(value)
+
+        def _proc_type_directive_attrs(self, values: Iterable[str]) -> dict[str, str]:
+            attrs: dict[str, str] = {}
+            for value in values:
+                if value == 'winapi':
+                    attrs['callingconvention'] = 'winapi'
+                elif value in {'cdecl', 'stdcall', 'pascal', 'register', 'safecall'}:
+                    attrs['callingconvention'] = value
+                elif value == 'varargs':
+                    attrs['varargs'] = 'true'
+            return attrs
 
         def _extract_name(self, children: Iterable[Any], default: str) -> str:
             for child in self._flatten(children):

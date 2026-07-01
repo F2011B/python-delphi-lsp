@@ -118,6 +118,35 @@ class ProjectIndexerTests(unittest.TestCase):
             include_names = {item.name for item in result.include_files}
             self.assertIn('extra.inc', include_names)
 
+    def test_indexes_utf16_encoded_unit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = textwrap.dedent(
+                '''
+                unit Umlauts;
+
+                interface
+
+                procedure ÜbernehmeMindestAbbildung;
+
+                implementation
+
+                procedure ÜbernehmeMindestAbbildung;
+                begin
+                end;
+
+                end.
+                '''
+            ).strip()
+            (root / 'Umlauts.pas').write_bytes(source.encode('utf-16'))
+
+            indexer = ProjectIndexer(search_paths=[str(root)])
+            result = indexer.index(str(root / 'Umlauts.pas'))
+
+            parsed = {item.name for item in result.parsed_units}
+            self.assertIn('Umlauts', parsed)
+            self.assertFalse(result.problems)
+
 
 if __name__ == '__main__':
     unittest.main()

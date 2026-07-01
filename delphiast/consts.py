@@ -170,6 +170,7 @@ class AttributeName(IntEnum):
     anNear = 23
     anGenericArgs = 24
     anNoReturn = 25
+    anVarArgs = 26
 
 
 SYNTAX_NODE_NAMES = (
@@ -340,4 +341,5 @@ ATTRIBUTE_NAME_STRINGS = (
     'near',
     'genericargs',
     'noreturn',
+    'varargs',
 )
