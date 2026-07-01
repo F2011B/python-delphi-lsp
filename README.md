@@ -107,9 +107,64 @@ compiler defines through LSP initialization options when needed.
 This repository includes an `opencode.json` that registers the Delphi LSP tool
 and model aliases for local Ollama and vLLM endpoints.
 
-For normal local opencode work, use the Ollama alias with a larger context:
+To add the Delphi language server to another opencode project, install the
+package in the Python environment used by opencode and add an `lsp.delphi`
+entry to that project's `opencode.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "lsp": {
+    "delphi": {
+      "command": ["python", "-m", "delphiast.lsp_server"],
+      "extensions": [".pas", ".dpr", ".dpk", ".inc"],
+      "initialization": {
+        "includePaths": ["src", "lib"],
+        "defines": ["MSWINDOWS"]
+      }
+    }
+  }
+}
+```
+
+Adjust `includePaths` and `defines` to match the Delphi project. For checkout
+development, this repository's own `opencode.json` uses the local virtual
+environment and sets `PYTHONPATH` so opencode loads the source tree directly:
+
+```json
+{
+  "lsp": {
+    "delphi": {
+      "command": [".venv/bin/python", "-m", "delphiast.lsp_server"],
+      "extensions": [".pas", ".dpr", ".dpk", ".inc"],
+      "env": {
+        "PYTHONPATH": "."
+      },
+      "initialization": {
+        "includePaths": ["tests/fixtures", "tests/fixtures/legacy_snippets"],
+        "defines": []
+      }
+    }
+  }
+}
+```
+
+On Windows checkout development, replace `.venv/bin/python` with
+`.venv\\Scripts\\python.exe`. If `python-delphi-lsp` is installed normally, the
+portable `["python", "-m", "delphiast.lsp_server"]` command above works without
+`PYTHONPATH`.
+
+For normal local opencode work, use the Ollama alias with a larger context and
+enable opencode's experimental LSP tool when starting opencode:
 
 ```bash
+OPENCODE_EXPERIMENTAL_LSP_TOOL=true opencode run --dir . --model ollama/ornith-lspctx
+```
+
+On Windows PowerShell:
+
+```powershell
+$env:OPENCODE_EXPERIMENTAL_LSP_TOOL = "true"
 opencode run --dir . --model ollama/ornith-lspctx
 ```
 
