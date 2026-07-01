@@ -4,19 +4,22 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "python-delphi-lsp"
-version = "0.1.0"
+version = "1.0.0"
 description = "Python Delphi/Object Pascal parser, semantic indexer, and language server."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MPL-2.0"
 license-files = ["LICENSE"]
 authors = [
-  { name = "F2011B" },
+  { name = "Dark Light" },
 ]
 keywords = ["delphi", "object-pascal", "pascal", "lsp", "language-server", "parser"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
@@ -50,11 +53,6 @@ dev = [
 
 [project.scripts]
 delphi-lsp = "delphiast.lsp_server:main"
-
-[project.urls]
-Homepage = "https://github.com/F2011B/python-delphi-lsp"
-Repository = "https://github.com/F2011B/python-delphi-lsp"
-Issues = "https://github.com/F2011B/python-delphi-lsp/issues"
 
 [tool.setuptools]
 packages = ["delphiast"]
