@@ -46,6 +46,7 @@ from .semantic import (
 from .semantic_builder import SemanticBuilder, SemanticModel, SemanticProblem
 from .workspace import WorkspaceSemanticResult, build_workspace_semantics
 from .lsp_server import LspWorkspaceState, create_server
+from .project_discovery import DelphiProjectDiscovery, DiscoveryProblem, discover_delphi_project
 from .project_indexer import (
     GetUnitSyntaxHook,
     IncludeFileInfo,
@@ -119,6 +120,9 @@ __all__ = [
     'build_workspace_semantics',
     'LspWorkspaceState',
     'create_server',
+    'DelphiProjectDiscovery',
+    'DiscoveryProblem',
+    'discover_delphi_project',
     'ProjectIndexer',
     'ProjectIndexResult',
     'ProjectProblemType',

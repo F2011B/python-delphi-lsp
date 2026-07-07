@@ -25,6 +25,7 @@ from .semantic import (
 from .semantic_builder import SemanticBuilder, SemanticModel
 from .source_reader import read_source_text
 from .workspace import WorkspaceSemanticResult, build_workspace_semantics
+from .project_discovery import discover_delphi_project
 
 
 @dataclass
@@ -46,10 +47,15 @@ class FileSnapshot:
 class WorkspaceConfig:
     roots: list[str] = field(default_factory=list)
     include_paths: list[str] = field(default_factory=list)
+    search_paths: list[str] = field(default_factory=list)
     defines: list[str] = field(default_factory=list)
-    extensions: tuple[str, ...] = ('.pas', '.dpr', '.dpk')
+    extensions: tuple[str, ...] = ('.pas', '.dpr', '.dpk', '.inc')
     outline_line_threshold: int = 50_000
     eager_index: bool = False
+    auto_discover_paths: bool = True
+    discovered_include_paths: list[str] = field(default_factory=list)
+    discovered_search_paths: list[str] = field(default_factory=list)
+    discovered_defines: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -63,7 +69,7 @@ class LspWorkspaceState:
     file_cache: dict[str, FileSnapshot] = field(default_factory=dict)
 
     def configure(self, config: WorkspaceConfig) -> None:
-        self.config = config
+        self.config = self._with_discovered_config(config)
         self.workspace_files = set()
         self.file_cache = {}
         self.workspace = None
@@ -71,6 +77,51 @@ class LspWorkspaceState:
         self.workspace_symbol_query_cache = {}
         if config.eager_index:
             self.index_workspace()
+
+    def _with_discovered_config(self, config: WorkspaceConfig) -> WorkspaceConfig:
+        if not config.auto_discover_paths or not config.roots:
+            return config
+        include_paths = list(config.include_paths)
+        search_paths = list(config.search_paths)
+        defines = list(config.defines)
+        discovered_include_paths: list[str] = []
+        discovered_search_paths: list[str] = []
+        discovered_defines: list[str] = []
+
+        def add_path(target: list[str], discovered: list[str], value: str) -> None:
+            normalized = str(Path(value).expanduser().resolve())
+            if normalized not in target:
+                target.append(normalized)
+            if normalized not in discovered:
+                discovered.append(normalized)
+
+        def add_define(value: str) -> None:
+            if value not in defines:
+                defines.append(value)
+            if value not in discovered_defines:
+                discovered_defines.append(value)
+
+        for root in config.roots:
+            discovery = discover_delphi_project(root, include_paths=config.include_paths, search_paths=config.search_paths, defines=config.defines)
+            for path in discovery.include_paths:
+                add_path(include_paths, discovered_include_paths, path)
+            for path in discovery.search_paths:
+                add_path(search_paths, discovered_search_paths, path)
+            for define in discovery.defines:
+                add_define(define)
+        return WorkspaceConfig(
+            roots=list(config.roots),
+            include_paths=include_paths,
+            search_paths=search_paths,
+            defines=defines,
+            extensions=config.extensions,
+            outline_line_threshold=config.outline_line_threshold,
+            eager_index=config.eager_index,
+            auto_discover_paths=config.auto_discover_paths,
+            discovered_include_paths=discovered_include_paths,
+            discovered_search_paths=discovered_search_paths,
+            discovered_defines=discovered_defines,
+        )
 
     def index_workspace(self) -> None:
         self.workspace_files = set(self._scan_workspace_files())
@@ -1234,8 +1285,16 @@ def create_server():
             roots.append(uri_to_path(params.root_uri))
         init_opts = params.initialization_options or {}
         include_paths = [uri_to_path(path) for path in init_opts.get('includePaths', [])]
+        search_paths = [uri_to_path(path) for path in init_opts.get('searchPaths', [])]
         defines = init_opts.get('defines', [])
-        config = WorkspaceConfig(roots=roots, include_paths=include_paths, defines=defines)
+        auto_discover_paths = init_opts.get('autoDiscoverPaths', True)
+        config = WorkspaceConfig(
+            roots=roots,
+            include_paths=include_paths,
+            search_paths=search_paths,
+            defines=defines,
+            auto_discover_paths=bool(auto_discover_paths),
+        )
         state.configure(config)
 
         capabilities = ServerCapabilities(

@@ -82,6 +82,15 @@ def test_vllm_lsp_agent_keeps_only_lsp_tool_enabled() -> None:
     assert tools['skill'] is False
 
 
+def test_delphi_lsp_config_uses_auto_discovery_by_default() -> None:
+    config = json.loads((ROOT / 'opencode.json').read_text(encoding='utf-8'))
+
+    initialization = config['lsp']['delphi']['initialization']
+    assert initialization['autoDiscoverPaths'] is True
+    assert 'includePaths' not in initialization
+    assert 'defines' not in initialization
+
+
 def test_vllm_lsp_edit_agent_keeps_only_lsp_and_edit_enabled() -> None:
     config = json.loads((ROOT / 'opencode.json').read_text(encoding='utf-8'))
 

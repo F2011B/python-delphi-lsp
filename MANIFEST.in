@@ -4,6 +4,7 @@ include opencode.json
 include scripts/check_ornith_cache.py
 include scripts/audit_delphi_language_features.py
 include scripts/bootstrap_vllm_opencode_test.py
+include scripts/bootstrap_vllm_codebase_skill_test.py
 include scripts/bootstrap_vllm_opencode_test.ps1
 include scripts/bootstrap_vllm_opencode_test.sh
 include scripts/generate_release_evidence.py

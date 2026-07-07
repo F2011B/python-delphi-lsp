@@ -234,11 +234,7 @@
         "PYTHONPATH": "."
       },
       "initialization": {
-        "includePaths": [
-          "tests/fixtures",
-          "tests/fixtures/legacy_snippets"
-        ],
-        "defines": []
+        "autoDiscoverPaths": true
       }
     }
   }
