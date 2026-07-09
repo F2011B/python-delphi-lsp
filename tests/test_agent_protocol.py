@@ -1,6 +1,7 @@
 import base64
 import importlib
 import json
+import unicodedata
 
 import pytest
 
@@ -16,6 +17,18 @@ def _encode_raw_cursor(payload: object) -> str:
 
 def _compact_json_chars(value: object) -> int:
     return len(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':')))
+
+
+class OneShotItems:
+    def __init__(self, items: list[object]) -> None:
+        self.items = items
+        self.iterations = 0
+
+    def __iter__(self):
+        if self.iterations:
+            raise AssertionError('One-shot iterable was consumed more than once.')
+        self.iterations += 1
+        yield from self.items
 
 
 def test_schema_and_supported_values_are_versioned_and_deterministic() -> None:
@@ -282,6 +295,14 @@ def test_target_id_normalizes_case_and_relative_path_separators() -> None:
     assert all(character.isascii() and (character.isalnum() or character == '_') for character in windows_style)
 
 
+def test_target_id_normalizes_canonically_equivalent_unicode() -> None:
+    protocol = _protocol()
+    composed = ('Méthod', 'Src/Café/Unité.pas', 'TÉlément.Exécuter')
+    decomposed = tuple(unicodedata.normalize('NFD', value) for value in composed)
+
+    assert protocol.make_target_id(*composed) == protocol.make_target_id(*decomposed)
+
+
 def test_target_id_is_deterministic_and_contains_no_workspace_or_line_data() -> None:
     protocol = _protocol()
 
@@ -325,6 +346,25 @@ def test_cursor_rejects_malformed_data(cursor: str) -> None:
 
     with pytest.raises(protocol.AgentProtocolError) as caught:
         protocol.decode_cursor(cursor, 'revision-2', 'find:order')
+
+    assert caught.value.code == 'malformed_cursor'
+    assert caught.value.message == 'Cursor is malformed.'
+
+
+@pytest.mark.parametrize('schema', [2.0, True])
+def test_cursor_rejects_non_integer_schema_values(schema: object) -> None:
+    protocol = _protocol()
+    cursor = _encode_raw_cursor(
+        {
+            'fingerprint': 'find:item',
+            'offset': 0,
+            'revision': 'revision-2',
+            'schema': schema,
+        }
+    )
+
+    with pytest.raises(protocol.AgentProtocolError) as caught:
+        protocol.decode_cursor(cursor, 'revision-2', 'find:item')
 
     assert caught.value.code == 'malformed_cursor'
     assert caught.value.message == 'Cursor is malformed.'
@@ -380,6 +420,41 @@ def test_cursor_decoder_rejects_a_negative_offset() -> None:
     assert caught.value.message == 'Cursor offset cannot be negative.'
 
 
+@pytest.mark.parametrize(
+    ('cursor_case', 'code'),
+    [
+        ('malformed', 'malformed_cursor'),
+        ('stale', 'stale_cursor'),
+        ('mismatched', 'cursor_mismatch'),
+    ],
+)
+def test_paginate_items_rejects_cursor_before_iterating_one_shot_items(
+    cursor_case: str,
+    code: str,
+) -> None:
+    protocol = _protocol()
+    if cursor_case == 'malformed':
+        cursor = 'not*url-safe'
+    elif cursor_case == 'stale':
+        cursor = protocol.encode_cursor('revision-1', 0, 'find:one-shot')
+    else:
+        cursor = protocol.encode_cursor('revision-2', 0, 'find:other')
+    items = OneShotItems([{'id': 1}])
+
+    with pytest.raises(protocol.AgentProtocolError) as caught:
+        protocol.paginate_items(
+            items,
+            revision='revision-2',
+            fingerprint='find:one-shot',
+            max_items=12,
+            max_chars=256,
+            cursor=cursor,
+        )
+
+    assert caught.value.code == code
+    assert items.iterations == 0
+
+
 def test_paginate_items_limits_count_and_continues_without_dropping_items() -> None:
     protocol = _protocol()
     items = [{'id': 1}, {'id': 2}, {'id': 3}]
@@ -424,9 +499,9 @@ def test_paginate_items_limits_count_and_continues_without_dropping_items() -> N
 def test_paginate_items_uses_compact_json_character_budget() -> None:
     protocol = _protocol()
     items = [
-        {'id': 1, 'text': 'é' * 80},
-        {'id': 2, 'text': 'x' * 80},
-        {'id': 3, 'text': 'y' * 80},
+        {'id': 1, 'text': 'é' * 120},
+        {'id': 2, 'text': 'x' * 120},
+        {'id': 3, 'text': 'y' * 120},
     ]
     max_chars = _compact_json_chars(items[:2])
 
@@ -444,6 +519,24 @@ def test_paginate_items_uses_compact_json_character_budget() -> None:
     assert page.total == 3
     assert page.truncated is True
     assert page.next_cursor
+
+    next_page, remaining = protocol.paginate_items(
+        items,
+        revision='revision-2',
+        fingerprint='find:unicode',
+        max_items=10,
+        max_chars=max_chars,
+        cursor=page.next_cursor,
+    )
+
+    assert remaining == items[2:]
+    assert next_page.to_mapping() == {
+        'returned': 1,
+        'total': 3,
+        'truncated': False,
+        'next_cursor': '',
+    }
+    assert selected + remaining == items
 
 
 def test_paginate_items_returns_an_untruncated_empty_page() -> None:
@@ -464,6 +557,41 @@ def test_paginate_items_returns_an_untruncated_empty_page() -> None:
         'truncated': False,
         'next_cursor': '',
     }
+
+
+@pytest.mark.parametrize(
+    ('field', 'value', 'code', 'message'),
+    [
+        ('max_items', True, 'invalid_type', "Field 'max_items' must be an integer."),
+        ('max_items', '12', 'invalid_type', "Field 'max_items' must be an integer."),
+        ('max_items', 0, 'max_items_out_of_range', "Field 'max_items' must be between 1 and 50."),
+        ('max_items', 51, 'max_items_out_of_range', "Field 'max_items' must be between 1 and 50."),
+        ('max_chars', True, 'invalid_type', "Field 'max_chars' must be an integer."),
+        ('max_chars', '256', 'invalid_type', "Field 'max_chars' must be an integer."),
+        ('max_chars', 255, 'max_chars_out_of_range', "Field 'max_chars' must be between 256 and 40000."),
+        ('max_chars', 40001, 'max_chars_out_of_range', "Field 'max_chars' must be between 256 and 40000."),
+    ],
+)
+def test_paginate_items_validates_limits_like_agent_request(
+    field: str,
+    value: object,
+    code: str,
+    message: str,
+) -> None:
+    protocol = _protocol()
+    limits = {'max_items': 12, 'max_chars': 256}
+    limits[field] = value
+
+    with pytest.raises(protocol.AgentProtocolError) as caught:
+        protocol.paginate_items(
+            [{'id': 1}],
+            revision='revision-2',
+            fingerprint='find:limits',
+            **limits,
+        )
+
+    assert caught.value.code == code
+    assert caught.value.message == message
 
 
 def test_paginate_items_rejects_an_individual_oversized_item() -> None:

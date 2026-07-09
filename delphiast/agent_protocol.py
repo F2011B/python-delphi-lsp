@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import posixpath
+import unicodedata
 
 
 SCHEMA_VERSION = 2
@@ -237,9 +238,9 @@ def make_target_id(
     if normalized_path == '.':
         normalized_path = ''
     identity = [
-        kind.casefold(),
-        normalized_path.casefold(),
-        qualified_name.casefold(),
+        unicodedata.normalize('NFC', kind).casefold(),
+        unicodedata.normalize('NFC', normalized_path).casefold(),
+        unicodedata.normalize('NFC', qualified_name).casefold(),
         ordinal,
     ]
     encoded = json.dumps(identity, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
@@ -288,7 +289,7 @@ def decode_cursor(cursor: str, expected_revision: str, expected_fingerprint: str
     expected_fields = {'fingerprint', 'offset', 'revision', 'schema'}
     if not isinstance(payload, dict) or set(payload) != expected_fields:
         raise AgentProtocolError('malformed_cursor', 'Cursor is malformed.')
-    if payload['schema'] != SCHEMA_VERSION:
+    if type(payload['schema']) is not int or payload['schema'] != SCHEMA_VERSION:
         raise AgentProtocolError('malformed_cursor', 'Cursor is malformed.')
     if not isinstance(payload['revision'], str) or not isinstance(payload['fingerprint'], str):
         raise AgentProtocolError('malformed_cursor', 'Cursor is malformed.')
@@ -313,8 +314,22 @@ def paginate_items(
     max_chars: int,
     cursor: str = '',
 ) -> tuple[Page, list[object]]:
-    all_items = list(items)
+    for field_name, value in (('max_items', max_items), ('max_chars', max_chars)):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise AgentProtocolError('invalid_type', f"Field '{field_name}' must be an integer.")
+    if not 1 <= max_items <= 50:
+        raise AgentProtocolError(
+            'max_items_out_of_range',
+            "Field 'max_items' must be between 1 and 50.",
+        )
+    if not 256 <= max_chars <= 40000:
+        raise AgentProtocolError(
+            'max_chars_out_of_range',
+            "Field 'max_chars' must be between 256 and 40000.",
+        )
+
     offset = decode_cursor(cursor, revision, fingerprint) if cursor else 0
+    all_items = list(items)
     if offset > len(all_items):
         raise AgentProtocolError('malformed_cursor', 'Cursor is malformed.')
 
