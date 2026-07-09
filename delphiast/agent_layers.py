@@ -8,7 +8,7 @@ import json
 from .lsp_server import build_outline_semantic_model, outline_large_source
 from .project_discovery import DelphiProjectDiscovery, discover_delphi_project
 from .project_indexer import ProjectIndexResult, ProjectIndexer
-from .semantic import Scope, SourceRange, Symbol, SymbolIndex
+from .semantic import Scope, SourceRange, Symbol, SymbolIndex, SymbolKind
 from .semantic_builder import SemanticModel
 from .source_reader import read_source_text
 
@@ -92,6 +92,8 @@ def layer_payload(index: CodebaseIndex, layer: str, *, query: str = "") -> dict[
         return _symbols_payload(index, query=query)
     if normalized_layer == "symbol":
         return _symbol_payload(index, query=query)
+    if normalized_layer == "implementation":
+        return _implementation_payload(index, query=query)
     if normalized_layer == "references":
         return _references_payload(index, query=query)
     if normalized_layer == "problems":
@@ -206,6 +208,142 @@ def _symbol_payload(index: CodebaseIndex, *, query: str) -> dict[str, Any]:
     return {"layer": "symbol", "root": index.root, "query": query, "items": matches[:50]}
 
 
+def _implementation_payload(index: CodebaseIndex, *, query: str) -> dict[str, Any]:
+    needle = query.casefold().strip()
+    if not needle:
+        return {
+            "layer": "implementation",
+            "root": index.root,
+            "query": query,
+            "items": [],
+            "message": "Pass a class, routine, or member name in query to read focused source.",
+        }
+
+    matches = [symbol for symbol in _all_symbols(index) if symbol.name.casefold() == needle]
+    if not matches:
+        matches = [
+            symbol
+            for symbol in _all_symbols(index)
+            if symbol.kind.value != "unit" and needle in symbol.name.casefold()
+        ]
+
+    items: list[dict[str, Any]] = []
+    source_cache: dict[str, list[str]] = {}
+    seen_keys: set[tuple[str, str, int, str]] = set()
+    for symbol in matches:
+        item = _implementation_item(index, symbol, source_cache)
+        if item is None:
+            continue
+        key = (item["name"].casefold(), item["path"], item["line"], item["kind"])
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        items.append(item)
+    items.sort(key=lambda item: (item["path"].casefold(), item["line"], item["name"].casefold()))
+    return {"layer": "implementation", "root": index.root, "query": query, "items": items[:50]}
+
+
+def _implementation_item(
+    index: CodebaseIndex,
+    symbol: Symbol,
+    source_cache: dict[str, list[str]],
+) -> dict[str, Any] | None:
+    fragments: list[dict[str, Any]] = []
+    if symbol.kind in {SymbolKind.CLASS, SymbolKind.RECORD, SymbolKind.INTERFACE}:
+        declaration = _source_fragment(symbol.decl_range, "declaration", source_cache)
+        if declaration is not None:
+            fragments.append(declaration)
+        fragments.extend(_implementation_fragments_for_type(index, symbol, source_cache))
+    elif symbol.kind in _ROUTINE_KINDS:
+        fragment = _source_fragment(symbol.decl_range, "implementation", source_cache)
+        if fragment is not None:
+            fragments.append(fragment)
+    else:
+        fragment = _source_fragment(symbol.decl_range, "declaration", source_cache)
+        if fragment is not None:
+            fragments.append(fragment)
+        fragments.extend(_implementation_fragments_for_member(index, symbol, source_cache))
+    if not fragments:
+        return None
+    item = _symbol_item(symbol)
+    item["fragments"] = fragments
+    return item
+
+
+def _implementation_fragments_for_type(
+    index: CodebaseIndex,
+    symbol: Symbol,
+    source_cache: dict[str, list[str]],
+) -> list[dict[str, Any]]:
+    prefix = f"{symbol.name.casefold()}."
+    fragments: list[dict[str, Any]] = []
+    seen_ranges: set[SourceRange] = set()
+    for candidate in _all_symbols(index):
+        if candidate.kind not in _ROUTINE_KINDS:
+            continue
+        if candidate.decl_range.file_name != symbol.decl_range.file_name:
+            continue
+        if not candidate.name.casefold().startswith(prefix):
+            continue
+        fragment = _source_fragment(candidate.decl_range, "implementation", source_cache)
+        if fragment is None or candidate.decl_range in seen_ranges:
+            continue
+        seen_ranges.add(candidate.decl_range)
+        fragment["symbol"] = candidate.name
+        fragments.append(fragment)
+    fragments.sort(key=lambda item: (item["range"]["start_line"], item["range"]["start_col"]))
+    return fragments
+
+
+def _implementation_fragments_for_member(
+    index: CodebaseIndex,
+    symbol: Symbol,
+    source_cache: dict[str, list[str]],
+) -> list[dict[str, Any]]:
+    owner = symbol.scope.owner
+    if owner is None or owner.kind not in {SymbolKind.CLASS, SymbolKind.RECORD, SymbolKind.INTERFACE}:
+        return []
+    qualified_name = f"{owner.name.casefold()}.{symbol.name.casefold()}"
+    fragments: list[dict[str, Any]] = []
+    for candidate in _all_symbols(index):
+        if candidate.kind not in _ROUTINE_KINDS:
+            continue
+        if candidate.decl_range.file_name != symbol.decl_range.file_name:
+            continue
+        if candidate.name.casefold() != qualified_name:
+            continue
+        fragment = _source_fragment(candidate.decl_range, "implementation", source_cache)
+        if fragment is not None:
+            fragment["symbol"] = candidate.name
+            fragments.append(fragment)
+    return fragments
+
+
+def _source_fragment(
+    source_range: SourceRange,
+    fragment_kind: str,
+    source_cache: dict[str, list[str]],
+) -> dict[str, Any] | None:
+    lines = source_cache.get(source_range.file_name)
+    if lines is None:
+        try:
+            text = read_source_text(Path(source_range.file_name))
+        except (OSError, UnicodeError):
+            return None
+        lines = text.splitlines(keepends=True)
+        source_cache[source_range.file_name] = lines
+    if source_range.start_line < 1 or source_range.start_line > len(lines):
+        return None
+    end_line = min(max(source_range.end_line, source_range.start_line), len(lines))
+    snippet = "".join(lines[source_range.start_line - 1 : end_line]).rstrip("\r\n")
+    return {
+        "fragment_kind": fragment_kind,
+        "range": _range_item(source_range),
+        "line_count": end_line - source_range.start_line + 1,
+        "text": snippet,
+    }
+
+
 def _references_payload(index: CodebaseIndex, *, query: str) -> dict[str, Any]:
     needle = query.casefold().strip()
     items = []
@@ -265,6 +403,14 @@ def _symbol_item(symbol: Symbol) -> dict[str, Any]:
     }
 
 
+_ROUTINE_KINDS = {
+    SymbolKind.PROCEDURE,
+    SymbolKind.FUNCTION,
+    SymbolKind.CONSTRUCTOR,
+    SymbolKind.DESTRUCTOR,
+}
+
+
 def _range_item(source_range: SourceRange) -> dict[str, int | str]:
     return {
         "path": source_range.file_name,
@@ -312,6 +458,26 @@ def _render_markdown(payload: dict[str, Any]) -> str:
                 lines.append(
                     f"- `{symbol['name']}` {symbol['kind']} at `{symbol['path']}:{symbol['line']}`"
                 )
+    elif payload["layer"] == "implementation":
+        if payload.get("message"):
+            lines.append(payload["message"])
+        for item in payload["items"]:
+            lines.append(f"## {item['name']}")
+            lines.append(f"- Kind: `{item['kind']}`")
+            lines.append(f"- Path: `{item['path']}`")
+            for fragment in item["fragments"]:
+                source_range = fragment["range"]
+                lines.append("")
+                lines.append(
+                    f"### {fragment['fragment_kind']} `{source_range['path']}:{source_range['start_line']}`"
+                )
+                if fragment.get("symbol"):
+                    lines.append(f"- Symbol: `{fragment['symbol']}`")
+                lines.append(f"- Lines: {fragment['line_count']}")
+                lines.append("")
+                lines.append("```pascal")
+                lines.append(fragment["text"])
+                lines.append("```")
     elif payload["layer"] == "projects":
         for item in payload["items"]:
             lines.append(f"## `{item['path']}`")

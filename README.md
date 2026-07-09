@@ -152,13 +152,19 @@ delphi-lsp-agent view --root . --layer overview
 delphi-lsp-agent view --root . --layer projects
 delphi-lsp-agent view --root . --layer unit --query Mega100kUnit
 delphi-lsp-agent view --root . --layer symbols --query TWorker --format json
+delphi-lsp-agent view --root . --layer implementation --query TWorker.Run
+delphi-lsp-agent view --root . --layer implementation --query TWorker --format json
 delphi-lsp-agent view --root . --layer problems
 ```
 
 Available layers are `overview`, `projects`, `units`, `unit`, `symbols`,
-`symbol`, `references`, and `problems`. The output includes file and line
-citations, declarations, ownership, visibility, type information, and
-dependency/problem summaries. Routine bodies are not emitted.
+`symbol`, `implementation`, `references`, and `problems`. The output includes
+file and line citations, declarations, ownership, visibility, type information,
+and dependency/problem summaries. Outline layers keep routine bodies out of the
+agent context. Use `implementation` with a concrete class, routine, or member
+query to read only that complete source fragment from the original file. For a
+class query, the layer returns the class declaration plus matching method
+implementations; for a routine query, it returns the full routine body.
 
 ## opencode Usage
 
@@ -341,13 +347,17 @@ python scripts/bootstrap_vllm_codebase_skill_test.py --start-vllm
 ```
 
 This skill probe defaults the vLLM helper to `MAX_MODEL_LEN=32768`, which was
-the stable local Metal setting for the complete skill + `delphi_codebase` tool
-call. Override with `--max-model-len` when your machine has enough headroom.
+the stable local Metal setting for the reduced codebase-agent prompt plus the
+`delphi_codebase` tool call. Override with `--max-model-len` when your machine
+has enough headroom.
 
-The probe requires opencode to load `delphi-codebase-navigator`, call
-`delphi_codebase`, and find `MegaProc02500`. It fails if opencode uses `bash`,
-`read`, `glob`, `grep`, `edit`, `write`, `task`, `webfetch`, or `todowrite`
-before the required evidence is complete.
+The probe verifies that the `delphi-codebase-navigator` skill is installed, then
+requires opencode to call `delphi_codebase`, find `MegaProc02500`, and read the
+method body through the `implementation` layer. The vLLM test agent keeps
+opencode's generic `skill` tool disabled so the model context stays focused on
+the Delphi navigation tool. The probe fails if opencode uses `bash`, `read`,
+`glob`, `grep`, `edit`, `write`, `task`, `webfetch`, or `todowrite` before the
+required evidence is complete.
 
 ## Verification
 

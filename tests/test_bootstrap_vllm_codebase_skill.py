@@ -31,6 +31,12 @@ def test_writes_codebase_skill_sandbox_with_project_paths(tmp_path: Path) -> Non
     config = (tmp_path / "opencode.json").read_text(encoding="utf-8")
     assert "vllm-delphi-codebase" in config
     assert '"delphi_codebase": true' in config
+    assert '"skill": false' in config
+    assert '"lsp": false' in config
+    assert '"delphi_codebase": "allow"' in config
+    assert '"skill": "deny"' in config
+    assert '"temperature": 0' in config
+    assert "When the user asks for a tool call" in config
     assert '"read": false' in config
 
 
@@ -42,7 +48,11 @@ def test_probe_command_requires_delphi_codebase_tool_and_forbids_raw_tools(tmp_p
     assert command[:2] == [str(python_exe), str(ROOT / "scripts" / "run_opencode_lsp_probe.py")]
     assert "vllm/ornith-lspctx" in command
     assert "vllm-delphi-codebase" in command
+    assert "skill:delphi-codebase-navigator" not in command
     assert "delphi_codebase:MegaProc02500" in command
+    assert "delphi_codebase:Value := Value + 40" in command
+    assert "Do not write any explanatory text before calling that tool" in command[-1]
+    assert "layer implementation" in command[-1]
     forbidden = [command[index + 1] for index, item in enumerate(command) if item == "--forbid-tool"]
     assert {"bash", "read", "glob", "grep", "edit", "write", "task", "webfetch", "todowrite"}.issubset(
         set(forbidden)
@@ -54,3 +64,5 @@ def test_skill_bootstrap_defaults_to_smaller_vllm_context_for_metal_stability() 
 
     assert 'DEFAULT_MAX_MODEL_LEN = "32768"' in script
     assert 'os.environ["MAX_MODEL_LEN"] = args.max_model_len' in script
+    assert 'env.setdefault("NPM_CONFIG_CACHE"' in script
+    assert 'env.setdefault("BUN_INSTALL_CACHE_DIR"' in script

@@ -24,11 +24,11 @@ def test_lsp_console_script_dependencies_are_installed_by_default() -> None:
     assert '"lsprotocol>=2023.0.1"' in project
 
 
-def test_release_metadata_declares_1_1_0_and_windows_support() -> None:
+def test_release_metadata_declares_1_1_1_and_windows_support() -> None:
     pyproject = (ROOT / 'pyproject.toml').read_text(encoding='utf-8')
     project = _section('project', pyproject)
 
-    assert 'version = "1.1.0"' in project
+    assert 'version = "1.1.1"' in project
     assert '"Operating System :: OS Independent"' in project
     assert '"Operating System :: Microsoft :: Windows"' in project
     assert '"Operating System :: MacOS"' in project

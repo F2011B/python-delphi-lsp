@@ -101,9 +101,11 @@ def build_probe_command(
 ) -> list[str]:
     output_path = output or sandbox / "bootstrap_vllm_codebase_skill_probe.jsonl"
     prompt = (
-        "Load the delphi-codebase-navigator skill. Use only the delphi_codebase tool to inspect the "
-        "Delphi project. Find MegaProc02500 through the symbols layer and explain which project and unit "
-        "contain it with file and line evidence."
+        "Use only the delphi_codebase tool to inspect the Delphi project. Do not write "
+        "any explanatory text before calling that tool. First call delphi_codebase with layer symbols, "
+        'query "MegaProc02500", and format json. Then call delphi_codebase with layer implementation, '
+        'query "MegaProc02500", and format markdown. After both tool calls, explain which project and '
+        "unit contain it with file and line evidence, and cite one statement from the method body."
     )
     return [
         str(python_executable),
@@ -115,9 +117,9 @@ def build_probe_command(
         "--agent",
         DEFAULT_AGENT,
         "--require-tool",
-        "skill:delphi-codebase-navigator",
-        "--require-tool",
         f"delphi_codebase:{DEFAULT_SYMBOL}",
+        "--require-tool",
+        "delphi_codebase:Value := Value + 40",
         "--forbid-tool",
         "bash",
         "--forbid-tool",
@@ -202,6 +204,12 @@ def main() -> int:
         wait_for_endpoint(args.base_url, args.ready_timeout, api_key=args.api_key)
         env = os.environ.copy()
         env["OPENCODE_EXPERIMENTAL_LSP_TOOL"] = "true"
+        npm_cache = sandbox / ".opencode" / ".npm-cache"
+        bun_cache = sandbox / ".opencode" / ".bun-cache"
+        npm_cache.mkdir(parents=True, exist_ok=True)
+        bun_cache.mkdir(parents=True, exist_ok=True)
+        env.setdefault("NPM_CONFIG_CACHE", str(npm_cache))
+        env.setdefault("BUN_INSTALL_CACHE_DIR", str(bun_cache))
         run(
             build_probe_command(
                 root=ROOT,

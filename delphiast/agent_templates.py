@@ -58,6 +58,7 @@ Use this skill when a task asks you to understand a Delphi/Object Pascal codebas
 - Do not use shell text-search commands for Delphi navigation.
 - Use the `delphi_codebase` opencode tool when it is available.
 - If the tool is not available, run `delphi-lsp-agent view` commands only after the user permits command execution.
+- When a task asks for codebase inspection, call `delphi_codebase` first; do not write "let me inspect" text before the tool call.
 - Cite files and line numbers from the layer output.
 
 ## Workflow
@@ -67,14 +68,16 @@ Use this skill when a task asks you to understand a Delphi/Object Pascal codebas
 3. Use `units` and `unit` to inspect outlines without routine bodies.
 4. Use `symbols` to find a type, routine, property, field, constant, or variable.
 5. Use `symbol` for a focused symbol card and children.
-6. Use `references` for definition/reference-oriented evidence.
-7. Use `problems` before concluding that code is missing.
+6. Use `implementation` with a concrete class, routine, or member query when you need the complete source for that one symbol.
+7. Use `references` for definition/reference-oriented evidence.
+8. Use `problems` before concluding that code is missing.
 
 ## Tool examples
 
 - `delphi_codebase({ "layer": "overview" })`
 - `delphi_codebase({ "layer": "unit", "query": "Worker" })`
 - `delphi_codebase({ "layer": "symbols", "query": "TWorker", "format": "json" })`
+- `delphi_codebase({ "layer": "implementation", "query": "TWorker.Run" })`
 
 Prefer narrow follow-up queries over broad output.
 """
@@ -82,37 +85,26 @@ Prefer narrow follow-up queries over broad output.
 
 def _opencode_tool(python_executable: str) -> str:
     python_json = json.dumps(python_executable)
-    return f"""const PYTHON = {python_json}
+    return f"""import {{ tool }} from "@opencode-ai/plugin"
+
+const PYTHON = {python_json}
 
 async function streamToText(stream: ReadableStream | null): Promise<string> {{
   if (!stream) return ""
   return await new Response(stream).text()
 }}
 
-export default {{
+export default tool({{
   description: "Inspect a Delphi/Object Pascal codebase through python-delphi-lsp layered semantic views.",
   args: {{
-    layer: {{
-      type: "string",
-      enum: ["overview", "projects", "units", "unit", "symbols", "symbol", "references", "problems"],
-      description: "Layer to inspect",
-    }},
-    query: {{
-      type: "string",
-      description: "Optional unit, file, or symbol filter",
-    }},
-    root: {{
-      type: "string",
-      description: "Workspace root; defaults to current worktree or directory",
-    }},
-    format: {{
-      type: "string",
-      enum: ["markdown", "json"],
-      description: "Output format",
-    }},
+    layer: tool.schema.enum(["overview", "projects", "units", "unit", "symbols", "symbol", "implementation", "references", "problems"]).describe("Layer to inspect"),
+    query: tool.schema.string().optional().describe("Unit, file, or symbol filter"),
+    root: tool.schema.string().optional().describe("Workspace root; defaults to current worktree or directory"),
+    format: tool.schema.enum(["markdown", "json"]).optional().describe("Output format; defaults to markdown"),
   }},
   async execute(args, context) {{
-    const root = args.root ?? context.worktree ?? context.directory
+    const contextDirectory = context.directory && context.directory !== "/" ? context.directory : undefined
+    const root = args.root ?? context.worktree ?? contextDirectory ?? process.cwd()
     const command = [
       PYTHON,
       "-m",
@@ -143,7 +135,7 @@ export default {{
     }}
     return stdout.trim()
   }},
-}}
+}})
 """
 
 
@@ -155,10 +147,17 @@ def _merge_opencode_config(config_path: Path) -> None:
     agents = config.setdefault("agent", {})
     agents["vllm-delphi-codebase"] = {
         "description": "Use the Delphi codebase navigator skill and tool without direct filesystem source inspection.",
+        "temperature": 0,
+        "prompt": (
+            "You are a tool-calling assistant. When the user asks for a tool call, call the matching tool. "
+            "The matching tool for Delphi/Object Pascal codebase inspection is delphi_codebase. "
+            "Use delphi_codebase before answering Delphi codebase questions. "
+            "Use implementation for complete source of one concrete class, routine, or member."
+        ),
         "tools": {
             "delphi_codebase": True,
-            "skill": True,
-            "lsp": True,
+            "skill": False,
+            "lsp": False,
             "bash": False,
             "read": False,
             "glob": False,
@@ -170,9 +169,9 @@ def _merge_opencode_config(config_path: Path) -> None:
             "todowrite": False,
         },
         "permission": {
-            "skill": {
-                SKILL_NAME: "allow",
-            }
+            "delphi_codebase": "allow",
+            "lsp": "deny",
+            "skill": "deny",
         },
     }
     config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")

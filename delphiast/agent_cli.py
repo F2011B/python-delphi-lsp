@@ -19,7 +19,21 @@ def build_parser() -> argparse.ArgumentParser:
     view = subcommands.add_parser("view", help="Render a layered codebase view.")
     view.add_argument("--root", type=Path, default=Path("."))
     view.add_argument("--project-file", type=Path)
-    view.add_argument("--layer", required=True, choices=["overview", "projects", "units", "unit", "symbols", "symbol", "references", "problems"])
+    view.add_argument(
+        "--layer",
+        required=True,
+        choices=[
+            "overview",
+            "projects",
+            "units",
+            "unit",
+            "symbols",
+            "symbol",
+            "implementation",
+            "references",
+            "problems",
+        ],
+    )
     view.add_argument("--query", default="")
     view.add_argument("--format", default="markdown", choices=["markdown", "json"])
     view.add_argument("--deep-projects", action="store_true", help="Deep-parse project dependencies for the projects layer.")
