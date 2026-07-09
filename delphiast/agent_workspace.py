@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from .agent_protocol import AgentProtocolError, Focus, make_target_id
+from .consts import AttributeName, SyntaxNodeType
 from .project_discovery import (
     SKIP_DIRS,
     SOURCE_EXTENSIONS,
@@ -425,7 +426,32 @@ def _selection_paths(
     if result is not None:
         paths.update(unit.path for unit in result.parsed_units)
         paths.update(include.path for include in result.include_files)
+        paths.update(_explicit_dependency_paths(result))
     return paths
+
+
+def _explicit_dependency_paths(result: ProjectIndexResult) -> set[str]:
+    paths: dict[str, str] = {}
+    for unit in sorted(
+        result.parsed_units,
+        key=lambda item: (item.path.casefold(), item.path, item.name.casefold(), item.name),
+    ):
+        if unit.syntax_tree is None:
+            continue
+        declaring_folder = Path(unit.path).expanduser().resolve().parent
+        pending = [unit.syntax_tree]
+        while pending:
+            node = pending.pop()
+            if node.typ == SyntaxNodeType.ntUnit:
+                raw_path = node.get_attribute(AttributeName.anPath).strip()
+                if raw_path:
+                    candidate = Path(raw_path.replace("\\", "/"))
+                    if not candidate.is_absolute():
+                        candidate = declaring_folder / candidate
+                    resolved = str(candidate.resolve())
+                    paths.setdefault(resolved.casefold(), resolved)
+            pending.extend(reversed(node.child_nodes))
+    return set(paths.values())
 
 
 def _selection_snapshot_specs(

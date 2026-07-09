@@ -434,6 +434,52 @@ def test_source_relative_nested_include_invalidates_revision_and_project_cache(
     )
 
 
+def test_explicit_nested_unit_path_invalidates_revision_without_recursive_pascal_scan(
+    tmp_path: Path,
+) -> None:
+    write_text(
+        tmp_path / "Main.dpr",
+        """
+        program Main;
+        uses UnitA in 'src/UnitA.pas';
+        begin
+        end.
+        """,
+    )
+    write_text(
+        tmp_path / "src" / "UnitA.pas",
+        """
+        unit UnitA;
+        interface
+        uses UnitB in 'nested/UnitB.pas';
+        implementation
+        end.
+        """,
+    )
+    workspace = AgentWorkspace.open(tmp_path)
+    project_id = workspace.active_project_id
+    original_revision = workspace.workspace_revision
+
+    assert [unit.name for unit in workspace.units] == ["Main", "UnitA"]
+    assert any(problem.get("path") == "UnitB" for problem in workspace.problems)
+
+    write_text(
+        tmp_path / "src" / "nested" / "Noise.pas",
+        "unit Noise; interface implementation end.",
+    )
+    assert workspace.workspace_revision == original_revision
+
+    write_text(
+        tmp_path / "src" / "nested" / "UnitB.pas",
+        "unit UnitB; interface implementation end.",
+    )
+
+    assert workspace.workspace_revision != original_revision
+    workspace.select_project(project_id)
+    assert [unit.name for unit in workspace.units] == ["Main", "UnitA", "UnitB"]
+    assert not any(problem.get("path") == "UnitB" for problem in workspace.problems)
+
+
 @pytest.mark.parametrize("config_suffix", [".dproj", ".cfg", ".dof"])
 def test_new_and_changed_project_config_invalidates_revision_and_is_applied(
     tmp_path: Path,
