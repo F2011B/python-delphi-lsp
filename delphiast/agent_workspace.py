@@ -6,8 +6,13 @@ import json
 from pathlib import Path
 
 from .agent_protocol import AgentProtocolError, Focus, make_target_id
-from .project_discovery import DelphiProjectDiscovery, discover_delphi_project
-from .project_indexer import IncludeFileInfo, ProjectIndexResult, ProjectIndexer, ProjectProblem, UnitInfo
+from .project_discovery import (
+    SOURCE_EXTENSIONS,
+    DelphiProjectDiscovery,
+    discover_delphi_project,
+    populate_workspace_sources,
+)
+from .project_indexer import IncludeFileInfo, ProjectIndexResult, ProjectIndexer, UnitInfo
 
 
 @dataclass(frozen=True)
@@ -44,7 +49,6 @@ class AgentUnit:
 
 @dataclass(frozen=True)
 class _ProjectCache:
-    discovery: DelphiProjectDiscovery
     result: ProjectIndexResult
     fingerprint: str
 
@@ -104,7 +108,7 @@ class AgentWorkspace:
                 projects.append(project)
                 project_paths[project_id] = path
         else:
-            discovery = discover_delphi_project(root_path, scan_workspace_sources=True)
+            populate_workspace_sources(discovery)
             project_id = make_target_id("project", "", "workspace")
             projects.append(
                 AgentProject(
@@ -146,7 +150,7 @@ class AgentWorkspace:
 
     @property
     def include_files(self) -> tuple[dict[str, str], ...]:
-        return self._include_files
+        return tuple(dict(item) for item in self._include_files)
 
     @property
     def search_path_entries(self) -> tuple[dict[str, object], ...]:
@@ -189,7 +193,12 @@ class AgentWorkspace:
 
         active_project = self.active_project
         if active_project is not None and self._active_result is not None:
+            seen_project: set[tuple[str, str, str]] = set()
             for problem in self._active_result.problems:
+                key = (problem.problem_type.value, problem.file_name, problem.description)
+                if key in seen_project:
+                    continue
+                seen_project.add(key)
                 entries.append(
                     {
                         "kind": problem.problem_type.value,
@@ -203,25 +212,15 @@ class AgentWorkspace:
     @property
     def workspace_revision(self) -> str:
         discovery = self._active_discovery or self._discovery
-        paths = _selection_paths(discovery, self._active_result)
-        payload = {
-            "files": _file_records(paths, root=self._root),
-            "project_id": self._active_project_id,
-        }
-        encoded = json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        return f"workspace_v2_{hashlib.sha256(encoded).hexdigest()}"
+        fingerprint = _selection_fingerprint(discovery, self._active_result, root=self._root)
+        return f"workspace_v2_{fingerprint}"
 
     def select_project(self, project_id: str) -> None:
         if project_id not in self._project_paths:
             raise AgentProtocolError("project_not_found", f"Project not found: {project_id}.")
         project_path = self._project_paths[project_id]
         if project_path is None:
-            discovery = discover_delphi_project(self._root, scan_workspace_sources=True)
+            discovery = self._discovery
         else:
             discovery = discover_delphi_project(
                 self._root,
@@ -230,13 +229,13 @@ class AgentWorkspace:
             )
         cached = self._project_cache.get(project_id)
         if cached is not None:
-            fingerprint = _selection_fingerprint(discovery, cached.result)
+            fingerprint = _selection_fingerprint(discovery, cached.result, root=self._root)
             if fingerprint == cached.fingerprint:
                 self._activate_project(project_id, discovery, cached.result)
                 return
 
         if project_path is None:
-            result = _index_workspace_sources(discovery)
+            result = _catalog_workspace_sources(discovery)
         else:
             indexer = ProjectIndexer(
                 search_paths=discovery.search_paths,
@@ -245,9 +244,8 @@ class AgentWorkspace:
             )
             result = indexer.index(str(project_path))
         self._project_cache[project_id] = _ProjectCache(
-            discovery=discovery,
             result=result,
-            fingerprint=_selection_fingerprint(discovery, result),
+            fingerprint=_selection_fingerprint(discovery, result, root=self._root),
         )
         self._activate_project(project_id, discovery, result)
 
@@ -329,56 +327,62 @@ def _project_kind(path: Path) -> str:
     return "project"
 
 
-def _index_workspace_sources(discovery: DelphiProjectDiscovery) -> ProjectIndexResult:
-    parsed_units: dict[tuple[str, str], UnitInfo] = {}
-    include_files: dict[tuple[str, str], IncludeFileInfo] = {}
-    problems: list[ProjectProblem] = []
-    seen_problems: set[tuple[str, str, str]] = set()
-    not_found_units: set[str] = set()
-
+def _catalog_workspace_sources(discovery: DelphiProjectDiscovery) -> ProjectIndexResult:
+    parsed_units: list[UnitInfo] = []
+    include_files: list[IncludeFileInfo] = []
     for source in discovery.source_files:
-        if Path(source).suffix.casefold() not in {".pas", ".dpr", ".dpk"}:
-            continue
-        indexer = ProjectIndexer(
-            search_paths=discovery.search_paths,
-            include_paths=discovery.include_paths,
-            defines=discovery.defines,
-        )
-        result = indexer.index(source)
-        for unit in result.parsed_units:
-            key = (unit.name.casefold(), unit.path.casefold())
-            parsed_units.setdefault(key, unit)
-        for include in result.include_files:
-            key = (include.name.casefold(), include.path.casefold())
-            include_files.setdefault(key, include)
-        for problem in result.problems:
-            key = (problem.problem_type.value, problem.file_name, problem.description)
-            if key not in seen_problems:
-                seen_problems.add(key)
-                problems.append(problem)
-        not_found_units.update(result.not_found_units)
+        path = Path(source)
+        if path.suffix.casefold() in {".pas", ".dpr", ".dpk"}:
+            parsed_units.append(UnitInfo(name=path.stem, path=source, syntax_tree=None))
+        elif path.suffix.casefold() == ".inc":
+            include_files.append(IncludeFileInfo(name=path.name, path=source))
 
     return ProjectIndexResult(
         parsed_units=sorted(
-            parsed_units.values(),
+            parsed_units,
             key=lambda item: (item.name.casefold(), item.path.casefold(), item.name, item.path),
         ),
         include_files=sorted(
-            include_files.values(),
+            include_files,
             key=lambda item: (item.name.casefold(), item.path.casefold(), item.name, item.path),
         ),
-        problems=problems,
-        not_found_units=sorted(not_found_units, key=lambda item: (item.casefold(), item)),
+        problems=[],
+        not_found_units=[],
     )
 
 
 def _selection_fingerprint(
     discovery: DelphiProjectDiscovery,
-    result: ProjectIndexResult,
+    result: ProjectIndexResult | None,
+    *,
+    root: Path,
 ) -> str:
-    records = _file_records(_selection_paths(discovery, result))
-    encoded = json.dumps(records, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    state = _selection_state(discovery, result, root=root)
+    encoded = json.dumps(
+        state,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _selection_state(
+    discovery: DelphiProjectDiscovery,
+    result: ProjectIndexResult | None,
+    *,
+    root: Path,
+) -> dict[str, object]:
+    return {
+        "files": _file_records(_selection_paths(discovery, result), root=root),
+        "search_paths": [_display_path(Path(path), root) for path in discovery.search_paths],
+        "include_paths": [_display_path(Path(path), root) for path in discovery.include_paths],
+        "defines": sorted(discovery.defines, key=lambda item: (item.casefold(), item)),
+        "directories": _directory_snapshots(
+            _selection_directories(discovery, result),
+            root=root,
+        ),
+    }
 
 
 def _selection_paths(
@@ -396,15 +400,57 @@ def _selection_paths(
     return paths
 
 
+def _selection_directories(
+    discovery: DelphiProjectDiscovery,
+    result: ProjectIndexResult | None,
+) -> set[str]:
+    directories = {
+        *(str(Path(path).parent) for path in discovery.project_files),
+        *discovery.search_paths,
+        *discovery.include_paths,
+    }
+    if result is not None:
+        directories.update(str(Path(unit.path).parent) for unit in result.parsed_units)
+        directories.update(str(Path(include.path).parent) for include in result.include_files)
+    return directories
+
+
+def _directory_snapshots(
+    directories: set[str],
+    *,
+    root: Path,
+) -> list[dict[str, object]]:
+    snapshots: list[dict[str, object]] = []
+    for value in sorted(directories, key=lambda item: (item.casefold(), item)):
+        directory = Path(value).expanduser().resolve()
+        entries: set[str] = set()
+        readable = True
+        try:
+            for candidate in directory.iterdir():
+                if candidate.suffix.casefold() in SOURCE_EXTENSIONS and candidate.is_file():
+                    entries.add(str(candidate.resolve()))
+        except OSError:
+            readable = False
+        snapshots.append(
+            {
+                "path": _display_path(directory, root),
+                "is_directory": directory.is_dir(),
+                "readable": readable,
+                "entries": _file_records(entries, root=root),
+            }
+        )
+    return snapshots
+
+
 def _file_records(
     paths: set[str],
     *,
-    root: Path | None = None,
+    root: Path,
 ) -> list[tuple[str, int | None, int | None]]:
     records: list[tuple[str, int | None, int | None]] = []
     for value in sorted(paths, key=lambda item: (item.casefold(), item)):
         path = Path(value).expanduser().resolve()
-        exposed_path = _display_path(path, root) if root is not None else path.as_posix()
+        exposed_path = _display_path(path, root)
         try:
             stat = path.stat()
         except OSError:

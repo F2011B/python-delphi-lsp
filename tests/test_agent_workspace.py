@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+import delphiast.agent_workspace as agent_workspace_module
+import delphiast.project_discovery as project_discovery_module
 from delphiast.agent_protocol import AgentProtocolError, Focus, make_target_id
 from delphiast.agent_workspace import AgentUnit, AgentWorkspace
 from delphiast.project_indexer import ProjectIndexer
@@ -173,6 +175,37 @@ def test_multiple_projects_stay_inactive_until_selection_and_remain_isolated(tmp
     assert workspace.focus == Focus(project_id=project_ids["B"], unit_id="", target_id="")
 
 
+def test_include_files_returns_defensive_mapping_copies(tmp_path: Path) -> None:
+    write_text(
+        tmp_path / "Main.dpr",
+        """
+        program Main;
+        uses UnitA in 'UnitA.pas';
+        begin
+        end.
+        """,
+    )
+    write_text(
+        tmp_path / "UnitA.pas",
+        """
+        unit UnitA;
+        interface
+        {$I 'shared.inc'}
+        implementation
+        end.
+        """,
+    )
+    write_text(tmp_path / "shared.inc", "const SharedValue = 1;")
+    workspace = AgentWorkspace.open(tmp_path)
+
+    returned = workspace.include_files
+    returned[0]["path"] = "mutated.inc"
+
+    assert workspace.include_files == (
+        {"name": "shared.inc", "path": "shared.inc"},
+    )
+
+
 def test_select_project_rejects_an_unknown_project_id(tmp_path: Path) -> None:
     write_text(tmp_path / "A.dpr", "program A; begin end.")
     write_text(tmp_path / "B.dpr", "program B; begin end.")
@@ -226,6 +259,95 @@ def test_reselect_reuses_project_index_until_a_reachable_file_changes(
     workspace.select_project(project_id)
 
     assert calls == 2
+
+
+def test_reselect_indexes_a_newly_satisfiable_dependency(tmp_path: Path) -> None:
+    write_text(
+        tmp_path / "Main.dpr",
+        """
+        program Main;
+        uses MissingUnit;
+        begin
+        end.
+        """,
+    )
+    workspace = AgentWorkspace.open(tmp_path)
+    project_id = workspace.active_project_id
+
+    assert [unit.name for unit in workspace.units] == ["Main"]
+    assert any(problem["path"] == "MissingUnit" for problem in workspace.problems)
+
+    write_text(
+        tmp_path / "MissingUnit.pas",
+        "unit MissingUnit; interface implementation end.",
+    )
+    workspace.select_project(project_id)
+
+    assert [unit.name for unit in workspace.units] == ["Main", "MissingUnit"]
+    assert not any(problem.get("path") == "MissingUnit" for problem in workspace.problems)
+
+
+def test_environment_search_path_change_replaces_cached_units(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_path = tmp_path / "old_lib"
+    new_path = tmp_path / "new_lib"
+    write_text(old_path / "EnvUnit.pas", "unit EnvUnit; interface implementation end.")
+    write_text(new_path / "EnvUnit.pas", "unit EnvUnit; interface implementation end.")
+    write_text(
+        tmp_path / "Main.dpr",
+        """
+        program Main;
+        uses EnvUnit;
+        begin
+        end.
+        """,
+    )
+    write_text(
+        tmp_path / "Main.dproj",
+        """
+        <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+          <PropertyGroup>
+            <MainSource>Main.dpr</MainSource>
+            <DCC_UnitSearchPath>$AGENT_WORKSPACE_LIB</DCC_UnitSearchPath>
+          </PropertyGroup>
+        </Project>
+        """,
+    )
+    monkeypatch.setenv("AGENT_WORKSPACE_LIB", str(old_path))
+    workspace = AgentWorkspace.open(tmp_path)
+    project_id = workspace.active_project_id
+    original_revision = workspace.workspace_revision
+
+    assert {unit.path for unit in workspace.units} == {"Main.dpr", "old_lib/EnvUnit.pas"}
+
+    monkeypatch.setenv("AGENT_WORKSPACE_LIB", str(new_path))
+    workspace.select_project(project_id)
+
+    assert {unit.path for unit in workspace.units} == {"Main.dpr", "new_lib/EnvUnit.pas"}
+    assert workspace.workspace_revision != original_revision
+
+
+def test_workspace_revision_tracks_a_newly_satisfiable_dependency(tmp_path: Path) -> None:
+    write_text(
+        tmp_path / "Main.dpr",
+        """
+        program Main;
+        uses MissingUnit;
+        begin
+        end.
+        """,
+    )
+    workspace = AgentWorkspace.open(tmp_path)
+    original_revision = workspace.workspace_revision
+
+    write_text(
+        tmp_path / "MissingUnit.pas",
+        "unit MissingUnit; interface implementation end.",
+    )
+
+    assert workspace.workspace_revision != original_revision
 
 
 def test_ids_and_workspace_revision_are_deterministic_and_revision_tracks_source_changes(
@@ -355,6 +477,49 @@ def test_workspace_combines_discovery_and_selected_project_problems(tmp_path: Pa
     json.dumps(workspace.problems, allow_nan=False)
 
 
+def test_workspace_deduplicates_identical_active_project_indexer_problems(
+    tmp_path: Path,
+) -> None:
+    write_text(
+        tmp_path / "Main.dpr",
+        """
+        program Main;
+        uses
+          UnitA in 'UnitA.pas',
+          UnitB in 'UnitB.pas';
+        begin
+        end.
+        """,
+    )
+    for unit_name in ("UnitA", "UnitB"):
+        write_text(
+            tmp_path / f"{unit_name}.pas",
+            f"""
+            unit {unit_name};
+            interface
+            uses MissingUnit;
+            implementation
+            end.
+            """,
+        )
+
+    workspace = AgentWorkspace.open(tmp_path)
+
+    missing_problems = [
+        problem
+        for problem in workspace.problems
+        if problem.get("path") == "MissingUnit"
+    ]
+    assert missing_problems == [
+        {
+            "kind": "cant_find_file",
+            "message": "Unit not found: MissingUnit",
+            "origin": "Main.dpr",
+            "path": "MissingUnit",
+        }
+    ]
+
+
 def test_active_project_problems_exclude_unselected_project_discovery_problems(
     tmp_path: Path,
 ) -> None:
@@ -431,4 +596,51 @@ def test_open_uses_a_workspace_fallback_for_standalone_units(tmp_path: Path) -> 
     assert {entry["path"] for entry in workspace.search_path_entries} == {"src", "loose"}
     assert workspace.include_path_entries == (
         {"path": "includes", "origins": ["workspace include scan"]},
+    )
+
+
+def test_workspace_fallback_discovers_once_and_builds_a_flat_catalog(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_text(tmp_path / "src" / "Alpha.pas", "unit Alpha; interface implementation end.")
+    write_text(tmp_path / "other" / "Beta.pas", "unit Beta; interface implementation end.")
+    write_text(tmp_path / "include" / "used.inc", "const UsedValue = 1;")
+    write_text(tmp_path / "include" / "orphan.inc", "const OrphanValue = 2;")
+
+    discovery_calls = 0
+    source_scan_calls = 0
+    index_calls = 0
+    original_discover = agent_workspace_module.discover_delphi_project
+    original_scan_sources = project_discovery_module._scan_sources
+    original_index = ProjectIndexer.index
+
+    def counting_discover(*args, **kwargs):
+        nonlocal discovery_calls
+        discovery_calls += 1
+        return original_discover(*args, **kwargs)
+
+    def counting_scan_sources(*args, **kwargs):
+        nonlocal source_scan_calls
+        source_scan_calls += 1
+        return original_scan_sources(*args, **kwargs)
+
+    def counting_index(self: ProjectIndexer, file_name: str):
+        nonlocal index_calls
+        index_calls += 1
+        return original_index(self, file_name)
+
+    monkeypatch.setattr(agent_workspace_module, "discover_delphi_project", counting_discover)
+    monkeypatch.setattr(project_discovery_module, "_scan_sources", counting_scan_sources)
+    monkeypatch.setattr(ProjectIndexer, "index", counting_index)
+
+    workspace = AgentWorkspace.open(tmp_path)
+
+    assert discovery_calls == 1
+    assert source_scan_calls == 1
+    assert index_calls == 0
+    assert [unit.name for unit in workspace.units] == ["Alpha", "Beta"]
+    assert workspace.include_files == (
+        {"name": "orphan.inc", "path": "include/orphan.inc"},
+        {"name": "used.inc", "path": "include/used.inc"},
     )

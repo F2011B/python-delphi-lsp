@@ -43,12 +43,12 @@ class DelphiProjectDiscovery:
     search_paths: list[str] = field(default_factory=list)
     include_paths: list[str] = field(default_factory=list)
     defines: list[str] = field(default_factory=list)
-    search_path_origins: dict[str, list[str]] = field(default_factory=dict)
-    include_path_origins: dict[str, list[str]] = field(default_factory=dict)
-    define_origins: dict[str, list[str]] = field(default_factory=dict)
     source_files: list[str] = field(default_factory=list)
     unit_paths: dict[str, list[str]] = field(default_factory=dict)
     problems: list[DiscoveryProblem] = field(default_factory=list)
+    search_path_origins: dict[str, list[str]] = field(default_factory=dict)
+    include_path_origins: dict[str, list[str]] = field(default_factory=dict)
+    define_origins: dict[str, list[str]] = field(default_factory=dict)
 
 
 _DPR_UNIT_RE = re.compile(
@@ -77,7 +77,6 @@ def discover_delphi_project(
     seen_search: set[str] = set()
     seen_include: set[str] = set()
     seen_defines: set[str] = set()
-    seen_sources: set[str] = set()
     seen_projects: set[str] = set()
     seen_configs: set[str] = set()
 
@@ -186,29 +185,44 @@ def discover_delphi_project(
                     discovery.config_files.append(str(cfg))
 
     if scan_workspace_sources:
-        _scan_sources(root_path, discovery, seen_sources)
-        for source in discovery.source_files:
-            path = Path(source)
-            unit_key = path.stem.casefold()
-            discovery.unit_paths.setdefault(unit_key, []).append(source)
-            if path.suffix.casefold() in {".pas", ".dpr", ".dpk"}:
-                add_path(
-                    discovery.search_paths,
-                    seen_search,
-                    discovery.search_path_origins,
-                    path.parent,
-                    base=root_path,
-                    origin="workspace source scan",
-                )
-            elif path.suffix.casefold() == ".inc":
-                add_path(
-                    discovery.include_paths,
-                    seen_include,
-                    discovery.include_path_origins,
-                    path.parent,
-                    base=root_path,
-                    origin="workspace include scan",
-                )
+        populate_workspace_sources(discovery)
+
+    return discovery
+
+
+def populate_workspace_sources(discovery: DelphiProjectDiscovery) -> DelphiProjectDiscovery:
+    root_path = Path(discovery.root).expanduser().resolve()
+    seen_sources = {source.casefold() for source in discovery.source_files}
+    seen_search = {path.casefold() for path in discovery.search_paths}
+    seen_include = {path.casefold() for path in discovery.include_paths}
+
+    _scan_sources(root_path, discovery, seen_sources)
+    for source in discovery.source_files:
+        path = Path(source)
+        unit_key = path.stem.casefold()
+        unit_paths = discovery.unit_paths.setdefault(unit_key, [])
+        if source not in unit_paths:
+            unit_paths.append(source)
+        if path.suffix.casefold() in {".pas", ".dpr", ".dpk"}:
+            _add_resolved_path(
+                discovery.search_paths,
+                seen_search,
+                discovery.search_path_origins,
+                str(path.parent),
+                base=root_path,
+                origin="workspace source scan",
+                discovery=discovery,
+            )
+        elif path.suffix.casefold() == ".inc":
+            _add_resolved_path(
+                discovery.include_paths,
+                seen_include,
+                discovery.include_path_origins,
+                str(path.parent),
+                base=root_path,
+                origin="workspace include scan",
+                discovery=discovery,
+            )
 
     return discovery
 
@@ -487,4 +501,5 @@ __all__ = [
     "DelphiProjectDiscovery",
     "DiscoveryProblem",
     "discover_delphi_project",
+    "populate_workspace_sources",
 ]

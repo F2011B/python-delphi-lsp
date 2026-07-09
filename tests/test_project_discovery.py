@@ -2,7 +2,7 @@ import textwrap
 import os
 from pathlib import Path
 
-from delphiast.project_discovery import discover_delphi_project
+from delphiast.project_discovery import DelphiProjectDiscovery, DiscoveryProblem, discover_delphi_project
 from delphiast.project_indexer import ProjectIndexer
 from delphiast.lsp_server import LspWorkspaceState, WorkspaceConfig
 
@@ -10,6 +10,28 @@ from delphiast.lsp_server import LspWorkspaceState, WorkspaceConfig
 def write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(textwrap.dedent(text).strip() + "\n", encoding="utf-8")
+
+
+def test_discovery_value_preserves_original_positional_constructor_order() -> None:
+    problem = DiscoveryProblem("kind", "message", "origin")
+    discovery = DelphiProjectDiscovery(
+        "/workspace",
+        ["Main.dpr"],
+        ["Main.dproj"],
+        ["search"],
+        ["include"],
+        ["DEFINE"],
+        ["UnitA.pas"],
+        {"unita": ["UnitA.pas"]},
+        [problem],
+    )
+
+    assert discovery.source_files == ["UnitA.pas"]
+    assert discovery.unit_paths == {"unita": ["UnitA.pas"]}
+    assert discovery.problems == [problem]
+    assert discovery.search_path_origins == {}
+    assert discovery.include_path_origins == {}
+    assert discovery.define_origins == {}
 
 
 def test_discovery_can_skip_workspace_source_scan(tmp_path: Path) -> None:
