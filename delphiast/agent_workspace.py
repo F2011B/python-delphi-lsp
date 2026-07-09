@@ -17,7 +17,9 @@ from .project_discovery import (
 from .project_indexer import IncludeFileInfo, ProjectIndexResult, ProjectIndexer, UnitInfo
 
 
-_PROJECT_SNAPSHOT_EXTENSIONS = (".dpr", ".dpk", ".dproj", ".cfg", ".dof")
+_PROJECT_SNAPSHOT_EXTENSIONS = (".pas", ".dpr", ".dpk", ".dproj", ".cfg", ".dof")
+_UNIT_SNAPSHOT_EXTENSIONS = (".pas", ".dpr", ".dpk")
+_RELATIVE_INCLUDE_EXTENSIONS = (".inc",)
 
 
 @dataclass(frozen=True)
@@ -452,16 +454,32 @@ def _selection_snapshot_specs(
         spec.recursive_extensions.update(recursive)
 
     for project in discovery.project_files:
-        add(Path(project).parent, immediate=_PROJECT_SNAPSHOT_EXTENSIONS)
+        add(
+            Path(project).parent,
+            immediate=_PROJECT_SNAPSHOT_EXTENSIONS,
+            recursive=_RELATIVE_INCLUDE_EXTENSIONS,
+        )
     for path in discovery.search_paths:
-        add(Path(path), immediate=SOURCE_EXTENSIONS)
+        add(
+            Path(path),
+            immediate=_UNIT_SNAPSHOT_EXTENSIONS,
+            recursive=_RELATIVE_INCLUDE_EXTENSIONS,
+        )
     for path in discovery.include_paths:
         add(Path(path), recursive=SOURCE_EXTENSIONS)
     if result is not None:
         for unit in result.parsed_units:
-            add(Path(unit.path).parent, immediate=SOURCE_EXTENSIONS)
+            add(
+                Path(unit.path).parent,
+                immediate=_UNIT_SNAPSHOT_EXTENSIONS,
+                recursive=_RELATIVE_INCLUDE_EXTENSIONS,
+            )
         for include in result.include_files:
-            add(Path(include.path).parent, immediate=SOURCE_EXTENSIONS)
+            add(
+                Path(include.path).parent,
+                immediate=_UNIT_SNAPSHOT_EXTENSIONS,
+                recursive=_RELATIVE_INCLUDE_EXTENSIONS,
+            )
     return sorted(specs.values(), key=lambda item: (str(item.path).casefold(), str(item.path)))
 
 

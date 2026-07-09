@@ -397,6 +397,43 @@ def test_nested_include_creation_invalidates_revision_and_project_cache(tmp_path
     )
 
 
+def test_source_relative_nested_include_invalidates_revision_and_project_cache(
+    tmp_path: Path,
+) -> None:
+    write_text(
+        tmp_path / "Main.dpr",
+        """
+        program Main;
+        uses UnitA in 'src/UnitA.pas';
+        begin
+        end.
+        """,
+    )
+    write_text(
+        tmp_path / "src" / "UnitA.pas",
+        """
+        unit UnitA;
+        interface
+        {$I 'nested/new.inc'}
+        implementation
+        end.
+        """,
+    )
+    workspace = AgentWorkspace.open(tmp_path)
+    project_id = workspace.active_project_id
+    original_revision = workspace.workspace_revision
+
+    assert workspace.include_files == ()
+
+    write_text(tmp_path / "src" / "nested" / "new.inc", "const NewValue = 1;")
+
+    assert workspace.workspace_revision != original_revision
+    workspace.select_project(project_id)
+    assert workspace.include_files == (
+        {"name": "nested/new.inc", "path": "src/nested/new.inc"},
+    )
+
+
 @pytest.mark.parametrize("config_suffix", [".dproj", ".cfg", ".dof"])
 def test_new_and_changed_project_config_invalidates_revision_and_is_applied(
     tmp_path: Path,
@@ -454,7 +491,7 @@ def test_new_and_changed_project_config_invalidates_revision_and_is_applied(
     assert [entry["define"] for entry in workspace.define_entries] == ["CONFIG_CHANGED_LONG"]
 
 
-def test_active_project_revision_uses_explicit_discovery_without_root_traversal(
+def test_active_project_revision_uses_explicit_discovery_without_recursive_pascal_catalog(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -479,15 +516,24 @@ def test_active_project_revision_uses_explicit_discovery_without_root_traversal(
     monkeypatch.setattr(agent_workspace_module, "discover_delphi_project", recording_discover)
     monkeypatch.setattr(Path, "rglob", counting_rglob)
 
-    _ = workspace.workspace_revision
+    original_revision = workspace.workspace_revision
+    write_text(
+        tmp_path / "nested" / "Noise.pas",
+        "unit Noise; interface implementation end.",
+    )
 
+    assert workspace.workspace_revision == original_revision
     assert discovery_calls == [
         {
             "project_file": (tmp_path / "Main.dpr").resolve(),
             "scan_workspace_sources": False,
-        }
+        },
+        {
+            "project_file": (tmp_path / "Main.dpr").resolve(),
+            "scan_workspace_sources": False,
+        },
     ]
-    assert root_traversals == 0
+    assert root_traversals == 2
 
 
 def test_ids_and_workspace_revision_are_deterministic_and_revision_tracks_source_changes(
