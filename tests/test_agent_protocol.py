@@ -212,10 +212,14 @@ def test_context_budget_uses_deterministic_ceiling(chars: int, approx_tokens: in
 def test_focus_and_page_are_serializable_value_objects() -> None:
     protocol = _protocol()
 
-    focus = protocol.Focus(project_id='project-1', target_id='target-1')
+    focus = protocol.Focus(project_id='project-1', unit_id='unit-1', target_id='target-1')
     page = protocol.Page(returned=2, total=5, truncated=True, next_cursor='next-1')
 
-    assert focus.to_mapping() == {'project_id': 'project-1', 'target_id': 'target-1'}
+    assert focus.to_mapping() == {
+        'project_id': 'project-1',
+        'unit_id': 'unit-1',
+        'target_id': 'target-1',
+    }
     assert page.to_mapping() == {
         'returned': 2,
         'total': 5,
@@ -224,11 +228,30 @@ def test_focus_and_page_are_serializable_value_objects() -> None:
     }
 
 
+def test_focus_carries_project_unit_and_target_identifiers() -> None:
+    protocol = _protocol()
+
+    focus = protocol.Focus(
+        project_id='project-1',
+        unit_id='unit-1',
+        target_id='target-1',
+    )
+
+    assert focus.project_id == 'project-1'
+    assert focus.unit_id == 'unit-1'
+    assert focus.target_id == 'target-1'
+    assert focus.to_mapping() == {
+        'project_id': 'project-1',
+        'unit_id': 'unit-1',
+        'target_id': 'target-1',
+    }
+
+
 def test_success_response_contains_the_complete_versioned_envelope() -> None:
     protocol = _protocol()
     response = protocol.AgentResponse(
         workspace_revision='revision-7',
-        focus=protocol.Focus(project_id='project-1', target_id='target-1'),
+        focus=protocol.Focus(project_id='project-1', unit_id='unit-1', target_id='target-1'),
         result={'items': [{'id': 'target-1'}]},
         page=protocol.Page(returned=1, total=1, truncated=False, next_cursor=''),
         context=protocol.ContextBudget(chars=17),
@@ -240,7 +263,7 @@ def test_success_response_contains_the_complete_versioned_envelope() -> None:
     assert mapping == {
         'schema': 2,
         'workspace_revision': 'revision-7',
-        'focus': {'project_id': 'project-1', 'target_id': 'target-1'},
+        'focus': {'project_id': 'project-1', 'unit_id': 'unit-1', 'target_id': 'target-1'},
         'result': {'items': [{'id': 'target-1'}]},
         'page': {'returned': 1, 'total': 1, 'truncated': False, 'next_cursor': ''},
         'context': {'chars': 17, 'approx_tokens': 5},

@@ -162,11 +162,13 @@ class AgentRequest:
 @dataclass(frozen=True)
 class Focus:
     project_id: str = ''
+    unit_id: str = ''
     target_id: str = ''
 
     def to_mapping(self) -> dict[str, str]:
         return {
             'project_id': self.project_id,
+            'unit_id': self.unit_id,
             'target_id': self.target_id,
         }
 
