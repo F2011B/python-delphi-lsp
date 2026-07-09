@@ -173,22 +173,19 @@ class AgentWorkspace:
     def problems(self) -> tuple[dict[str, str], ...]:
         entries: list[dict[str, str]] = []
         seen_discovery: set[tuple[str, str, str]] = set()
-        discoveries = [self._discovery]
-        if self._active_discovery is not None:
-            discoveries.append(self._active_discovery)
-        for discovery in discoveries:
-            for problem in discovery.problems:
-                key = (problem.kind, problem.message, problem.origin)
-                if key in seen_discovery:
-                    continue
-                seen_discovery.add(key)
-                entries.append(
-                    {
-                        "kind": problem.kind,
-                        "message": problem.message,
-                        "origin": self._display_origin(problem.origin),
-                    }
-                )
+        discovery = self._active_discovery or self._discovery
+        for problem in discovery.problems:
+            key = (problem.kind, problem.message, problem.origin)
+            if key in seen_discovery:
+                continue
+            seen_discovery.add(key)
+            entries.append(
+                {
+                    "kind": problem.kind,
+                    "message": problem.message,
+                    "origin": self._display_origin(problem.origin),
+                }
+            )
 
         active_project = self.active_project
         if active_project is not None and self._active_result is not None:

@@ -355,6 +355,35 @@ def test_workspace_combines_discovery_and_selected_project_problems(tmp_path: Pa
     json.dumps(workspace.problems, allow_nan=False)
 
 
+def test_active_project_problems_exclude_unselected_project_discovery_problems(
+    tmp_path: Path,
+) -> None:
+    write_text(tmp_path / "A.dpr", "program A; begin end.")
+    write_text(tmp_path / "B.dpr", "program B; begin end.")
+    write_text(
+        tmp_path / "B.dproj",
+        """
+        <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+          <PropertyGroup>
+            <MainSource>B.dpr</MainSource>
+            <DCC_UnitSearchPath>$(B_ONLY_ROOT)/lib</DCC_UnitSearchPath>
+          </PropertyGroup>
+        </Project>
+        """,
+    )
+
+    workspace = AgentWorkspace.open(tmp_path)
+    project_ids = {project.name: project.project_id for project in workspace.projects}
+
+    assert len(workspace.problems) == 1
+    assert workspace.problems[0]["origin"] == "B.dproj"
+    assert "$(B_ONLY_ROOT)" in workspace.problems[0]["message"]
+
+    workspace.select_project(project_ids["A"])
+
+    assert workspace.problems == ()
+
+
 def test_open_uses_a_workspace_fallback_for_standalone_units(tmp_path: Path) -> None:
     write_text(
         tmp_path / "src" / "Alpha.pas",
