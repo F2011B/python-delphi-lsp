@@ -43,6 +43,9 @@ class DelphiProjectDiscovery:
     search_paths: list[str] = field(default_factory=list)
     include_paths: list[str] = field(default_factory=list)
     defines: list[str] = field(default_factory=list)
+    search_path_origins: dict[str, list[str]] = field(default_factory=dict)
+    include_path_origins: dict[str, list[str]] = field(default_factory=dict)
+    define_origins: dict[str, list[str]] = field(default_factory=dict)
     source_files: list[str] = field(default_factory=list)
     unit_paths: dict[str, list[str]] = field(default_factory=dict)
     problems: list[DiscoveryProblem] = field(default_factory=list)
@@ -65,6 +68,7 @@ def discover_delphi_project(
     include_paths: Iterable[str | os.PathLike[str]] = (),
     search_paths: Iterable[str | os.PathLike[str]] = (),
     defines: Iterable[str] = (),
+    scan_workspace_sources: bool = True,
 ) -> DelphiProjectDiscovery:
     root_path = Path(root).expanduser().resolve()
     project_path = Path(project_file).expanduser().resolve() if project_file is not None else None
@@ -77,14 +81,24 @@ def discover_delphi_project(
     seen_projects: set[str] = set()
     seen_configs: set[str] = set()
 
-    def add_path(target: list[str], seen: set[str], path: Path | str, *, base: Path, origin: str) -> None:
-        resolved = _resolve_project_path(str(path), base=base, origin=origin, discovery=discovery)
-        if resolved is None:
-            return
-        key = str(resolved).casefold()
-        if key not in seen:
-            seen.add(key)
-            target.append(str(resolved))
+    def add_path(
+        target: list[str],
+        seen: set[str],
+        origins: dict[str, list[str]],
+        path: Path | str,
+        *,
+        base: Path,
+        origin: str,
+    ) -> None:
+        _add_resolved_path(
+            target,
+            seen,
+            origins,
+            str(path),
+            base=base,
+            origin=origin,
+            discovery=discovery,
+        )
 
     def add_define(raw: str, *, origin: str = "manual define") -> None:
         for item in _split_list(raw):
@@ -100,11 +114,27 @@ def discover_delphi_project(
             if key not in seen_defines:
                 seen_defines.add(key)
                 discovery.defines.append(define)
+            exposed_define = next(item for item in discovery.defines if item.casefold() == key)
+            _record_origin(discovery.define_origins, exposed_define, origin)
 
     for value in search_paths:
-        add_path(discovery.search_paths, seen_search, Path(value), base=root_path, origin="manual search path")
+        add_path(
+            discovery.search_paths,
+            seen_search,
+            discovery.search_path_origins,
+            Path(value),
+            base=root_path,
+            origin="manual search path",
+        )
     for value in include_paths:
-        add_path(discovery.include_paths, seen_include, Path(value), base=root_path, origin="manual include path")
+        add_path(
+            discovery.include_paths,
+            seen_include,
+            discovery.include_path_origins,
+            Path(value),
+            base=root_path,
+            origin="manual include path",
+        )
     for value in defines:
         add_define(value)
 
@@ -115,7 +145,13 @@ def discover_delphi_project(
             seen_projects.add(key)
             discovery.project_files.append(str(project))
         if project.suffix.casefold() in PROJECT_EXTENSIONS:
-            _read_dpr_paths(project, discovery, discovery.search_paths, seen_search)
+            _read_dpr_paths(
+                project,
+                discovery,
+                discovery.search_paths,
+                seen_search,
+                discovery.search_path_origins,
+            )
         dproj = project.with_suffix(".dproj")
         if dproj.exists():
             _read_dproj(
@@ -123,8 +159,10 @@ def discover_delphi_project(
                 discovery,
                 discovery.search_paths,
                 seen_search,
+                discovery.search_path_origins,
                 discovery.include_paths,
                 seen_include,
+                discovery.include_path_origins,
                 add_define,
             )
             seen_configs.add(str(dproj).casefold())
@@ -136,8 +174,10 @@ def discover_delphi_project(
                     discovery,
                     discovery.search_paths,
                     seen_search,
+                    discovery.search_path_origins,
                     discovery.include_paths,
                     seen_include,
+                    discovery.include_path_origins,
                     add_define,
                 )
                 key = str(cfg).casefold()
@@ -145,15 +185,30 @@ def discover_delphi_project(
                     seen_configs.add(key)
                     discovery.config_files.append(str(cfg))
 
-    _scan_sources(root_path, discovery, seen_sources)
-    for source in discovery.source_files:
-        path = Path(source)
-        unit_key = path.stem.casefold()
-        discovery.unit_paths.setdefault(unit_key, []).append(source)
-        if path.suffix.casefold() in {".pas", ".dpr", ".dpk"}:
-            add_path(discovery.search_paths, seen_search, path.parent, base=root_path, origin="workspace source scan")
-        elif path.suffix.casefold() == ".inc":
-            add_path(discovery.include_paths, seen_include, path.parent, base=root_path, origin="workspace include scan")
+    if scan_workspace_sources:
+        _scan_sources(root_path, discovery, seen_sources)
+        for source in discovery.source_files:
+            path = Path(source)
+            unit_key = path.stem.casefold()
+            discovery.unit_paths.setdefault(unit_key, []).append(source)
+            if path.suffix.casefold() in {".pas", ".dpr", ".dpk"}:
+                add_path(
+                    discovery.search_paths,
+                    seen_search,
+                    discovery.search_path_origins,
+                    path.parent,
+                    base=root_path,
+                    origin="workspace source scan",
+                )
+            elif path.suffix.casefold() == ".inc":
+                add_path(
+                    discovery.include_paths,
+                    seen_include,
+                    discovery.include_path_origins,
+                    path.parent,
+                    base=root_path,
+                    origin="workspace include scan",
+                )
 
     return discovery
 
@@ -175,7 +230,13 @@ def _project_candidates(root: Path, explicit: Path | None) -> list[Path]:
     return sorted(candidates, key=lambda path: str(path).casefold())
 
 
-def _read_dpr_paths(project: Path, discovery: DelphiProjectDiscovery, search_paths: list[str], seen_search: set[str]) -> None:
+def _read_dpr_paths(
+    project: Path,
+    discovery: DelphiProjectDiscovery,
+    search_paths: list[str],
+    seen_search: set[str],
+    search_path_origins: dict[str, list[str]],
+) -> None:
     try:
         text = project.read_text(encoding="utf-8")
     except UnicodeDecodeError:
@@ -192,10 +253,15 @@ def _read_dpr_paths(project: Path, discovery: DelphiProjectDiscovery, search_pat
             resolved = _resolve_project_path(unit_path, base=project.parent, origin=str(project), discovery=discovery)
             if resolved is None:
                 continue
-            parent_key = str(resolved.parent).casefold()
-            if parent_key not in seen_search:
-                seen_search.add(parent_key)
-                search_paths.append(str(resolved.parent))
+            _add_resolved_path(
+                search_paths,
+                seen_search,
+                search_path_origins,
+                str(resolved.parent),
+                base=project.parent,
+                origin=str(project),
+                discovery=discovery,
+            )
 
 
 def _read_dproj(
@@ -203,8 +269,10 @@ def _read_dproj(
     discovery: DelphiProjectDiscovery,
     search_paths: list[str],
     seen_search: set[str],
+    search_path_origins: dict[str, list[str]],
     include_paths: list[str],
     seen_include: set[str],
+    include_path_origins: dict[str, list[str]],
     add_define,
 ) -> None:
     try:
@@ -218,10 +286,26 @@ def _read_dproj(
         text = (element.text or "").strip()
         if name in {"DCC_UnitSearchPath", "UnitSearchPath"} and text:
             for item in _split_list(text):
-                _add_resolved_path(search_paths, seen_search, item, base=path.parent, origin=str(path), discovery=discovery)
+                _add_resolved_path(
+                    search_paths,
+                    seen_search,
+                    search_path_origins,
+                    item,
+                    base=path.parent,
+                    origin=str(path),
+                    discovery=discovery,
+                )
         elif name in {"DCC_IncludePath", "IncludePath"} and text:
             for item in _split_list(text):
-                _add_resolved_path(include_paths, seen_include, item, base=path.parent, origin=str(path), discovery=discovery)
+                _add_resolved_path(
+                    include_paths,
+                    seen_include,
+                    include_path_origins,
+                    item,
+                    base=path.parent,
+                    origin=str(path),
+                    discovery=discovery,
+                )
         elif name in {"DCC_Define", "DefineConstants"} and text:
                 add_define(text, origin=str(path))
 
@@ -230,10 +314,15 @@ def _read_dproj(
             if include:
                 resolved = _resolve_project_path(include, base=path.parent, origin=str(path), discovery=discovery)
                 if resolved is not None:
-                    key = str(resolved.parent).casefold()
-                    if key not in seen_search:
-                        seen_search.add(key)
-                        search_paths.append(str(resolved.parent))
+                    _add_resolved_path(
+                        search_paths,
+                        seen_search,
+                        search_path_origins,
+                        str(resolved.parent),
+                        base=path.parent,
+                        origin=str(path),
+                        discovery=discovery,
+                    )
 
 
 def _read_cfg(
@@ -241,8 +330,10 @@ def _read_cfg(
     discovery: DelphiProjectDiscovery,
     search_paths: list[str],
     seen_search: set[str],
+    search_path_origins: dict[str, list[str]],
     include_paths: list[str],
     seen_include: set[str],
+    include_path_origins: dict[str, list[str]],
     add_define,
 ) -> None:
     try:
@@ -263,10 +354,26 @@ def _read_cfg(
         value = match.group("value")
         if option == "-u":
             for item in _split_list(value):
-                _add_resolved_path(search_paths, seen_search, item, base=path.parent, origin=str(path), discovery=discovery)
+                _add_resolved_path(
+                    search_paths,
+                    seen_search,
+                    search_path_origins,
+                    item,
+                    base=path.parent,
+                    origin=str(path),
+                    discovery=discovery,
+                )
         elif option == "-i":
             for item in _split_list(value):
-                _add_resolved_path(include_paths, seen_include, item, base=path.parent, origin=str(path), discovery=discovery)
+                _add_resolved_path(
+                    include_paths,
+                    seen_include,
+                    include_path_origins,
+                    item,
+                    base=path.parent,
+                    origin=str(path),
+                    discovery=discovery,
+                )
         elif option == "-d":
             add_define(value, origin=str(path))
 
@@ -306,6 +413,7 @@ def _walk_sources(root: Path, pattern: str) -> list[Path]:
 def _add_resolved_path(
     target: list[str],
     seen: set[str],
+    origins: dict[str, list[str]],
     value: str,
     *,
     base: Path,
@@ -316,10 +424,17 @@ def _add_resolved_path(
     if resolved is None:
         return
     key = str(resolved).casefold()
-    if key in seen:
-        return
-    seen.add(key)
-    target.append(str(resolved))
+    if key not in seen:
+        seen.add(key)
+        target.append(str(resolved))
+    exposed_path = next(item for item in target if item.casefold() == key)
+    _record_origin(origins, exposed_path, origin)
+
+
+def _record_origin(origins: dict[str, list[str]], key: str, origin: str) -> None:
+    entries = origins.setdefault(key, [])
+    if origin not in entries:
+        entries.append(origin)
 
 
 def _resolve_project_path(

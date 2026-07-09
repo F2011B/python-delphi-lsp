@@ -1,0 +1,405 @@
+import json
+import textwrap
+from dataclasses import FrozenInstanceError
+from pathlib import Path
+
+import pytest
+
+from delphiast.agent_protocol import AgentProtocolError, Focus, make_target_id
+from delphiast.agent_workspace import AgentUnit, AgentWorkspace
+from delphiast.project_indexer import ProjectIndexer
+
+
+def write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(textwrap.dedent(text).strip() + "\n", encoding="utf-8")
+
+
+def test_open_auto_selects_one_project_with_deterministic_mapping(tmp_path: Path) -> None:
+    write_text(tmp_path / "projects" / "Main.dpr", "program Main; begin end.")
+
+    workspace = AgentWorkspace.open(tmp_path)
+
+    expected_id = make_target_id("project", "projects/Main.dpr", "Main")
+    assert len(workspace.projects) == 1
+    project = workspace.projects[0]
+    assert project.to_mapping() == {
+        "project_id": expected_id,
+        "name": "Main",
+        "path": "projects/Main.dpr",
+        "kind": "program",
+    }
+    assert workspace.active_project == project
+    assert workspace.active_project_id == expected_id
+    assert workspace.focus == Focus(project_id=expected_id, unit_id="", target_id="")
+
+
+def test_open_selects_an_explicit_project_from_a_multi_project_workspace(tmp_path: Path) -> None:
+    write_text(tmp_path / "A.dpr", "program A; begin end.")
+    selected_path = tmp_path / "nested" / "B.dpr"
+    write_text(selected_path, "program B; begin end.")
+
+    workspace = AgentWorkspace.open(tmp_path, project_file="nested/B.dpr")
+
+    expected_id = make_target_id("project", "nested/B.dpr", "B")
+    assert [project.name for project in workspace.projects] == ["B"]
+    assert workspace.active_project_id == expected_id
+    assert [unit.name for unit in workspace.units] == ["B"]
+
+
+def test_selected_project_exposes_only_reachable_units_with_deterministic_ids(tmp_path: Path) -> None:
+    write_text(
+        tmp_path / "projects" / "Main.dpr",
+        """
+        program Main;
+
+        uses
+          UnitA in '..\\src\\UnitA.pas';
+
+        begin
+        end.
+        """,
+    )
+    write_text(
+        tmp_path / "src" / "UnitA.pas",
+        """
+        unit UnitA;
+
+        interface
+
+        uses UnitB;
+
+        implementation
+
+        end.
+        """,
+    )
+    write_text(tmp_path / "src" / "UnitB.pas", "unit UnitB; interface implementation end.")
+    write_text(tmp_path / "Noise.pas", "unit Noise; interface implementation end.")
+
+    workspace = AgentWorkspace.open(tmp_path)
+
+    assert all(isinstance(unit, AgentUnit) for unit in workspace.units)
+    assert [unit.to_mapping() for unit in workspace.units] == [
+        {
+            "unit_id": make_target_id("unit", "projects/Main.dpr", "Main"),
+            "name": "Main",
+            "path": "projects/Main.dpr",
+            "has_error": False,
+        },
+        {
+            "unit_id": make_target_id("unit", "src/UnitA.pas", "UnitA"),
+            "name": "UnitA",
+            "path": "src/UnitA.pas",
+            "has_error": False,
+        },
+        {
+            "unit_id": make_target_id("unit", "src/UnitB.pas", "UnitB"),
+            "name": "UnitB",
+            "path": "src/UnitB.pas",
+            "has_error": False,
+        },
+    ]
+    with pytest.raises(FrozenInstanceError):
+        workspace.active_project.path = "changed.dpr"  # type: ignore[misc,union-attr]
+    with pytest.raises(FrozenInstanceError):
+        workspace.units[0].path = "changed.pas"  # type: ignore[misc]
+
+
+def test_multiple_projects_stay_inactive_until_selection_and_remain_isolated(tmp_path: Path) -> None:
+    write_text(
+        tmp_path / "A.dpr",
+        """
+        program A;
+        uses AOnly in 'a/AOnly.pas';
+        begin
+        end.
+        """,
+    )
+    write_text(
+        tmp_path / "A.dproj",
+        """
+        <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+          <PropertyGroup>
+            <MainSource>A.dpr</MainSource>
+            <DCC_IncludePath>a/includes</DCC_IncludePath>
+          </PropertyGroup>
+        </Project>
+        """,
+    )
+    write_text(
+        tmp_path / "a" / "AOnly.pas",
+        """
+        unit AOnly;
+        interface
+        {$I 'A.inc'}
+        implementation
+        end.
+        """,
+    )
+    write_text(tmp_path / "a" / "includes" / "A.inc", "const AValue = 1;")
+    write_text(
+        tmp_path / "B.dpr",
+        """
+        program B;
+        uses BOnly in 'b/BOnly.pas';
+        begin
+        end.
+        """,
+    )
+    write_text(tmp_path / "b" / "BOnly.pas", "unit BOnly; interface implementation end.")
+    write_text(tmp_path / "Noise.pas", "unit Noise; interface implementation end.")
+
+    workspace = AgentWorkspace.open(tmp_path)
+    project_ids = {project.name: project.project_id for project in workspace.projects}
+
+    assert workspace.active_project is None
+    assert workspace.active_project_id == ""
+    assert workspace.focus == Focus()
+    assert workspace.units == ()
+
+    workspace.select_project(project_ids["A"])
+
+    assert [unit.name for unit in workspace.units] == ["A", "AOnly"]
+    assert workspace.include_files == (
+        {"name": "A.inc", "path": "a/includes/A.inc"},
+    )
+    assert workspace.focus == Focus(project_id=project_ids["A"], unit_id="", target_id="")
+
+    workspace.select_project(project_ids["B"])
+
+    assert [unit.name for unit in workspace.units] == ["B", "BOnly"]
+    assert workspace.include_files == ()
+    assert workspace.focus == Focus(project_id=project_ids["B"], unit_id="", target_id="")
+
+
+def test_select_project_rejects_an_unknown_project_id(tmp_path: Path) -> None:
+    write_text(tmp_path / "A.dpr", "program A; begin end.")
+    write_text(tmp_path / "B.dpr", "program B; begin end.")
+    workspace = AgentWorkspace.open(tmp_path)
+
+    with pytest.raises(AgentProtocolError) as caught:
+        workspace.select_project("missing-project")
+
+    assert caught.value.code == "project_not_found"
+    assert caught.value.message == "Project not found: missing-project."
+    assert workspace.active_project_id == ""
+    assert workspace.focus == Focus()
+
+
+def test_reselect_reuses_project_index_until_a_reachable_file_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_text(
+        tmp_path / "Main.dpr",
+        """
+        program Main;
+        uses UnitA in 'UnitA.pas';
+        begin
+        end.
+        """,
+    )
+    unit_path = tmp_path / "UnitA.pas"
+    write_text(unit_path, "unit UnitA; interface implementation end.")
+
+    calls = 0
+    original_index = ProjectIndexer.index
+
+    def counting_index(self: ProjectIndexer, file_name: str):
+        nonlocal calls
+        calls += 1
+        return original_index(self, file_name)
+
+    monkeypatch.setattr(ProjectIndexer, "index", counting_index)
+
+    workspace = AgentWorkspace.open(tmp_path)
+    project_id = workspace.active_project_id
+    workspace.select_project(project_id)
+
+    assert calls == 1
+
+    unit_path.write_text(
+        unit_path.read_text(encoding="utf-8") + "// changed\n",
+        encoding="utf-8",
+    )
+    workspace.select_project(project_id)
+
+    assert calls == 2
+
+
+def test_ids_and_workspace_revision_are_deterministic_and_revision_tracks_source_changes(
+    tmp_path: Path,
+) -> None:
+    write_text(
+        tmp_path / "Main.dpr",
+        """
+        program Main;
+        uses UnitA in 'src/UnitA.pas';
+        begin
+        end.
+        """,
+    )
+    unit_path = tmp_path / "src" / "UnitA.pas"
+    write_text(unit_path, "unit UnitA; interface implementation end.")
+
+    first = AgentWorkspace.open(tmp_path)
+    second = AgentWorkspace.open(tmp_path)
+
+    assert [project.project_id for project in first.projects] == [
+        project.project_id for project in second.projects
+    ]
+    assert [unit.unit_id for unit in first.units] == [unit.unit_id for unit in second.units]
+    assert first.workspace_revision == second.workspace_revision
+    assert first.workspace_revision.startswith("workspace_v2_")
+
+    original_revision = first.workspace_revision
+    unit_path.write_text(
+        unit_path.read_text(encoding="utf-8") + "// revision change\n",
+        encoding="utf-8",
+    )
+
+    assert first.workspace_revision != original_revision
+
+
+def test_workspace_exposes_project_path_and_define_provenance_as_json(tmp_path: Path) -> None:
+    write_text(
+        tmp_path / "Main.dpr",
+        """
+        program Main;
+        uses UnitA in 'src/UnitA.pas';
+        begin
+        end.
+        """,
+    )
+    write_text(tmp_path / "src" / "UnitA.pas", "unit UnitA; interface implementation end.")
+    write_text(
+        tmp_path / "Main.dproj",
+        """
+        <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+          <PropertyGroup>
+            <MainSource>Main.dpr</MainSource>
+            <DCC_UnitSearchPath>lib</DCC_UnitSearchPath>
+            <DCC_IncludePath>include</DCC_IncludePath>
+            <DCC_Define>DPROJ_ONLY</DCC_Define>
+          </PropertyGroup>
+        </Project>
+        """,
+    )
+    write_text(tmp_path / "Main.cfg", "-Ucfg_lib\n-Icfg_include\n-DCFG_ONLY")
+    write_text(tmp_path / "Main.dof", "-Udof_lib\n-Idof_include\n-DDOF_ONLY")
+
+    workspace = AgentWorkspace.open(tmp_path)
+
+    assert workspace.search_path_entries == (
+        {"path": "src", "origins": ["Main.dpr"]},
+        {"path": "lib", "origins": ["Main.dproj"]},
+        {"path": "cfg_lib", "origins": ["Main.cfg"]},
+        {"path": "dof_lib", "origins": ["Main.dof"]},
+    )
+    assert workspace.include_path_entries == (
+        {"path": "include", "origins": ["Main.dproj"]},
+        {"path": "cfg_include", "origins": ["Main.cfg"]},
+        {"path": "dof_include", "origins": ["Main.dof"]},
+    )
+    assert workspace.define_entries == (
+        {"define": "DPROJ_ONLY", "origins": ["Main.dproj"]},
+        {"define": "CFG_ONLY", "origins": ["Main.cfg"]},
+        {"define": "DOF_ONLY", "origins": ["Main.dof"]},
+    )
+    json.dumps(
+        {
+            "search": workspace.search_path_entries,
+            "include": workspace.include_path_entries,
+            "defines": workspace.define_entries,
+        },
+        allow_nan=False,
+    )
+
+
+def test_workspace_combines_discovery_and_selected_project_problems(tmp_path: Path) -> None:
+    write_text(
+        tmp_path / "Main.dpr",
+        """
+        program Main;
+        uses MissingUnit;
+        begin
+        end.
+        """,
+    )
+    write_text(
+        tmp_path / "Main.dproj",
+        """
+        <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+          <PropertyGroup>
+            <MainSource>Main.dpr</MainSource>
+            <DCC_UnitSearchPath>$(UNKNOWN_ROOT)/lib</DCC_UnitSearchPath>
+          </PropertyGroup>
+        </Project>
+        """,
+    )
+
+    workspace = AgentWorkspace.open(tmp_path)
+
+    assert len(workspace.problems) == 2
+    discovery_problem, project_problem = workspace.problems
+    assert discovery_problem["kind"] == "unresolved_macro"
+    assert "$(UNKNOWN_ROOT)" in discovery_problem["message"]
+    assert discovery_problem["origin"] == "Main.dproj"
+    assert project_problem == {
+        "kind": "cant_find_file",
+        "message": "Unit not found: MissingUnit",
+        "origin": "Main.dpr",
+        "path": "MissingUnit",
+    }
+    json.dumps(workspace.problems, allow_nan=False)
+
+
+def test_open_uses_a_workspace_fallback_for_standalone_units(tmp_path: Path) -> None:
+    write_text(
+        tmp_path / "src" / "Alpha.pas",
+        """
+        unit Alpha;
+        interface
+        uses Beta;
+        {$I 'common.inc'}
+        implementation
+        end.
+        """,
+    )
+    write_text(tmp_path / "src" / "Beta.pas", "unit Beta; interface implementation end.")
+    write_text(tmp_path / "loose" / "Loose.pas", "unit Loose; interface implementation end.")
+    write_text(tmp_path / "includes" / "common.inc", "const CommonValue = 1;")
+    write_text(
+        tmp_path / "Standalone.dproj",
+        """
+        <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+          <PropertyGroup>
+            <DCC_UnitSearchPath>src</DCC_UnitSearchPath>
+            <DCC_IncludePath>includes</DCC_IncludePath>
+          </PropertyGroup>
+        </Project>
+        """,
+    )
+
+    workspace = AgentWorkspace.open(tmp_path)
+
+    fallback_id = make_target_id("project", "", "workspace")
+    assert [project.to_mapping() for project in workspace.projects] == [
+        {
+            "project_id": fallback_id,
+            "name": "Workspace",
+            "path": ".",
+            "kind": "workspace",
+        }
+    ]
+    assert workspace.active_project_id == fallback_id
+    assert workspace.focus == Focus(project_id=fallback_id, unit_id="", target_id="")
+    assert [unit.name for unit in workspace.units] == ["Alpha", "Beta", "Loose"]
+    assert workspace.include_files == (
+        {"name": "common.inc", "path": "includes/common.inc"},
+    )
+    assert {entry["path"] for entry in workspace.search_path_entries} == {"src", "loose"}
+    assert workspace.include_path_entries == (
+        {"path": "includes", "origins": ["workspace include scan"]},
+    )
