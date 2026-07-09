@@ -7,12 +7,17 @@ from pathlib import Path
 
 from .agent_protocol import AgentProtocolError, Focus, make_target_id
 from .project_discovery import (
+    SKIP_DIRS,
     SOURCE_EXTENSIONS,
     DelphiProjectDiscovery,
     discover_delphi_project,
+    discover_workspace_sources,
     populate_workspace_sources,
 )
 from .project_indexer import IncludeFileInfo, ProjectIndexResult, ProjectIndexer, UnitInfo
+
+
+_PROJECT_SNAPSHOT_EXTENSIONS = (".dpr", ".dpk", ".dproj", ".cfg", ".dof")
 
 
 @dataclass(frozen=True)
@@ -51,6 +56,13 @@ class AgentUnit:
 class _ProjectCache:
     result: ProjectIndexResult
     fingerprint: str
+
+
+@dataclass
+class _DirectorySnapshotSpec:
+    path: Path
+    immediate_extensions: set[str]
+    recursive_extensions: set[str]
 
 
 class AgentWorkspace:
@@ -212,22 +224,34 @@ class AgentWorkspace:
     @property
     def workspace_revision(self) -> str:
         discovery = self._active_discovery or self._discovery
-        fingerprint = _selection_fingerprint(discovery, self._active_result, root=self._root)
+        result = self._active_result
+        if self._active_project_id:
+            project_path = self._project_paths[self._active_project_id]
+            if project_path is None:
+                discovery = discover_workspace_sources(self._root)
+                result = _catalog_workspace_sources(discovery)
+            else:
+                discovery = discover_delphi_project(
+                    self._root,
+                    project_file=project_path,
+                    scan_workspace_sources=False,
+                )
+        fingerprint = _selection_fingerprint(discovery, result, root=self._root)
         return f"workspace_v2_{fingerprint}"
 
     def select_project(self, project_id: str) -> None:
         if project_id not in self._project_paths:
             raise AgentProtocolError("project_not_found", f"Project not found: {project_id}.")
         project_path = self._project_paths[project_id]
+        cached = self._project_cache.get(project_id)
         if project_path is None:
-            discovery = self._discovery
+            discovery = self._discovery if cached is None else discover_workspace_sources(self._root)
         else:
             discovery = discover_delphi_project(
                 self._root,
                 project_file=project_path,
                 scan_workspace_sources=False,
             )
-        cached = self._project_cache.get(project_id)
         if cached is not None:
             fingerprint = _selection_fingerprint(discovery, cached.result, root=self._root)
             if fingerprint == cached.fingerprint:
@@ -280,6 +304,8 @@ class AgentWorkspace:
 
         self._active_discovery = discovery
         self._active_result = result
+        if self._project_paths[project_id] is None:
+            self._discovery = discovery
         self._units = tuple(units)
         self._include_files = include_files
         self._active_project_id = project_id
@@ -379,7 +405,7 @@ def _selection_state(
         "include_paths": [_display_path(Path(path), root) for path in discovery.include_paths],
         "defines": sorted(discovery.defines, key=lambda item: (item.casefold(), item)),
         "directories": _directory_snapshots(
-            _selection_directories(discovery, result),
+            _selection_snapshot_specs(discovery, result),
             root=root,
         ),
     }
@@ -400,35 +426,66 @@ def _selection_paths(
     return paths
 
 
-def _selection_directories(
+def _selection_snapshot_specs(
     discovery: DelphiProjectDiscovery,
     result: ProjectIndexResult | None,
-) -> set[str]:
-    directories = {
-        *(str(Path(path).parent) for path in discovery.project_files),
-        *discovery.search_paths,
-        *discovery.include_paths,
-    }
+) -> list[_DirectorySnapshotSpec]:
+    specs: dict[str, _DirectorySnapshotSpec] = {}
+
+    def add(
+        path: Path,
+        *,
+        immediate: tuple[str, ...] = (),
+        recursive: tuple[str, ...] = (),
+    ) -> None:
+        resolved = path.expanduser().resolve()
+        key = str(resolved).casefold()
+        spec = specs.setdefault(
+            key,
+            _DirectorySnapshotSpec(
+                path=resolved,
+                immediate_extensions=set(),
+                recursive_extensions=set(),
+            ),
+        )
+        spec.immediate_extensions.update(immediate)
+        spec.recursive_extensions.update(recursive)
+
+    for project in discovery.project_files:
+        add(Path(project).parent, immediate=_PROJECT_SNAPSHOT_EXTENSIONS)
+    for path in discovery.search_paths:
+        add(Path(path), immediate=SOURCE_EXTENSIONS)
+    for path in discovery.include_paths:
+        add(Path(path), recursive=SOURCE_EXTENSIONS)
     if result is not None:
-        directories.update(str(Path(unit.path).parent) for unit in result.parsed_units)
-        directories.update(str(Path(include.path).parent) for include in result.include_files)
-    return directories
+        for unit in result.parsed_units:
+            add(Path(unit.path).parent, immediate=SOURCE_EXTENSIONS)
+        for include in result.include_files:
+            add(Path(include.path).parent, immediate=SOURCE_EXTENSIONS)
+    return sorted(specs.values(), key=lambda item: (str(item.path).casefold(), str(item.path)))
 
 
 def _directory_snapshots(
-    directories: set[str],
+    specs: list[_DirectorySnapshotSpec],
     *,
     root: Path,
 ) -> list[dict[str, object]]:
     snapshots: list[dict[str, object]] = []
-    for value in sorted(directories, key=lambda item: (item.casefold(), item)):
-        directory = Path(value).expanduser().resolve()
+    for spec in specs:
+        directory = spec.path
         entries: set[str] = set()
         readable = True
         try:
-            for candidate in directory.iterdir():
-                if candidate.suffix.casefold() in SOURCE_EXTENSIONS and candidate.is_file():
-                    entries.add(str(candidate.resolve()))
+            if spec.immediate_extensions:
+                for candidate in directory.iterdir():
+                    if candidate.suffix.casefold() in spec.immediate_extensions and candidate.is_file():
+                        entries.add(str(candidate.resolve()))
+            if spec.recursive_extensions:
+                for candidate in directory.rglob("*"):
+                    if any(part in SKIP_DIRS for part in candidate.parts):
+                        continue
+                    if candidate.suffix.casefold() in spec.recursive_extensions and candidate.is_file():
+                        entries.add(str(candidate.resolve()))
         except OSError:
             readable = False
         snapshots.append(

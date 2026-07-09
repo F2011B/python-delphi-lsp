@@ -227,6 +227,12 @@ def populate_workspace_sources(discovery: DelphiProjectDiscovery) -> DelphiProje
     return discovery
 
 
+def discover_workspace_sources(root: str | os.PathLike[str]) -> DelphiProjectDiscovery:
+    root_path = Path(root).expanduser().resolve()
+    discovery = DelphiProjectDiscovery(root=str(root_path))
+    return populate_workspace_sources(discovery)
+
+
 def _project_candidates(root: Path, explicit: Path | None) -> list[Path]:
     if explicit is not None:
         return [explicit]
@@ -404,14 +410,20 @@ def _main_source_from_dproj(path: Path) -> str | None:
 
 
 def _scan_sources(root: Path, discovery: DelphiProjectDiscovery, seen_sources: set[str]) -> None:
-    for pattern in (f"*{ext}" for ext in SOURCE_EXTENSIONS):
-        for path in _walk_sources(root, pattern):
-            key = str(path).casefold()
-            if key in seen_sources:
-                continue
-            seen_sources.add(key)
-            discovery.source_files.append(str(path))
-    discovery.source_files.sort(key=str.casefold)
+    for path in root.rglob("*"):
+        if path.suffix.casefold() not in SOURCE_EXTENSIONS:
+            continue
+        if any(part in SKIP_DIRS for part in path.parts):
+            continue
+        if not path.is_file():
+            continue
+        resolved = path.resolve()
+        key = str(resolved).casefold()
+        if key in seen_sources:
+            continue
+        seen_sources.add(key)
+        discovery.source_files.append(str(resolved))
+    discovery.source_files.sort(key=lambda item: (item.casefold(), item))
 
 
 def _walk_sources(root: Path, pattern: str) -> list[Path]:
@@ -501,5 +513,6 @@ __all__ = [
     "DelphiProjectDiscovery",
     "DiscoveryProblem",
     "discover_delphi_project",
+    "discover_workspace_sources",
     "populate_workspace_sources",
 ]

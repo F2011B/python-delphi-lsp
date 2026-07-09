@@ -350,6 +350,146 @@ def test_workspace_revision_tracks_a_newly_satisfiable_dependency(tmp_path: Path
     assert workspace.workspace_revision != original_revision
 
 
+def test_nested_include_creation_invalidates_revision_and_project_cache(tmp_path: Path) -> None:
+    write_text(
+        tmp_path / "Main.dpr",
+        """
+        program Main;
+        uses UnitA in 'src/UnitA.pas';
+        begin
+        end.
+        """,
+    )
+    write_text(
+        tmp_path / "Main.dproj",
+        """
+        <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+          <PropertyGroup>
+            <MainSource>Main.dpr</MainSource>
+            <DCC_IncludePath>include</DCC_IncludePath>
+          </PropertyGroup>
+        </Project>
+        """,
+    )
+    write_text(
+        tmp_path / "src" / "UnitA.pas",
+        """
+        unit UnitA;
+        interface
+        {$I 'nested/new.inc'}
+        implementation
+        end.
+        """,
+    )
+    (tmp_path / "include").mkdir()
+    workspace = AgentWorkspace.open(tmp_path)
+    project_id = workspace.active_project_id
+    original_revision = workspace.workspace_revision
+
+    assert workspace.include_files == ()
+
+    write_text(tmp_path / "include" / "nested" / "new.inc", "const NewValue = 1;")
+
+    assert workspace.workspace_revision != original_revision
+    workspace.select_project(project_id)
+    assert workspace.include_files == (
+        {"name": "nested/new.inc", "path": "include/nested/new.inc"},
+    )
+
+
+@pytest.mark.parametrize("config_suffix", [".dproj", ".cfg", ".dof"])
+def test_new_and_changed_project_config_invalidates_revision_and_is_applied(
+    tmp_path: Path,
+    config_suffix: str,
+) -> None:
+    write_text(
+        tmp_path / "Main.dpr",
+        """
+        program Main;
+        uses ConfigUnit;
+        begin
+        end.
+        """,
+    )
+    write_text(
+        tmp_path / "old_lib" / "ConfigUnit.pas",
+        "unit ConfigUnit; interface implementation end.",
+    )
+    write_text(
+        tmp_path / "new_lib" / "ConfigUnit.pas",
+        "unit ConfigUnit; interface implementation end.",
+    )
+    config_path = tmp_path / f"Main{config_suffix}"
+
+    def config_text(search_path: str, define: str) -> str:
+        if config_suffix == ".dproj":
+            return f"""
+            <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+              <PropertyGroup>
+                <MainSource>Main.dpr</MainSource>
+                <DCC_UnitSearchPath>{search_path}</DCC_UnitSearchPath>
+                <DCC_Define>{define}</DCC_Define>
+              </PropertyGroup>
+            </Project>
+            """
+        return f"-U{search_path}\n-D{define}"
+
+    workspace = AgentWorkspace.open(tmp_path)
+    project_id = workspace.active_project_id
+    initial_revision = workspace.workspace_revision
+
+    write_text(config_path, config_text("old_lib", "CONFIG_ADDED"))
+
+    assert workspace.workspace_revision != initial_revision
+    workspace.select_project(project_id)
+    assert {unit.path for unit in workspace.units} == {"Main.dpr", "old_lib/ConfigUnit.pas"}
+    assert [entry["define"] for entry in workspace.define_entries] == ["CONFIG_ADDED"]
+
+    added_revision = workspace.workspace_revision
+    write_text(config_path, config_text("new_lib", "CONFIG_CHANGED_LONG"))
+
+    assert workspace.workspace_revision != added_revision
+    workspace.select_project(project_id)
+    assert {unit.path for unit in workspace.units} == {"Main.dpr", "new_lib/ConfigUnit.pas"}
+    assert [entry["define"] for entry in workspace.define_entries] == ["CONFIG_CHANGED_LONG"]
+
+
+def test_active_project_revision_uses_explicit_discovery_without_root_traversal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_text(tmp_path / "Main.dpr", "program Main; begin end.")
+    workspace = AgentWorkspace.open(tmp_path)
+
+    discovery_calls: list[dict[str, object]] = []
+    root_traversals = 0
+    original_discover = agent_workspace_module.discover_delphi_project
+    original_rglob = Path.rglob
+
+    def recording_discover(*args, **kwargs):
+        discovery_calls.append(dict(kwargs))
+        return original_discover(*args, **kwargs)
+
+    def counting_rglob(path: Path, pattern: str):
+        nonlocal root_traversals
+        if path.resolve() == tmp_path.resolve():
+            root_traversals += 1
+        return original_rglob(path, pattern)
+
+    monkeypatch.setattr(agent_workspace_module, "discover_delphi_project", recording_discover)
+    monkeypatch.setattr(Path, "rglob", counting_rglob)
+
+    _ = workspace.workspace_revision
+
+    assert discovery_calls == [
+        {
+            "project_file": (tmp_path / "Main.dpr").resolve(),
+            "scan_workspace_sources": False,
+        }
+    ]
+    assert root_traversals == 0
+
+
 def test_ids_and_workspace_revision_are_deterministic_and_revision_tracks_source_changes(
     tmp_path: Path,
 ) -> None:
@@ -644,3 +784,95 @@ def test_workspace_fallback_discovers_once_and_builds_a_flat_catalog(
         {"name": "orphan.inc", "path": "include/orphan.inc"},
         {"name": "used.inc", "path": "include/used.inc"},
     )
+
+
+def test_workspace_fallback_refreshes_added_nested_and_deleted_sources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    alpha_path = tmp_path / "src" / "Alpha.pas"
+    write_text(alpha_path, "unit Alpha; interface implementation end.")
+
+    discovery_calls = 0
+    index_calls = 0
+    original_discover = agent_workspace_module.discover_delphi_project
+    original_index = ProjectIndexer.index
+
+    def counting_discover(*args, **kwargs):
+        nonlocal discovery_calls
+        discovery_calls += 1
+        return original_discover(*args, **kwargs)
+
+    def counting_index(self: ProjectIndexer, file_name: str):
+        nonlocal index_calls
+        index_calls += 1
+        return original_index(self, file_name)
+
+    monkeypatch.setattr(agent_workspace_module, "discover_delphi_project", counting_discover)
+    monkeypatch.setattr(ProjectIndexer, "index", counting_index)
+
+    workspace = AgentWorkspace.open(tmp_path)
+    workspace_id = workspace.active_project_id
+    initial_revision = workspace.workspace_revision
+
+    write_text(tmp_path / "src" / "Beta.pas", "unit Beta; interface implementation end.")
+
+    assert workspace.workspace_revision != initial_revision
+    workspace.select_project(workspace_id)
+    assert [unit.name for unit in workspace.units] == ["Alpha", "Beta"]
+
+    beta_revision = workspace.workspace_revision
+    write_text(
+        tmp_path / "new" / "nested" / "Gamma.pas",
+        "unit Gamma; interface implementation end.",
+    )
+
+    assert workspace.workspace_revision != beta_revision
+    workspace.select_project(workspace_id)
+    assert [unit.name for unit in workspace.units] == ["Alpha", "Beta", "Gamma"]
+
+    gamma_revision = workspace.workspace_revision
+    alpha_path.unlink()
+
+    assert workspace.workspace_revision != gamma_revision
+    workspace.select_project(workspace_id)
+    assert [unit.name for unit in workspace.units] == ["Beta", "Gamma"]
+    assert discovery_calls == 1
+    assert index_calls == 0
+
+
+def test_fallback_revision_and_reselection_use_fresh_source_only_discovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_text(tmp_path / "src" / "Alpha.pas", "unit Alpha; interface implementation end.")
+    workspace = AgentWorkspace.open(tmp_path)
+    workspace_id = workspace.active_project_id
+
+    source_discovery_calls = 0
+    index_calls = 0
+    original_source_discovery = agent_workspace_module.discover_workspace_sources
+    original_index = ProjectIndexer.index
+
+    def counting_source_discovery(*args, **kwargs):
+        nonlocal source_discovery_calls
+        source_discovery_calls += 1
+        return original_source_discovery(*args, **kwargs)
+
+    def counting_index(self: ProjectIndexer, file_name: str):
+        nonlocal index_calls
+        index_calls += 1
+        return original_index(self, file_name)
+
+    monkeypatch.setattr(
+        agent_workspace_module,
+        "discover_workspace_sources",
+        counting_source_discovery,
+    )
+    monkeypatch.setattr(ProjectIndexer, "index", counting_index)
+
+    _ = workspace.workspace_revision
+    workspace.select_project(workspace_id)
+
+    assert source_discovery_calls == 2
+    assert index_calls == 0

@@ -2,7 +2,12 @@ import textwrap
 import os
 from pathlib import Path
 
-from delphiast.project_discovery import DelphiProjectDiscovery, DiscoveryProblem, discover_delphi_project
+from delphiast.project_discovery import (
+    DelphiProjectDiscovery,
+    DiscoveryProblem,
+    discover_delphi_project,
+    populate_workspace_sources,
+)
 from delphiast.project_indexer import ProjectIndexer
 from delphiast.lsp_server import LspWorkspaceState, WorkspaceConfig
 
@@ -32,6 +37,41 @@ def test_discovery_value_preserves_original_positional_constructor_order() -> No
     assert discovery.search_path_origins == {}
     assert discovery.include_path_origins == {}
     assert discovery.define_origins == {}
+
+
+def test_workspace_source_scan_uses_one_root_traversal(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    write_text(tmp_path / "z" / "Zeta.pas", "unit Zeta; interface implementation end.")
+    write_text(tmp_path / "a" / "Alpha.pas", "unit Alpha; interface implementation end.")
+    write_text(tmp_path / "include" / "common.inc", "const CommonValue = 1;")
+    write_text(
+        tmp_path / "node_modules" / "Noise.pas",
+        "unit Noise; interface implementation end.",
+    )
+    write_text(tmp_path / "ignored.txt", "ignored")
+
+    traversal_calls = 0
+    original_rglob = Path.rglob
+
+    def counting_rglob(path: Path, pattern: str):
+        nonlocal traversal_calls
+        if path.resolve() == tmp_path.resolve():
+            traversal_calls += 1
+        return original_rglob(path, pattern)
+
+    monkeypatch.setattr(Path, "rglob", counting_rglob)
+    discovery = DelphiProjectDiscovery(root=str(tmp_path.resolve()))
+
+    populate_workspace_sources(discovery)
+
+    assert traversal_calls == 1
+    assert discovery.source_files == [
+        str((tmp_path / "a" / "Alpha.pas").resolve()),
+        str((tmp_path / "include" / "common.inc").resolve()),
+        str((tmp_path / "z" / "Zeta.pas").resolve()),
+    ]
 
 
 def test_discovery_can_skip_workspace_source_scan(tmp_path: Path) -> None:
