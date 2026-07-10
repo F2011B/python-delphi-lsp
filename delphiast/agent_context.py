@@ -18,6 +18,7 @@ from .agent_protocol import (
     make_target_id,
     paginate_items,
 )
+from .agent_relations import ProjectRelationIndex, RelationTarget
 from .agent_workspace import AgentUnit, AgentWorkspace
 from .consts import AttributeName, SyntaxNodeType
 from .lsp_server import build_outline_semantic_model, multiline_string_block_end
@@ -236,6 +237,7 @@ class AgentContext:
         self._focus = Focus(project_id=project_id) if project_id else Focus()
         self._last_revision = workspace.workspace_revision
         self._registry: _Registry | None = None
+        self._relation_index: ProjectRelationIndex | None = None
 
     @classmethod
     def open(
@@ -254,10 +256,13 @@ class AgentContext:
         revision = self._refresh_workspace(parsed.project_id)
 
         if parsed.action == "trace":
-            raise AgentProtocolError(
-                "relation_unavailable",
-                "Trace relations are unavailable until Work Package 3c.",
-            )
+            if parsed.relation is None:
+                raise AgentProtocolError("relation_required", "Trace requires a relation.")
+            registry = self._require_registry(revision)
+            entry = self._resolve_target(registry, parsed.target_id)
+            relation_index = self._require_relation_index(registry)
+            items = relation_index.trace(entry.target_id, parsed.relation)
+            return self._response(parsed, revision, items, target_id=entry.target_id)
         if parsed.action == "open":
             items = self._open_items()
             return self._response(parsed, revision, items)
@@ -288,9 +293,11 @@ class AgentContext:
 
         if current_project_id != previous_project_id:
             self._registry = None
+            self._relation_index = None
             self._focus = Focus(project_id=current_project_id) if current_project_id else Focus()
         elif revision != self._last_revision:
             self._registry = None
+            self._relation_index = None
         elif self._focus.project_id != current_project_id:
             self._focus = Focus(project_id=current_project_id) if current_project_id else Focus()
         self._last_revision = revision
@@ -420,6 +427,38 @@ class AgentContext:
                     target_id=focused_entry.target_id,
                 )
         return self._registry
+
+    def _require_relation_index(self, registry: _Registry) -> ProjectRelationIndex:
+        if (
+            self._relation_index is not None
+            and self._relation_index.project_id == registry.project_id
+            and self._relation_index.revision == registry.revision
+        ):
+            return self._relation_index
+        targets = tuple(
+            RelationTarget(
+                target_id=entry.target_id,
+                source_path=str(entry.source_path),
+                path=entry.path,
+                unit_id=entry.unit_id,
+                unit_name=entry.unit_name,
+                name=entry.symbol.name,
+                qualified_name=entry.qualified_name,
+                kind=entry.symbol.kind.value,
+                signature=entry.signature,
+                line=entry.symbol.decl_range.start_line,
+                column=entry.symbol.decl_range.start_col,
+                card=entry.card(),
+            )
+            for entry in registry.entries
+        )
+        self._relation_index = ProjectRelationIndex(
+            self._workspace,
+            registry.project_id,
+            registry.revision,
+            targets,
+        )
+        return self._relation_index
 
     def _require_selected_project(self) -> str:
         project_id = self._workspace.active_project_id

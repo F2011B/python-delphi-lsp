@@ -300,7 +300,7 @@ def test_overloaded_target_ids_are_stable_when_the_project_root_moves(tmp_path: 
     assert len(set(first_ids)) == 4
 
 
-def test_handle_validates_agent_request_instances_and_trace_is_explicitly_unavailable(tmp_path: Path) -> None:
+def test_handle_validates_agent_request_instances_and_trace_requires_a_relation(tmp_path: Path) -> None:
     write_source(tmp_path / "Main.dpr", "program Main; begin end.")
     context = AgentContext.open(tmp_path)
 
@@ -309,9 +309,8 @@ def test_handle_validates_agent_request_instances_and_trace_is_explicitly_unavai
     assert invalid.value.code == "max_items_out_of_range"
 
     with pytest.raises(AgentProtocolError) as trace:
-        context.handle({"action": "trace", "relation": "references"})
-    assert trace.value.code == "relation_unavailable"
-    assert "Work Package 3c" in trace.value.message
+        context.handle({"action": "trace"})
+    assert trace.value.code == "relation_required"
 
 
 def _worker_context(tmp_path: Path) -> tuple[AgentContext, str, str]:

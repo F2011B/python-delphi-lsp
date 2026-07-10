@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from .consts import AttributeName
+from .nodes import SyntaxNode
 from .parser import DelphiParser
 from .semantic import Scope, ScopeKind, SymbolIndex
 from .semantic_builder import SemanticBuilder, SemanticModel
@@ -28,10 +29,23 @@ def build_workspace_semantics(
         defines=defines,
         preprocessor_options=preprocessor_options,
     )
-    roots: dict[str, object] = {}
+    roots: dict[str, SyntaxNode] = {}
     for file_name, text in sources.items():
         result = parser.parse(text, file_name, build_semantic=False)
         roots[file_name] = result.root
+
+    return build_workspace_semantics_from_roots(
+        roots,
+        collect_references=collect_references,
+    )
+
+
+def build_workspace_semantics_from_roots(
+    roots: dict[str, SyntaxNode],
+    *,
+    collect_references: bool = True,
+) -> WorkspaceSemanticResult:
+    """Build project semantics from syntax roots that have already been parsed."""
 
     index = SymbolIndex()
     scopes: dict[str, Scope] = {}
