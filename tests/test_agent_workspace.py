@@ -9,6 +9,7 @@ import delphiast.agent_workspace as agent_workspace_module
 import delphiast.project_discovery as project_discovery_module
 from delphiast.agent_protocol import AgentProtocolError, Focus, make_target_id
 from delphiast.agent_workspace import AgentUnit, AgentWorkspace
+from delphiast.parser import DelphiParser
 from delphiast.project_indexer import ProjectIndexer
 
 
@@ -34,6 +35,315 @@ def test_open_auto_selects_one_project_with_deterministic_mapping(tmp_path: Path
     assert workspace.active_project == project
     assert workspace.active_project_id == expected_id
     assert workspace.focus == Focus(project_id=expected_id, unit_id="", target_id="")
+
+
+def test_selected_project_always_supplies_outline_transform_for_small_sources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_path = tmp_path / "Main.dpr"
+    source_path.write_text(
+        "program Main; begin DoSmallWork; end.",
+        encoding="utf-8",
+    )
+    captured_options: list[dict[str, object]] = []
+    real_indexer = ProjectIndexer
+
+    class RecordingIndexer:
+        def __init__(self, **kwargs: object) -> None:
+            captured_options.append(kwargs)
+            self._delegate = real_indexer(**kwargs)
+
+        def index(self, file_name: str):
+            return self._delegate.index(file_name)
+
+    monkeypatch.setattr(agent_workspace_module, "ProjectIndexer", RecordingIndexer)
+
+    AgentWorkspace.open(tmp_path)
+
+    assert len(captured_options) == 1
+    source_transform = captured_options[0].get("source_transform")
+    assert callable(source_transform)
+    small_source = source_path.read_text(encoding="utf-8")
+    assert source_transform(small_source) == "program Main; begin end."
+
+
+def test_agent_outline_compacts_a_very_large_one_line_body(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = "program Huge; begin " + ("DoWork; " * 50_000) + "end."
+    assert len(source) > 400_000
+    (tmp_path / "Huge.dpr").write_text(source, encoding="utf-8")
+    transformed_sources: list[str] = []
+    real_transform = agent_workspace_module._outline_agent_source
+
+    def recording_transform(text: str) -> str:
+        transformed = real_transform(text)
+        transformed_sources.append(transformed)
+        return transformed
+
+    monkeypatch.setattr(agent_workspace_module, "_outline_agent_source", recording_transform)
+
+    workspace = AgentWorkspace.open(tmp_path)
+
+    assert [unit.name for unit in workspace.units] == ["Huge"]
+    assert workspace.problems == ()
+    assert transformed_sources == ["program Huge; begin end."]
+    assert len(transformed_sources[0]) < 64
+
+
+def test_agent_outline_transform_compacts_large_bodies_without_losing_project_syntax(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_text(
+        tmp_path / "Bundle.dpk",
+        """
+        package Bundle;
+        contains
+          UnitA in 'UnitA.pas';
+        end.
+        """,
+    )
+    write_text(
+        tmp_path / "Bundle.dproj",
+        """
+        <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+          <PropertyGroup>
+            <MainSource>Bundle.dpk</MainSource>
+            <DCC_Define>KEEP_API</DCC_Define>
+          </PropertyGroup>
+        </Project>
+        """,
+    )
+    body_lines = "\n".join(
+        f"          BodyOnlyCall{index};"
+        for index in range(256)
+    )
+    write_text(
+        tmp_path / "UnitA.pas",
+        f"""
+        unit UnitA;
+        interface
+        uses UnitB; // Keep the newline before the include directive.
+        {{$IFDEF KEEP_API}}
+        {{$I 'api.inc'}}
+        {{$ENDIF}}
+        const Greeting = 'begin end';
+        {{ Preserve  begin case try end in this comment. }}
+        (* Preserve  asm end in this comment. *)
+        procedure Work;
+        implementation
+        procedure Work;
+        begin
+          case 1 of
+            1:
+              begin
+                BodyOnlyCaseCall;
+              end;
+          end;
+          BodyOnlyAfterCase;
+          try
+            BodyOnlyTryCall;
+          except
+            BodyOnlyExceptCall;
+          end;
+          BodyOnlyAfterExcept;
+          try
+            BodyOnlyFinallyTryCall;
+          finally
+            BodyOnlyFinallyCall;
+          end;
+          BodyOnlyAfterFinally;
+{body_lines}
+        end;
+        end.
+        """,
+    )
+    unit_b_source = (
+        "unit UnitB; interface procedure DoThing; "
+        "implementation procedure DoThing; begin end; end."
+    )
+    write_text(tmp_path / "UnitB.pas", unit_b_source)
+    write_text(tmp_path / "api.inc", "const IncludedValue = 1;")
+    transformed_sources: list[tuple[str, str]] = []
+    real_transform = agent_workspace_module._outline_agent_source
+
+    def recording_transform(text: str) -> str:
+        transformed = real_transform(text)
+        transformed_sources.append((text, transformed))
+        return transformed
+
+    monkeypatch.setattr(agent_workspace_module, "_outline_agent_source", recording_transform)
+
+    workspace = AgentWorkspace.open(tmp_path)
+
+    assert [unit.name for unit in workspace.units] == ["Bundle", "UnitA", "UnitB"]
+    assert workspace.include_files == ({"name": "api.inc", "path": "api.inc"},)
+    assert workspace.problems == ()
+    assert len(transformed_sources) == 3
+
+    transformed_unit_a = next(
+        transformed
+        for source, transformed in transformed_sources
+        if "unit UnitA;" in source
+    )
+    assert "BodyOnlyCall" not in transformed_unit_a
+    assert len(transformed_unit_a.splitlines()) < 20
+    assert all(line and line == line.strip() for line in transformed_unit_a.splitlines())
+    assert (
+        "uses UnitB; // Keep the newline before the include directive.\n"
+        "{$IFDEF KEEP_API}\n"
+        "{$I 'api.inc'}\n"
+        "{$ENDIF}"
+    ) in transformed_unit_a
+    assert "const Greeting = 'begin end';" in transformed_unit_a
+    assert "{ Preserve  begin case try end in this comment. }" in transformed_unit_a
+    assert "(* Preserve  asm end in this comment. *)" in transformed_unit_a
+
+    transformed_unit_b = next(
+        transformed
+        for source, transformed in transformed_sources
+        if "unit UnitB;" in source
+    )
+    assert transformed_unit_b == unit_b_source
+
+
+@pytest.mark.parametrize("define_x", [False, True])
+def test_agent_workspace_falls_back_safely_for_conditional_body_directives(
+    tmp_path: Path,
+    define_x: bool,
+) -> None:
+    main_source = textwrap.dedent(
+        """
+        program Main;
+        uses UnitA in 'UnitA.pas';
+        var Value: Integer;
+        begin
+          if Value = 0 then
+          begin
+        {$IFDEF X}
+            UnitA.Run;
+          end;
+        {$ELSE}
+            UnitA.Run;
+          end;
+        {$ENDIF}
+          Value := 3;
+        end.
+        """
+    ).strip() + "\n"
+    (tmp_path / "Main.dpr").write_text(main_source, encoding="utf-8")
+    write_text(
+        tmp_path / "UnitA.pas",
+        """
+        unit UnitA;
+        interface
+        procedure Run;
+        implementation
+        procedure Run;
+        begin
+        end;
+        end.
+        """,
+    )
+    define_element = "<DCC_Define>X</DCC_Define>" if define_x else ""
+    write_text(
+        tmp_path / "Main.dproj",
+        f"""
+        <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+          <PropertyGroup>
+            <MainSource>Main.dpr</MainSource>
+            {define_element}
+          </PropertyGroup>
+        </Project>
+        """,
+    )
+
+    workspace = AgentWorkspace.open(tmp_path)
+
+    assert [unit.name for unit in workspace.units] == ["Main", "UnitA"]
+    assert all(not unit.has_error for unit in workspace.units)
+    assert not any(problem["kind"] == "cant_parse_file" for problem in workspace.problems)
+    assert ("X" in workspace.defines) is define_x
+
+
+def test_agent_outline_compactor_preserves_delphi_multiline_string_blocks() -> None:
+    triple_block = (
+        "'''\n"
+        "don't  collapse   these\n"
+        "&end begin case try class object\n"
+        "{$IFDEF X}\n{$ENDIF}\n"
+        "'''"
+    )
+    five_block = (
+        "'''''\r\n"
+        "don't  collapse   these\r\n"
+        "// comment  text and ' apostrophe\r\n"
+        "(*$IFDEF X*)\r\n(*$ENDIF*)\r\n"
+        "'''''"
+    )
+    source = (
+        "program AgentMultilineBlocks;\n"
+        "const\n"
+        f"  TripleValue = {triple_block};\n"
+        f"  FiveValue = {five_block};\n"
+        "begin\n"
+        "  DoWork;\n"
+        "end.\n"
+    )
+
+    transformed = agent_workspace_module._outline_agent_source(source)
+
+    assert triple_block in transformed
+    assert five_block in transformed
+    assert "DoWork" not in transformed
+    for defines in ((), ("X",)):
+        DelphiParser(defines=defines).parse(transformed, "agent_multiline_blocks.dpr")
+
+
+def test_workspace_exposes_immutable_effective_context_accessors(tmp_path: Path) -> None:
+    write_text(
+        tmp_path / "Main.dpr",
+        """
+        program Main;
+        uses UnitA in 'src/UnitA.pas';
+        begin
+        end.
+        """,
+    )
+    write_text(tmp_path / "src" / "UnitA.pas", "unit UnitA; interface implementation end.")
+    write_text(
+        tmp_path / "Main.dproj",
+        """
+        <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+          <PropertyGroup>
+            <MainSource>Main.dpr</MainSource>
+            <DCC_IncludePath>include</DCC_IncludePath>
+            <DCC_Define>AGENT_CONTEXT</DCC_Define>
+          </PropertyGroup>
+        </Project>
+        """,
+    )
+
+    workspace = AgentWorkspace.open(tmp_path)
+
+    assert workspace.root == tmp_path.resolve()
+    assert workspace.search_paths == (str((tmp_path / "src").resolve()),)
+    assert workspace.include_paths == (str((tmp_path / "include").resolve()),)
+    assert workspace.defines == ("AGENT_CONTEXT",)
+    assert isinstance(workspace.search_paths, tuple)
+    assert isinstance(workspace.include_paths, tuple)
+    assert isinstance(workspace.defines, tuple)
+    with pytest.raises(AttributeError):
+        workspace.root = Path("changed")  # type: ignore[misc]
+    with pytest.raises(AttributeError):
+        workspace.search_paths = ()  # type: ignore[misc]
+    with pytest.raises(AttributeError):
+        workspace.include_paths = ()  # type: ignore[misc]
+    with pytest.raises(AttributeError):
+        workspace.defines = ()  # type: ignore[misc]
 
 
 def test_open_selects_an_explicit_project_from_a_multi_project_workspace(tmp_path: Path) -> None:

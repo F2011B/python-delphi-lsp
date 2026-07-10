@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .agent_protocol import AgentProtocolError, Focus, make_target_id
 from .consts import AttributeName, SyntaxNodeType
+from .lsp_server import multiline_string_block_end, outline_source
 from .project_discovery import (
     SKIP_DIRS,
     SOURCE_EXTENSIONS,
@@ -145,6 +146,25 @@ class AgentWorkspace:
         return self._projects
 
     @property
+    def root(self) -> Path:
+        return self._root
+
+    @property
+    def search_paths(self) -> tuple[str, ...]:
+        discovery = self._active_discovery or self._discovery
+        return tuple(discovery.search_paths)
+
+    @property
+    def include_paths(self) -> tuple[str, ...]:
+        discovery = self._active_discovery or self._discovery
+        return tuple(discovery.include_paths)
+
+    @property
+    def defines(self) -> tuple[str, ...]:
+        discovery = self._active_discovery or self._discovery
+        return tuple(discovery.defines)
+
+    @property
     def active_project(self) -> AgentProject | None:
         return next(
             (project for project in self._projects if project.project_id == self._active_project_id),
@@ -268,6 +288,7 @@ class AgentWorkspace:
                 search_paths=discovery.search_paths,
                 include_paths=discovery.include_paths,
                 defines=discovery.defines,
+                source_transform=_outline_agent_source,
             )
             result = indexer.index(str(project_path))
         self._project_cache[project_id] = _ProjectCache(
@@ -346,6 +367,82 @@ def _display_path(path: Path, root: Path) -> str:
         return resolved.relative_to(root).as_posix()
     except ValueError:
         return resolved.as_posix()
+
+
+def _outline_agent_source(text: str) -> str:
+    return _compact_outline_whitespace(outline_source(text))
+
+
+def _compact_outline_whitespace(text: str) -> str:
+    parts: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i].isspace():
+            start = i
+            while i < n and text[i].isspace():
+                i += 1
+            if parts and i < n and not parts[-1][-1].isspace():
+                parts.append(_collapsed_whitespace(text, start, i))
+            continue
+
+        start = i
+        if text[i] == "'":
+            block_end = multiline_string_block_end(text, i)
+            i = block_end if block_end is not None else _quoted_string_end(text, i)
+        elif text.startswith("//", i):
+            i = _line_comment_end(text, i)
+        elif text[i] == "{":
+            close = text.find("}", i + 1)
+            i = n if close < 0 else close + 1
+        elif text.startswith("(*", i):
+            close = text.find("*)", i + 2)
+            i = n if close < 0 else close + 2
+        else:
+            i += 1
+            while i < n:
+                if text[i].isspace() or text[i] in {"'", "{"}:
+                    break
+                if text.startswith("//", i) or text.startswith("(*", i):
+                    break
+                i += 1
+        parts.append(text[start:i])
+    return "".join(parts)
+
+
+def _collapsed_whitespace(text: str, start: int, end: int) -> str:
+    for index in range(start, end):
+        if text[index] == "\r":
+            if index + 1 < end and text[index + 1] == "\n":
+                return "\r\n"
+            return "\r"
+        if text[index] == "\n":
+            return "\n"
+    return " "
+
+
+def _quoted_string_end(text: str, start: int) -> int:
+    i = start + 1
+    while i < len(text):
+        if text[i] != "'":
+            i += 1
+            continue
+        if i + 1 < len(text) and text[i + 1] == "'":
+            i += 2
+            continue
+        return i + 1
+    return len(text)
+
+
+def _line_comment_end(text: str, start: int) -> int:
+    i = start + 2
+    while i < len(text) and text[i] not in {"\r", "\n"}:
+        i += 1
+    if i < len(text) and text[i] == "\r" and i + 1 < len(text) and text[i + 1] == "\n":
+        return i + 2
+    if i < len(text):
+        return i + 1
+    return i
 
 
 def _project_kind(path: Path) -> str:

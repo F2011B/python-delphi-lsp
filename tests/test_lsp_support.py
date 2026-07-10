@@ -6,8 +6,9 @@ import tempfile
 import time
 import unittest
 
+import delphiast.lsp_server as lsp_server
 from delphiast.lsp_server import LspWorkspaceState, find_reference_at_position, iter_symbols
-from delphiast.parser import parse
+from delphiast.parser import DelphiParser, parse
 from delphiast.semantic import SymbolKind
 
 
@@ -96,7 +97,444 @@ def _generated_mega_unit_source(
     return '\n'.join(lines) + '\n'
 
 
+def _outline_source(text: str) -> str:
+    transform = getattr(lsp_server, 'outline_source', None)
+    assert transform is not None, 'lsp_server.outline_source must be public'
+    return transform(text)
+
+
 class LspSupportTests(unittest.TestCase):
+    def test_outline_source_always_blanks_a_one_line_program_body(self) -> None:
+        source = 'program P; begin DoWork; end.'
+
+        transformed = _outline_source(source)
+
+        self.assertNotIn('DoWork', transformed)
+        self.assertEqual(len(transformed), len(source))
+        parse(transformed, 'one_line.dpr')
+
+    def test_outline_large_source_keeps_existing_threshold_policy(self) -> None:
+        one_line = 'program P; begin DoWork; end.'
+        multiline = 'program P;\nbegin\n  DoWork;\nend.\n'
+
+        self.assertEqual(lsp_server.outline_large_source(one_line, 1), one_line)
+        self.assertEqual(lsp_server.outline_large_source(multiline, 10), multiline)
+        self.assertEqual(
+            lsp_server.outline_large_source(multiline, 1),
+            _outline_source(multiline),
+        )
+
+    def test_outline_source_tracks_nested_case_until_the_outer_end(self) -> None:
+        source = '''program NestedCase;
+var X: Integer;
+begin
+  case X of
+    0:
+      begin
+        X := 1;
+      end;
+  else
+    X := 2;
+  end;
+  asm
+    NOP
+  end;
+  X := 3;
+end.
+'''
+
+        transformed = _outline_source(source)
+
+        self.assertNotIn('X := 3', transformed)
+        self.assertEqual(transformed.count('\n'), source.count('\n'))
+        self.assertEqual(len(transformed), len(source))
+        parse(transformed, 'nested_case.dpr')
+
+    def test_outline_source_tracks_nested_try_except_until_the_outer_end(self) -> None:
+        source = '''program NestedExcept;
+begin
+  try
+    begin
+      DoTryWork;
+    end;
+  except
+    HandleFailure;
+  end;
+  DoAfterExcept;
+end.
+'''
+
+        transformed = _outline_source(source)
+
+        self.assertNotIn('DoAfterExcept', transformed)
+        self.assertEqual(transformed.count('\n'), source.count('\n'))
+        parse(transformed, 'nested_except.dpr')
+
+    def test_outline_source_tracks_nested_try_finally_until_the_outer_end(self) -> None:
+        source = '''program NestedFinally;
+begin
+  try
+    DoTryWork;
+  finally
+    begin
+      Cleanup;
+    end;
+  end;
+  DoAfterFinally;
+end.
+'''
+
+        transformed = _outline_source(source)
+
+        self.assertNotIn('DoAfterFinally', transformed)
+        self.assertEqual(transformed.count('\n'), source.count('\n'))
+        parse(transformed, 'nested_finally.dpr')
+
+    def test_outline_source_preserves_keyword_text_in_strings_and_comments(self) -> None:
+        source = '''program ProtectedKeywords;
+const
+  Keywords = 'begin case try asm end';
+  // begin case try asm end remains a line comment
+  Value = 1;
+{ begin case try asm end remains a brace comment }
+(* begin case try asm end remains a block comment *)
+begin
+  DoWork;
+end.
+'''
+
+        transformed = _outline_source(source)
+
+        self.assertIn("'begin case try asm end'", transformed)
+        self.assertIn('// begin case try asm end remains a line comment\n', transformed)
+        self.assertIn('{ begin case try asm end remains a brace comment }', transformed)
+        self.assertIn('(* begin case try asm end remains a block comment *)', transformed)
+        self.assertEqual(transformed.count('\n'), source.count('\n'))
+        parse(transformed, 'protected_keywords.dpr')
+
+    def test_outline_source_returns_original_for_ifdef_else_body_reproducer(self) -> None:
+        source = '''program ConditionalOutline;
+var Value: Integer;
+procedure Earlier;
+begin
+  Value := -1;
+end;
+begin
+  if Value = 0 then
+  begin
+{$IFDEF X}
+    Value := 1;
+  end;
+{$ELSE}
+    Value := 2;
+  end;
+{$ENDIF}
+  Value := 3;
+end.
+'''
+
+        transformed = _outline_source(source)
+
+        self.assertEqual(transformed, source)
+        self.assertIn('Value := -1', transformed)
+        for defines in ((), ('X',)):
+            with self.subTest(defines=defines):
+                DelphiParser(defines=defines).parse(source, 'conditional_outline.dpr')
+
+    def test_outline_source_returns_original_for_paren_star_body_directive(self) -> None:
+        source = '''program ParenDirective;
+var Value: Integer;
+begin
+(*$IFDEF X*)
+  Value := 1;
+(*$ELSE*)
+  Value := 2;
+(*$ENDIF*)
+end.
+'''
+
+        self.assertEqual(_outline_source(source), source)
+        for defines in ((), ('X',)):
+            with self.subTest(defines=defines):
+                DelphiParser(defines=defines).parse(source, 'paren_directive.dpr')
+
+    def test_outline_source_ignores_dollar_text_in_ordinary_comments(self) -> None:
+        source = '''program DollarComments;
+{ ordinary comment with $IFDEF X text }
+(* ordinary comment with $IFDEF X text *)
+// ordinary comment with {$IFDEF X} text
+begin
+  DoWork;
+end.
+'''
+
+        transformed = _outline_source(source)
+
+        self.assertNotEqual(transformed, source)
+        self.assertNotIn('DoWork', transformed)
+        self.assertIn('{ ordinary comment with $IFDEF X text }', transformed)
+        self.assertIn('(* ordinary comment with $IFDEF X text *)', transformed)
+        self.assertIn('// ordinary comment with {$IFDEF X} text\n', transformed)
+        parse(transformed, 'dollar_comments.dpr')
+
+    def test_outline_source_optimizes_body_after_outside_directives(self) -> None:
+        source = '''program OutsideDirective;
+{$IFDEF X}
+const Selected = 1;
+{$ELSE}
+const Selected = 2;
+{$ENDIF}
+begin
+  DoWork;
+end.
+'''
+
+        transformed = _outline_source(source)
+
+        self.assertNotEqual(transformed, source)
+        self.assertNotIn('DoWork', transformed)
+        self.assertIn('{$IFDEF X}', transformed)
+        for defines in ((), ('X',)):
+            with self.subTest(defines=defines):
+                DelphiParser(defines=defines).parse(transformed, 'outside_directive.dpr')
+
+    def test_outline_source_tracks_inline_structured_types_and_variant_case(self) -> None:
+        source = '''program InlineTypes;
+begin
+  var C: class
+    class procedure Build;
+  end;
+  var O: object end;
+  var I: interface end;
+  var D: dispinterface end;
+  var R: record
+    Value: Integer;
+    case Integer of
+      0: (A: Integer);
+      1: (B: Integer);
+  end;
+  var K: class of TObject;
+  var Callback: procedure of object;
+  R.Value := 1;
+end.
+'''
+
+        transformed = _outline_source(source)
+
+        self.assertNotIn('R.Value := 1', transformed)
+        self.assertEqual(transformed.count('\n'), source.count('\n'))
+        parse(transformed, 'inline_types.dpr')
+
+    def test_outline_source_ignores_constraint_keyword_in_inline_generic_class(self) -> None:
+        source = '''program InlineGenericClass;
+begin
+  var GenericClass: class<T: class>
+    procedure Execute;
+  end;
+  GenericClass := nil;
+end.
+'''
+
+        parse(source, 'inline_generic_class.dpr')
+        transformed = _outline_source(source)
+
+        self.assertNotIn('GenericClass := nil', transformed)
+        parse(transformed, 'inline_generic_class.dpr')
+
+    def test_outline_source_ignores_nested_generic_routine_constraints(self) -> None:
+        source = '''program GenericRoutineConstraints;
+begin
+  var Host: object
+    procedure RunClass<T: class>;
+    procedure RunRecord<T: record>;
+    procedure RunNested<T: IFoo<IBar<TItem>>; TItem: interface>;
+  end;
+  Host := Host;
+end.
+'''
+
+        parse(source, 'generic_routine_constraints.dpr')
+        transformed = _outline_source(source)
+
+        self.assertNotIn('Host := Host', transformed)
+        parse(transformed, 'generic_routine_constraints.dpr')
+
+    def test_outline_source_does_not_treat_comparisons_as_generic_angles(self) -> None:
+        source = '''program ComparisonAngles;
+var A, B, C, D: Integer;
+begin
+  if A < B then
+    case A of
+      0: A := 1;
+    end;
+  if C > D then
+    C := D;
+  if A <= B then
+    A := B;
+  if C >= D then
+    C := D;
+  if A <> D then
+    A := D;
+  DoAfterComparisons;
+end.
+'''
+
+        parse(source, 'comparison_angles.dpr')
+        transformed = _outline_source(source)
+
+        self.assertNotIn('DoAfterComparisons', transformed)
+        parse(transformed, 'comparison_angles.dpr')
+
+    def test_outline_source_ignores_escaped_keyword_identifiers_in_body(self) -> None:
+        source = '''program EscapedIdentifiers;
+var
+  &end, &case, &try, &class, &object: Integer;
+begin
+  &end := 1;
+  &case := &end;
+  &try := &case;
+  &class := &try;
+  &object := &class;
+end.
+'''
+
+        parse(source, 'escaped_identifiers.dpr')
+        transformed = _outline_source(source)
+
+        self.assertNotIn('&end := 1', transformed)
+        self.assertEqual(transformed.count('\n'), source.count('\n'))
+        parse(transformed, 'escaped_identifiers.dpr')
+
+    def test_outline_source_ignores_escaped_keyword_identifiers_in_asm(self) -> None:
+        source = '''program EscapedAsmIdentifiers;
+procedure Run;
+asm
+  MOV &end, &case
+  XOR &try, &class
+  MOV &object, &end
+end;
+begin
+  Run;
+end.
+'''
+
+        parse(source, 'escaped_asm_identifiers.dpr')
+        transformed = _outline_source(source)
+
+        self.assertNotIn('MOV &end', transformed)
+        self.assertEqual(transformed.count('\n'), source.count('\n'))
+        parse(transformed, 'escaped_asm_identifiers.dpr')
+
+    def test_outline_source_tracks_anonymous_class_with_routine_first_member(self) -> None:
+        source = '''program AnonymousClasses;
+begin
+  var ProcedureFirst: class
+    procedure Run;
+  end;
+  var ClassProcedureFirst: class
+    class procedure Build;
+  end;
+  ProcedureFirst := nil;
+end.
+'''
+
+        parse(source, 'anonymous_classes.dpr')
+        transformed = _outline_source(source)
+
+        self.assertNotIn('ProcedureFirst := nil', transformed)
+        parse(transformed, 'anonymous_classes.dpr')
+
+    def test_outline_source_distinguishes_object_type_from_of_object_proc_type(self) -> None:
+        source = '''program ObjectTypeContexts;
+begin
+  var EmptyClass: class end;
+  var EmptyObject: object end;
+  var NonEmptyObject: object
+    procedure Run;
+  end;
+  var Objects: array[0..1] of object
+    procedure Execute;
+  end;
+  var ClassRef: class of TObject;
+  var Holder: class
+    ProcCallback: procedure(Sender: TObject; Value: Integer) of object; cdecl;
+    FuncCallback: function(Sender: TObject): Boolean of object; stdcall;
+  end;
+  Objects[0] := nil;
+end.
+'''
+
+        parse(source, 'object_type_contexts.dpr')
+        transformed = _outline_source(source)
+
+        self.assertNotIn('Objects[0] := nil', transformed)
+        parse(transformed, 'object_type_contexts.dpr')
+
+    def test_outline_source_tracks_array_of_anonymous_object(self) -> None:
+        source = '''program ArrayOfAnonymousObject;
+begin
+  var Objects: array[0..1] of object
+    procedure Execute;
+  end;
+  Objects[0] := nil;
+end.
+'''
+
+        parse(source, 'array_of_anonymous_object.dpr')
+        transformed = _outline_source(source)
+
+        self.assertNotIn('Objects[0] := nil', transformed)
+        parse(transformed, 'array_of_anonymous_object.dpr')
+
+    def test_outline_source_falls_back_for_ambiguous_of_object_context(self) -> None:
+        source = '''program AmbiguousObjectContext;
+begin
+  var ItemFile: file of object end;
+  ItemFile := ItemFile;
+end.
+'''
+
+        parse(source, 'ambiguous_object_context.dpr')
+
+        self.assertEqual(_outline_source(source), source)
+
+    def test_outline_source_preserves_delphi_multiline_string_blocks(self) -> None:
+        triple_block = (
+            "'''\n"
+            "don't  collapse   these\n"
+            "&end begin case try class object\n"
+            "{$IFDEF X}\n{$ENDIF}\n"
+            "'''"
+        )
+        five_block = (
+            "'''''\r\n"
+            "don't  collapse   these\r\n"
+            "// comment  text and ' apostrophe\r\n"
+            "(*$IFDEF X*)\r\n(*$ENDIF*)\r\n"
+            "'''''"
+        )
+        source = (
+            "program MultilineBlocks;\n"
+            "const\n"
+            f"  TripleValue = {triple_block};\n"
+            f"  FiveValue = {five_block};\n"
+            "begin\n"
+            "  DoWork;\n"
+            "end.\n"
+        )
+
+        for defines in ((), ('X',)):
+            with self.subTest(defines=defines, source='original'):
+                DelphiParser(defines=defines).parse(source, 'multiline_blocks.dpr')
+        transformed = _outline_source(source)
+
+        self.assertIn(triple_block, transformed)
+        self.assertIn(five_block, transformed)
+        self.assertNotIn('DoWork', transformed)
+        for defines in ((), ('X',)):
+            with self.subTest(defines=defines, source='transformed'):
+                DelphiParser(defines=defines).parse(transformed, 'multiline_blocks.dpr')
+
     def test_reference_lookup_at_position(self) -> None:
         text = (FIXTURE_DIR / 'unit_inheritance.pas').read_text(encoding='utf-8')
         result = parse(text, 'unit_inheritance.pas', build_semantic=True)

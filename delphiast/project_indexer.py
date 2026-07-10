@@ -57,6 +57,7 @@ class ProjectIndexResult:
 
 GetUnitSyntaxHook = Callable[[str], tuple[Optional[SyntaxNode], bool, bool]]
 UnitParsedHook = Callable[[str, str, SyntaxNode, bool], bool]
+SourceTransform = Callable[[str], str]
 
 
 class ProjectIndexer:
@@ -69,6 +70,7 @@ class ProjectIndexer:
         include_loader: IncludeLoader | None = None,
         on_get_unit_syntax: GetUnitSyntaxHook | None = None,
         on_unit_parsed: UnitParsedHook | None = None,
+        source_transform: SourceTransform | None = None,
     ) -> None:
         self.search_paths = [Path(path) for path in search_paths]
         self.include_paths = [Path(path) for path in include_paths]
@@ -76,6 +78,7 @@ class ProjectIndexer:
         self.include_loader = include_loader
         self.on_get_unit_syntax = on_get_unit_syntax
         self.on_unit_parsed = on_unit_parsed
+        self.source_transform = source_transform
 
         self._parsed_units: dict[str, UnitInfo] = {}
         self._problems: list[ProjectProblem] = []
@@ -138,6 +141,8 @@ class ProjectIndexer:
                 include_loader=self._build_include_loader(),
             )
             try:
+                if self.source_transform is not None:
+                    source = self.source_transform(source)
                 result = parser.parse(source, str(file_path), build_semantic=False)
                 syntax_tree = result.root
                 from_parser = True
@@ -310,4 +315,5 @@ __all__ = [
     'IncludeFileInfo',
     'GetUnitSyntaxHook',
     'UnitParsedHook',
+    'SourceTransform',
 ]

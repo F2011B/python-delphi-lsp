@@ -356,24 +356,117 @@ def uri_to_path(uri: str) -> str:
 def outline_large_source(text: str, line_threshold: int) -> str:
     if not is_large_source(text, line_threshold):
         return text
+    return outline_source(text)
+
+
+def outline_source(text: str) -> str:
     return _blank_compound_statement_bodies(text)
+
+
+def multiline_string_block_end(text: str, start: int) -> int | None:
+    for quote_count in (5, 3):
+        delimiter = "'" * quote_count
+        if not text.startswith(delimiter, start):
+            continue
+        content_start = start + quote_count
+        if text.startswith('\r\n', content_start):
+            content_start += 2
+        elif content_start < len(text) and text[content_start] == '\n':
+            content_start += 1
+        else:
+            continue
+        close = text.find(delimiter, content_start)
+        return len(text) if close < 0 else close + quote_count
+    return None
 
 
 def is_large_source(text: str, line_threshold: int) -> bool:
     return line_threshold > 0 and text.count('\n') + 1 > line_threshold
 
 
+# These are the statement grammar alternatives that close with END.
+_END_TERMINATED_STATEMENTS = frozenset({'begin', 'asm', 'case', 'try'})
+# Inline variable type_spec declarations can place these inside a body.
+_END_TERMINATED_STRUCTURED_TYPES = frozenset(
+    {'class', 'record', 'object', 'interface', 'dispinterface'}
+)
+_CLASS_MEMBER_PREFIX_FOLLOWERS = frozenset(
+    {
+        'const',
+        'constructor',
+        'destructor',
+        'function',
+        'of',
+        'operator',
+        'procedure',
+        'property',
+        'threadvar',
+        'type',
+        'var',
+    }
+)
+_CLASS_TYPE_PREDECESSORS = frozenset({':', '=', 'of', 'packed', 'to', 'type', '^'})
+_CLASS_MEMBER_BOUNDARIES = frozenset(
+    {
+        ';',
+        ')',
+        ']',
+        'automated',
+        'class',
+        'dispinterface',
+        'interface',
+        'object',
+        'private',
+        'protected',
+        'public',
+        'published',
+        'record',
+    }
+)
+_GENERIC_ROUTINE_HEADINGS = frozenset(
+    {'constructor', 'destructor', 'function', 'operator', 'procedure'}
+)
+
+
 def _blank_compound_statement_bodies(text: str) -> str:
     chars = list(text)
-    depth = 0
+    end_stack: list[str] = []
     body_start: int | None = None
+    previous_token: str | None = None
+    previous_token_is_identifier = False
+    paren_depth = 0
+    bracket_depth = 0
+    angle_depth = 0
+    generic_owner_ready = False
+    routine_heading_active = False
+    type_constructors: dict[tuple[int, int], str] = {}
     i = 0
     n = len(text)
     while i < n:
         ch = text[i]
         nxt = text[i + 1] if i + 1 < n else ''
 
+        if end_stack and (
+            (ch == '{' and nxt == '$')
+            or (ch == '(' and nxt == '*' and i + 2 < n and text[i + 2] == '$')
+        ):
+            # Raw conditional branches can disagree on END nesting, so keep the file all-or-safe.
+            return text
+
+        if ch.isspace():
+            i += 1
+            while i < n and text[i].isspace():
+                i += 1
+            continue
+
         if ch == "'":
+            block_end = multiline_string_block_end(text, i)
+            if block_end is not None:
+                i = block_end
+                previous_token = 'literal'
+                previous_token_is_identifier = False
+                generic_owner_ready = False
+                continue
             i += 1
             while i < n:
                 if text[i] == "'":
@@ -383,6 +476,9 @@ def _blank_compound_statement_bodies(text: str) -> str:
                     i += 1
                     break
                 i += 1
+            previous_token = 'literal'
+            previous_token_is_identifier = False
+            generic_owner_ready = False
             continue
 
         if ch == '/' and nxt == '/':
@@ -407,25 +503,174 @@ def _blank_compound_statement_bodies(text: str) -> str:
                 i += 2
             continue
 
+        if ch == '&' and (nxt.isalpha() or nxt == '_'):
+            start = i
+            i += 2
+            while i < n and (text[i].isalnum() or text[i] == '_'):
+                i += 1
+            previous_token = text[start:i].casefold()
+            previous_token_is_identifier = True
+            generic_owner_ready = False
+            continue
+
         if ch.isalpha() or ch == '_':
             start = i
             i += 1
             while i < n and (text[i].isalnum() or text[i] == '_'):
                 i += 1
             word = text[start:i].casefold()
-            if word in {'begin', 'asm'}:
-                if depth == 0:
+            generic_owner_ready = False
+            opens_construct: bool | None = False
+            if not end_stack:
+                if word in {'begin', 'asm'}:
                     body_start = i
-                depth += 1
-            elif word == 'end' and depth > 0:
-                depth -= 1
-                if depth == 0 and body_start is not None:
+                    end_stack.append(word)
+            elif word == 'end':
+                end_stack.pop()
+                if not end_stack and body_start is not None:
                     _blank_preserving_newlines(chars, body_start, start)
                     body_start = None
+            else:
+                if angle_depth > 0 and word in _END_TERMINATED_STRUCTURED_TYPES:
+                    # Constraint keywords are names inside a confirmed generic angle.
+                    opens_construct = False
+                else:
+                    opens_construct = _opens_end_terminated_construct(
+                        word,
+                        text=text,
+                        word_end=i,
+                        previous_token=previous_token,
+                        end_stack=end_stack,
+                        type_constructor=type_constructors.get((paren_depth, bracket_depth)),
+                    )
+                if opens_construct is None:
+                    return text
+                if opens_construct:
+                    end_stack.append(word)
+            if word == 'class' and opens_construct:
+                generic_owner_ready = True
+            if word in _GENERIC_ROUTINE_HEADINGS:
+                routine_heading_active = True
+            if word in {'begin', 'asm'}:
+                type_constructors.clear()
+                routine_heading_active = False
+            elif word in {'procedure', 'function', 'array'}:
+                type_constructors[(paren_depth, bracket_depth)] = word
+            elif word == 'var':
+                type_constructors.pop((paren_depth, bracket_depth), None)
+            previous_token = word
+            previous_token_is_identifier = True
             continue
 
+        context_key = (paren_depth, bracket_depth)
+        if ch == '<' and nxt not in {'=', '>'}:
+            if angle_depth > 0:
+                if not previous_token_is_identifier:
+                    return text
+                angle_depth += 1
+            elif generic_owner_ready or (
+                routine_heading_active
+                and previous_token_is_identifier
+                and previous_token != 'operator'
+            ):
+                angle_depth = 1
+            generic_owner_ready = False
+        elif ch == '>' and nxt != '=' and angle_depth > 0:
+            angle_depth -= 1
+            generic_owner_ready = False
+        elif ch == '(':
+            paren_depth += 1
+            generic_owner_ready = False
+            routine_heading_active = False
+        elif ch == ')':
+            type_constructors.pop(context_key, None)
+            paren_depth = max(0, paren_depth - 1)
+            generic_owner_ready = False
+        elif ch == '[':
+            bracket_depth += 1
+            generic_owner_ready = False
+        elif ch == ']':
+            type_constructors.pop(context_key, None)
+            bracket_depth = max(0, bracket_depth - 1)
+            generic_owner_ready = False
+        elif ch == ';':
+            type_constructors.pop(context_key, None)
+            generic_owner_ready = False
+            routine_heading_active = False
+        elif ch not in {'<', '>'}:
+            generic_owner_ready = False
+        previous_token = ch
+        previous_token_is_identifier = False
         i += 1
-    return ''.join(chars)
+    return text if angle_depth > 0 else ''.join(chars)
+
+
+def _opens_end_terminated_construct(
+    word: str,
+    *,
+    text: str,
+    word_end: int,
+    previous_token: str | None,
+    end_stack: list[str],
+    type_constructor: str | None,
+) -> bool | None:
+    if word in _END_TERMINATED_STRUCTURED_TYPES:
+        if word == 'object' and previous_token == 'of':
+            if type_constructor in {'procedure', 'function'}:
+                return False
+            if type_constructor == 'array':
+                return True
+            return None
+        if word == 'class':
+            next_word = _next_code_word(text, word_end)
+            if next_word == 'of':
+                return False
+            if (
+                end_stack[-1] in _END_TERMINATED_STRUCTURED_TYPES
+                and next_word in _CLASS_MEMBER_PREFIX_FOLLOWERS
+            ):
+                if previous_token in _CLASS_TYPE_PREDECESSORS:
+                    return True
+                if previous_token in _CLASS_MEMBER_BOUNDARIES:
+                    return False
+                return None
+        return True
+    if end_stack[-1] in _END_TERMINATED_STRUCTURED_TYPES:
+        return False
+    return word in _END_TERMINATED_STATEMENTS
+
+
+def _next_code_word(text: str, start: int) -> str | None:
+    i = start
+    n = len(text)
+    while i < n:
+        if text[i].isspace():
+            i += 1
+            continue
+        if text.startswith('//', i):
+            i += 2
+            while i < n and text[i] not in {'\r', '\n'}:
+                i += 1
+            if i < n and text[i] == '\r' and i + 1 < n and text[i + 1] == '\n':
+                i += 2
+            elif i < n:
+                i += 1
+            continue
+        if text[i] == '{':
+            close = text.find('}', i + 1)
+            i = n if close < 0 else close + 1
+            continue
+        if text.startswith('(*', i):
+            close = text.find('*)', i + 2)
+            i = n if close < 0 else close + 2
+            continue
+        break
+    if i >= n or not (text[i].isalpha() or text[i] == '_'):
+        return None
+    end = i + 1
+    while end < n and (text[end].isalnum() or text[end] == '_'):
+        end += 1
+    return text[i:end].casefold()
 
 
 def _blank_preserving_newlines(chars: list[str], start: int, end: int) -> None:
@@ -1604,6 +1849,9 @@ __all__ = [
     'find_symbol_at_position',
     'resolve_reference',
     'extract_completion_base',
+    'outline_source',
+    'outline_large_source',
+    'multiline_string_block_end',
     'main',
 ]
 
