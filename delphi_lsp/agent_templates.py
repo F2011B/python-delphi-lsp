@@ -179,8 +179,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function workspaceRoot(context: { worktree?: string; directory?: string }): string {
-  if (context.worktree && context.worktree !== "/") return context.worktree
   if (context.directory && context.directory !== "/") return context.directory
+  if (context.worktree && context.worktree !== "/") return context.worktree
   return process.cwd()
 }
 

@@ -274,7 +274,11 @@ def test_generated_plugin_flushes_and_has_one_named_export_without_nul(tmp_path:
     assert "const DEFAULT_REQUEST_TIMEOUT_MS = 120_000" in plugin_text
     assert "export default" not in plugin_text
     assert b"\x00" not in plugin_bytes
-    assert 'context.worktree && context.worktree !== "/"' in plugin_text
+    directory_guard = 'if (context.directory && context.directory !== "/") return context.directory'
+    worktree_guard = 'if (context.worktree && context.worktree !== "/") return context.worktree'
+    assert directory_guard in plugin_text
+    assert worktree_guard in plugin_text
+    assert plugin_text.index(directory_guard) < plugin_text.index(worktree_guard)
 
 
 def test_generated_plugin_classifies_protocol_and_transport_failures(tmp_path: Path) -> None:
@@ -469,6 +473,19 @@ def test_generated_plugin_runtime_reuses_and_cleans_workers_without_bun(tmp_path
         assert.equal(processes.length, 2)
         await hooks.event({ event: { type: "session.deleted", properties: { info: { id: "session-1" } } } })
         assert.deepEqual(processes.map((process) => process.killed), [true, true])
+
+        plan("/repo/output/active-project", "success")
+        const nestedContext = {
+          sessionID: "nested-session",
+          worktree: "/repo",
+          directory: "/repo/output/active-project",
+          abort: signal,
+        }
+        await hooks.tool.delphi_codebase.execute({ action: "open" }, nestedContext)
+        const nestedProcess = processes.at(-1)
+        assert.equal(nestedProcess.command.at(-1), "/repo/output/active-project")
+        assert.equal(nestedProcess.options.cwd, "/repo/output/active-project")
+        await hooks.event({ event: { type: "session.deleted", properties: { info: { id: "nested-session" } } } })
 
         const failures = []
         async function check(name, callback) {
