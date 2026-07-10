@@ -4,14 +4,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import selectors
-import signal
+import queue
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic
-from typing import Any, Iterable
+from typing import Any, Iterable, TextIO
 
 
 @dataclass
@@ -30,6 +30,65 @@ class ToolRequirement:
     operation: str | None = None
 
 
+@dataclass(frozen=True)
+class _ReaderFailure:
+    error: BaseException
+
+
+_STDOUT_EOF = object()
+_STDERR_TAIL_CHARS = 16 * 1024
+
+
+class _BoundedTextTail:
+    def __init__(self, max_chars: int) -> None:
+        self._max_chars = max_chars
+        self._text = ''
+        self._lock = threading.Lock()
+
+    def append(self, text: str) -> None:
+        with self._lock:
+            self._text = (self._text + text)[-self._max_chars :]
+
+    def get(self) -> str:
+        with self._lock:
+            return self._text
+
+
+def _read_stdout(stream: TextIO, output: queue.Queue[object]) -> None:
+    try:
+        for line in stream:
+            output.put(line)
+    except BaseException as error:
+        output.put(_ReaderFailure(error))
+    finally:
+        output.put(_STDOUT_EOF)
+
+
+def _read_stderr(stream: TextIO, tail: _BoundedTextTail) -> None:
+    try:
+        while True:
+            chunk = stream.read(4096)
+            if not chunk:
+                return
+            tail.append(chunk)
+    except BaseException:
+        return
+
+
+def _stop_process(proc: subprocess.Popen[Any], *, timeout: float = 5.0) -> None:
+    if proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=timeout)
+
+
 def build_opencode_command(*, title: str, model: str, cwd: str, prompt: str, agent: str | None = None) -> list[str]:
     command = [
         'opencode',
@@ -43,7 +102,6 @@ def build_opencode_command(*, title: str, model: str, cwd: str, prompt: str, age
         'json',
         '--model',
         model,
-        '--dangerously-skip-permissions',
     ]
     if agent:
         command.extend(['--agent', agent])
@@ -82,8 +140,11 @@ def evidence_from_event(
         return None
     state = part.get('state') or {}
     tool_input = state.get('input') or {}
-    if operation is not None and tool_input.get('operation') != operation:
-        return None
+    if operation is not None:
+        input_operation = tool_input.get('operation')
+        input_action = tool_input.get('action')
+        if input_operation != operation and input_action != operation:
+            return None
     timing = state.get('time') or {}
     start = timing.get('start')
     end = timing.get('end')
@@ -154,6 +215,13 @@ def run_probe(args: argparse.Namespace) -> int:
     )
     env = os.environ.copy()
     env['OPENCODE_EXPERIMENTAL_LSP_TOOL'] = 'true'
+    configured_npm_cache = getattr(args, 'npm_cache', None) or env.get('NPM_CONFIG_CACHE')
+    npm_cache = Path(configured_npm_cache) if configured_npm_cache else Path(args.cwd) / '.opencode' / '.npm-cache'
+    if not npm_cache.is_absolute():
+        npm_cache = Path(args.cwd) / npm_cache
+    npm_cache = npm_cache.expanduser().resolve()
+    npm_cache.mkdir(parents=True, exist_ok=True)
+    env['NPM_CONFIG_CACHE'] = str(npm_cache)
     output_path = Path(args.output) if args.output else None
     output_file = output_path.open('w', encoding='utf-8') if output_path is not None else None
     started = monotonic()
@@ -171,27 +239,39 @@ def run_probe(args: argparse.Namespace) -> int:
         text=True,
         bufsize=1,
     )
-    evidence: ToolEvidence | None = None
+    stdout_events: queue.Queue[object] = queue.Queue()
+    assert proc.stdout is not None
+    assert proc.stderr is not None
+    stderr_tail = _BoundedTextTail(_STDERR_TAIL_CHARS)
+    stdout_reader = threading.Thread(
+        target=_read_stdout,
+        args=(proc.stdout, stdout_events),
+        daemon=True,
+        name='opencode-probe-stdout',
+    )
+    stderr_reader = threading.Thread(
+        target=_read_stderr,
+        args=(proc.stderr, stderr_tail),
+        daemon=True,
+        name='opencode-probe-stderr',
+    )
+    stdout_reader.start()
+    stderr_reader.start()
     try:
-        assert proc.stdout is not None
-        selector = selectors.DefaultSelector()
-        selector.register(proc.stdout, selectors.EVENT_READ)
         while True:
             remaining_time = args.timeout - (monotonic() - started)
             if remaining_time <= 0:
-                if proc.poll() is None:
-                    proc.send_signal(signal.SIGTERM)
                 break
-            ready = selector.select(timeout=min(0.2, remaining_time))
-            if not ready:
-                if proc.poll() is not None:
+            try:
+                item = stdout_events.get(timeout=min(0.2, remaining_time))
+            except queue.Empty:
+                if proc.poll() is not None and not stdout_reader.is_alive():
                     break
                 continue
-            line = proc.stdout.readline()
-            if not line:
-                if proc.poll() is not None:
-                    break
-                continue
+            if item is _STDOUT_EOF or isinstance(item, _ReaderFailure):
+                break
+            assert isinstance(item, str)
+            line = item
             if output_file is not None:
                 output_file.write(line)
                 output_file.flush()
@@ -200,8 +280,6 @@ def run_probe(args: argparse.Namespace) -> int:
                 part = event.get('part') or {}
                 if part.get('tool') in forbidden_tools:
                     forbidden_event = event
-                    if proc.poll() is None:
-                        proc.send_signal(signal.SIGTERM)
                     break
             for requirement in list(remaining_requirements):
                 evidence = evidence_from_event(
@@ -217,15 +295,11 @@ def run_probe(args: argparse.Namespace) -> int:
                     remaining_requirements.remove(requirement)
                     break
             if not remaining_requirements:
-                if proc.poll() is None:
-                    proc.send_signal(signal.SIGTERM)
                 break
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5)
     finally:
+        _stop_process(proc)
+        stdout_reader.join(timeout=1)
+        stderr_reader.join(timeout=1)
         if output_file is not None:
             output_file.close()
 
@@ -238,14 +312,15 @@ def run_probe(args: argparse.Namespace) -> int:
             'tool_input': state.get('input') or {},
         }
         print(json.dumps(payload, sort_keys=True), file=sys.stderr)
+        stderr = stderr_tail.get().strip()
+        if stderr:
+            print(stderr, file=sys.stderr)
         return 2
 
     if remaining_requirements:
-        stderr = ''
-        if proc.stderr is not None:
-            stderr = proc.stderr.read()
+        stderr = stderr_tail.get().strip()
         if stderr:
-            print(stderr.strip(), file=sys.stderr)
+            print(stderr, file=sys.stderr)
         return 1
     payload = {
         'evidences': [
@@ -285,6 +360,7 @@ def main() -> int:
         help='Fail immediately if this tool is used before the required evidence is complete. Repeatable.',
     )
     parser.add_argument('--timeout', type=float, default=45.0)
+    parser.add_argument('--npm-cache', help='Writable npm cache for the isolated opencode probe process.')
     parser.add_argument('--output', help='Optional JSONL copy of opencode stdout.')
     return run_probe(parser.parse_args())
 

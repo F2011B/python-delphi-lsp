@@ -101,11 +101,10 @@ def build_probe_command(
 ) -> list[str]:
     output_path = output or sandbox / "bootstrap_vllm_codebase_skill_probe.jsonl"
     prompt = (
-        "Use only the delphi_codebase tool to inspect the Delphi project. Do not write "
-        "any explanatory text before calling that tool. First call delphi_codebase with layer symbols, "
-        'query "MegaProc02500", and format json. Then call delphi_codebase with layer implementation, '
-        'query "MegaProc02500", and format markdown. After both tool calls, explain which project and '
-        "unit contain it with file and line evidence, and cite one statement from the method body."
+        "First load the delphi-codebase-navigator skill. Use only delphi_codebase to inspect the Delphi project. "
+        "Do not write explanatory text before the required calls. Call action open, then action find with query "
+        '"MegaProc02500", focus the returned target with action focus and target_id, then call action inspect '
+        "with detail body. Answer with path and line evidence, including `Value := Value + 40`."
     )
     return [
         str(python_executable),
@@ -117,9 +116,13 @@ def build_probe_command(
         "--agent",
         DEFAULT_AGENT,
         "--require-tool",
-        f"delphi_codebase:{DEFAULT_SYMBOL}",
+        f"delphi_codebase.find:{DEFAULT_SYMBOL}",
         "--require-tool",
-        "delphi_codebase:Value := Value + 40",
+        "delphi_codebase.focus:target_id",
+        "--require-tool",
+        "delphi_codebase.inspect:Value := Value + 40",
+        "--require-tool",
+        "skill:delphi-codebase-navigator",
         "--forbid-tool",
         "bash",
         "--forbid-tool",
@@ -138,6 +141,8 @@ def build_probe_command(
         "webfetch",
         "--forbid-tool",
         "todowrite",
+        "--npm-cache",
+        str(sandbox / ".opencode" / ".npm-cache"),
         "--timeout",
         str(timeout),
         "--output",

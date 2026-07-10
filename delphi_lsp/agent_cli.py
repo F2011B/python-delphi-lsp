@@ -66,7 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     opencode = subcommands.add_parser("opencode", help="Install opencode integration.")
     opencode_commands = opencode.add_subparsers(dest="opencode_command", required=True)
-    opencode_install = opencode_commands.add_parser("install", help="Install .agents skill and opencode custom tool.")
+    opencode_install = opencode_commands.add_parser("install", help="Install .agents skill and opencode plugin.")
     opencode_install.add_argument("--target", type=Path, default=Path("."))
     opencode_install.add_argument("--python", default=sys.executable)
     opencode_install.add_argument("--force", action="store_true")
@@ -119,14 +119,14 @@ def _skill_install(args: argparse.Namespace) -> None:
 
 
 def _opencode_install(args: argparse.Namespace) -> None:
-    skill_path, tool_path, config_path = install_opencode_support(
+    skill_path, plugin_path, config_path = install_opencode_support(
         args.target,
         python_executable=args.python,
         force=args.force,
         write_config=args.write_config,
     )
     print(skill_path)
-    print(tool_path)
+    print(plugin_path)
     if config_path is not None:
         print(config_path)
 
