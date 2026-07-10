@@ -212,7 +212,9 @@ workflow and does not grant the navigator any raw source tools.
 The proof generates a 117,511-line project. The verifier requires `skill`, `open` (`Main.dpr` evidence), `find`, `focus`, and `inspect`,
 checks `MegaProc02500` and `Value := Value + 40`, and forbids raw `bash`,
 `read`, `glob`, and `grep`. It then waits for the final answer and requires the
-source path, line 117464, and the inspected statement in that answer.
+exact body range `src/Mega100kUnit.pas:117464-117509` and the inspected
+statement in that answer. The prompt requires returned range metadata instead
+of a model-calculated line inside the source fragment.
 The proof uses the local Ornith vLLM OpenAI-compatible
 endpoint at `http://127.0.0.1:8001/v1`.
 

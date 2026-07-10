@@ -126,12 +126,14 @@ def test_probe_command_requires_delphi_codebase_tool_and_forbids_raw_tools(tmp_p
     assert "delphi_codebase.focus:target_id" in command
     assert "delphi_codebase.inspect:Value := Value + 40" in command
     required_final = [command[index + 1] for index, item in enumerate(command) if item == "--require-final"]
-    assert {"src/Mega100kUnit.pas", "117464", "Value := Value + 40"}.issubset(set(required_final))
+    assert {"src/Mega100kUnit.pas:117464-117509", "Value := Value + 40"}.issubset(set(required_final))
     assert "load the delphi-codebase-navigator skill" in command[-1]
     assert "action open" in command[-1]
     assert "action find" in command[-1]
     assert "action focus" in command[-1]
     assert "action inspect" in command[-1]
+    assert "path:start_line-end_line" in command[-1]
+    assert "do not calculate a line" in command[-1]
     assert "--npm-cache" in command
     assert command[command.index("--npm-cache") + 1] == str(tmp_path / ".opencode" / ".npm-cache")
     forbidden = [command[index + 1] for index, item in enumerate(command) if item == "--forbid-tool"]

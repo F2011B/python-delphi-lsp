@@ -116,7 +116,8 @@ def build_probe_command(
         "First load the delphi-codebase-navigator skill. Use only delphi_codebase to inspect the Delphi project. "
         "Do not write explanatory text before the required calls. Call action open, then action find with query "
         '"MegaProc02500", focus the returned target with action focus and target_id, then call action inspect '
-        "with detail body. Answer with path and line evidence, including `Value := Value + 40`."
+        "with detail body. In the final answer cite the returned body range as path:start_line-end_line; do not "
+        "calculate a line inside the returned text. Include `Value := Value + 40`."
     )
     return [
         str(python_executable),
@@ -138,9 +139,7 @@ def build_probe_command(
         "--require-tool",
         "skill:delphi-codebase-navigator",
         "--require-final",
-        "src/Mega100kUnit.pas",
-        "--require-final",
-        "117464",
+        "src/Mega100kUnit.pas:117464-117509",
         "--require-final",
         "Value := Value + 40",
         "--forbid-tool",
