@@ -309,7 +309,7 @@ def build_pdf(output_path: Path) -> None:
             _para(
                 "Packaging-Status: Standalone-Wheel und sdist sind pruefbar. Der delphi-lsp-"
                 "Entry-Point installiert pygls und lsprotocol standardmaessig; der Wheel-"
-                "Smoke importierte delphiast, parse(..., \"Unit1.pas\") und den LSP-Server. "
+                "Smoke importierte delphi_lsp, parse(..., \"Unit1.pas\") und den LSP-Server. "
                 "Der sdist-Smoke lief als Editable-Checkout: 129 passed, 1 skipped, "
                 "43 subtests passed in 10.39s. opencode.json sowie die opencode-, vLLM-, "
                 "Cache-Prepare- und Ollama-Hilfsskripte sind in MANIFEST.in enthalten; test_projects und "

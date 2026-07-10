@@ -18,8 +18,8 @@ def test_lsp_console_script_dependencies_are_installed_by_default() -> None:
     project = _section('project', pyproject)
     scripts = _section('project.scripts', pyproject)
 
-    assert 'delphi-lsp = "delphiast.lsp_server:main"' in scripts
-    assert 'delphi-lsp-agent = "delphiast.agent_cli:main"' in scripts
+    assert 'delphi-lsp = "delphi_lsp.lsp_server:main"' in scripts
+    assert 'delphi-lsp-agent = "delphi_lsp.agent_cli:main"' in scripts
     assert '"pygls>=1.3.0,<2.0"' in project
     assert '"lsprotocol>=2023.0.1"' in project
 

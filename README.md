@@ -4,7 +4,7 @@ Python Delphi LSP is a standalone Python package for Delphi/Object Pascal
 parsing, semantic indexing, diagnostics, and Language Server Protocol support.
 
 The distributable package is named `python-delphi-lsp`. The import package keeps
-the established `delphiast` name. The language-server executable is
+the established `delphi_lsp` name. The language-server executable is
 `delphi-lsp`, and the agent-facing codebase navigator executable is
 `delphi-lsp-agent`.
 
@@ -52,7 +52,7 @@ python -m pytest -q
 ## Python API Example
 
 ```python
-from delphiast import parse
+from delphi_lsp import parse
 
 result = parse("unit Unit1; interface implementation end.", "Unit1.pas")
 print(result.root)
@@ -61,7 +61,7 @@ print(result.root)
 Enable semantic analysis when you need symbols or diagnostics:
 
 ```python
-from delphiast import parse
+from delphi_lsp import parse
 
 source = """
 unit Unit1;
@@ -99,7 +99,7 @@ delphi-lsp
 From a checkout, the equivalent command is:
 
 ```bash
-python -m delphiast.lsp_server
+python -m delphi_lsp.lsp_server
 ```
 
 The server expects normal LSP JSON-RPC over stdio. Editors and tools should set
@@ -116,7 +116,7 @@ set include or source paths by hand.
   "$schema": "https://opencode.ai/config.json",
   "lsp": {
     "delphi": {
-      "command": ["python", "-m", "delphiast.lsp_server"],
+      "command": ["python", "-m", "delphi_lsp.lsp_server"],
       "extensions": [".pas", ".dpr", ".dpk", ".inc"],
       "initialization": {
         "autoDiscoverPaths": true
@@ -142,7 +142,7 @@ This writes:
 
 The skill tells agents to inspect Delphi code through layered semantic views
 instead of loading full source files. The custom opencode tool calls
-`python -m delphiast.agent_cli` directly, so the agent does not need shell text
+`python -m delphi_lsp.agent_cli` directly, so the agent does not need shell text
 search or raw file-reading tools to understand the codebase.
 
 Useful direct commands:
@@ -180,7 +180,7 @@ add an `lsp.delphi` entry to that project's `opencode.json`:
   "$schema": "https://opencode.ai/config.json",
   "lsp": {
     "delphi": {
-      "command": ["python", "-m", "delphiast.lsp_server"],
+      "command": ["python", "-m", "delphi_lsp.lsp_server"],
       "extensions": [".pas", ".dpr", ".dpk", ".inc"],
       "initialization": {
         "autoDiscoverPaths": true
@@ -198,7 +198,7 @@ directly:
 {
   "lsp": {
     "delphi": {
-      "command": [".venv/bin/python", "-m", "delphiast.lsp_server"],
+      "command": [".venv/bin/python", "-m", "delphi_lsp.lsp_server"],
       "extensions": [".pas", ".dpr", ".dpk", ".inc"],
       "env": {
         "PYTHONPATH": "."
@@ -213,7 +213,7 @@ directly:
 
 On Windows checkout development, replace `.venv/bin/python` with
 `.venv\\Scripts\\python.exe`. If `python-delphi-lsp` is installed normally, the
-portable `["python", "-m", "delphiast.lsp_server"]` command above works without
+portable `["python", "-m", "delphi_lsp.lsp_server"]` command above works without
 `PYTHONPATH`.
 
 For normal local opencode work, use the Ollama alias with a larger context and
@@ -382,12 +382,12 @@ python -m twine check dist/*
 
 ## Repository Layout
 
-- `delphiast/` - parser, preprocessor, project discovery, semantic model,
+- `delphi_lsp/` - parser, preprocessor, project discovery, semantic model,
   workspace indexer, agent layers, and LSP server
 - `scripts/` - release evidence, cache checks, opencode probes, and bootstrap
   helpers
 - `tests/` - parser, semantic, workspace, diagnostics, packaging, and LSP tests
-- `tests/fixtures/` - Delphi/Object Pascal fixtures and legacy DelphiAST snippets
+- `tests/fixtures/` - Delphi/Object Pascal fixtures and legacy DelphiLSP snippets
 
 ## License
 

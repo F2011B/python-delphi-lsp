@@ -2,7 +2,7 @@ import pathlib
 import tempfile
 import unittest
 
-from delphiast.lsp_server import (
+from delphi_lsp.lsp_server import (
     LspWorkspaceState,
     WorkspaceConfig,
     build_outline_semantic_model,
@@ -14,8 +14,8 @@ from delphiast.lsp_server import (
     resolve_base_for_member_completion,
     resolve_reference,
 )
-from delphiast.parser import parse
-from delphiast.semantic import SymbolKind
+from delphi_lsp.parser import parse
+from delphi_lsp.semantic import SymbolKind
 
 
 FIXTURE_DIR = pathlib.Path(__file__).parent / 'fixtures'

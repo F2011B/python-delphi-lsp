@@ -1,8 +1,8 @@
 import pathlib
 import unittest
 
-from delphiast.parser import parse
-from delphiast.semantic import (
+from delphi_lsp.parser import parse
+from delphi_lsp.semantic import (
     GenericInstanceTypeRef,
     NamedTypeRef,
     ReferenceKind,

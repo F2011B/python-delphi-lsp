@@ -5,12 +5,12 @@ from pathlib import Path
 
 import pytest
 
-import delphiast.agent_workspace as agent_workspace_module
-import delphiast.project_discovery as project_discovery_module
-from delphiast.agent_protocol import AgentProtocolError, Focus, make_target_id
-from delphiast.agent_workspace import AgentUnit, AgentWorkspace
-from delphiast.parser import DelphiParser
-from delphiast.project_indexer import ProjectIndexer
+import delphi_lsp.agent_workspace as agent_workspace_module
+import delphi_lsp.project_discovery as project_discovery_module
+from delphi_lsp.agent_protocol import AgentProtocolError, Focus, make_target_id
+from delphi_lsp.agent_workspace import AgentUnit, AgentWorkspace
+from delphi_lsp.parser import DelphiParser
+from delphi_lsp.project_indexer import ProjectIndexer
 
 
 def write_text(path: Path, text: str) -> None:

@@ -1,7 +1,7 @@
 import unittest
 from pathlib import Path
 
-from delphiast.parser import parse
+from delphi_lsp.parser import parse
 
 
 SNIPPET_DIR = Path(__file__).resolve().parent / 'fixtures' / 'legacy_snippets'

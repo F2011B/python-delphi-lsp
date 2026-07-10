@@ -58,7 +58,7 @@ def test_sandbox_config_uses_absolute_lsp_runtime(tmp_path) -> None:
     )
 
     config = json.loads(config_path.read_text(encoding='utf-8'))
-    assert config['lsp']['delphi']['command'] == [str(python_exe), '-m', 'delphiast.lsp_server']
+    assert config['lsp']['delphi']['command'] == [str(python_exe), '-m', 'delphi_lsp.lsp_server']
     assert config['lsp']['delphi']['env']['PYTHONPATH'] == str(ROOT)
     assert config['agent']['vllm-lsp']['tools']['lsp'] is True
     assert config['agent']['vllm-lsp']['tools']['read'] is False

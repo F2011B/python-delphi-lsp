@@ -7,11 +7,11 @@ import textwrap
 
 import pytest
 
-import delphiast.agent_relations as agent_relations
-from delphiast.agent_context import AgentContext
-from delphiast.agent_protocol import AgentProtocolError, AgentResponse
-from delphiast.project_indexer import ProjectIndexResult, ProjectProblem, ProjectProblemType
-from delphiast.semantic import SymbolKind
+import delphi_lsp.agent_relations as agent_relations
+from delphi_lsp.agent_context import AgentContext
+from delphi_lsp.agent_protocol import AgentProtocolError, AgentResponse
+from delphi_lsp.project_indexer import ProjectIndexResult, ProjectProblem, ProjectProblemType
+from delphi_lsp.semantic import SymbolKind
 
 
 def write_source(path: Path, source: str) -> None:

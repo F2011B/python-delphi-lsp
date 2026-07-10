@@ -2,10 +2,10 @@ import pathlib
 import unittest
 from unittest.mock import patch
 
-from delphiast.parser import DelphiParser
-from delphiast.semantic import ReferenceKind, SymbolKind
-from delphiast import workspace
-from delphiast.workspace import build_workspace_semantics
+from delphi_lsp.parser import DelphiParser
+from delphi_lsp.semantic import ReferenceKind, SymbolKind
+from delphi_lsp import workspace
+from delphi_lsp.workspace import build_workspace_semantics
 
 
 FIXTURE_DIR = pathlib.Path(__file__).parent / 'fixtures'

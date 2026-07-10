@@ -6,10 +6,10 @@ import tempfile
 import time
 import unittest
 
-import delphiast.lsp_server as lsp_server
-from delphiast.lsp_server import LspWorkspaceState, find_reference_at_position, iter_symbols
-from delphiast.parser import DelphiParser, parse
-from delphiast.semantic import SymbolKind
+import delphi_lsp.lsp_server as lsp_server
+from delphi_lsp.lsp_server import LspWorkspaceState, find_reference_at_position, iter_symbols
+from delphi_lsp.parser import DelphiParser, parse
+from delphi_lsp.semantic import SymbolKind
 
 
 FIXTURE_DIR = pathlib.Path(__file__).parent / 'fixtures'
@@ -549,7 +549,7 @@ end.
     def test_document_symbols_request_returns_symbols_for_file_uri(self) -> None:
         root_dir = pathlib.Path(__file__).parents[1]
         proc = subprocess.Popen(
-            [sys.executable, '-m', 'delphiast.lsp_server'],
+            [sys.executable, '-m', 'delphi_lsp.lsp_server'],
             cwd=root_dir,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -617,7 +617,7 @@ end.
             self.skipTest(f'missing GitHub corpus files: {missing}')
 
         proc = subprocess.Popen(
-            [sys.executable, '-m', 'delphiast.lsp_server'],
+            [sys.executable, '-m', 'delphi_lsp.lsp_server'],
             cwd=root_dir,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -676,7 +676,7 @@ end.
         decl_line = text.count('\n', 0, text.index('constructor Create;'))
 
         proc = subprocess.Popen(
-            [sys.executable, '-m', 'delphiast.lsp_server'],
+            [sys.executable, '-m', 'delphi_lsp.lsp_server'],
             cwd=root_dir,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -730,7 +730,7 @@ end.
         source_path = FIXTURE_DIR / 'unit_advanced.pas'
 
         proc = subprocess.Popen(
-            [sys.executable, '-m', 'delphiast.lsp_server'],
+            [sys.executable, '-m', 'delphi_lsp.lsp_server'],
             cwd=root_dir,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -812,7 +812,7 @@ end.
             completion_line, completion_col = _position_for(source, 'Box.', offset=len('Box.'))
 
             proc = subprocess.Popen(
-                [sys.executable, '-m', 'delphiast.lsp_server'],
+                [sys.executable, '-m', 'delphi_lsp.lsp_server'],
                 cwd=root_dir,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -886,7 +886,7 @@ end.
             source_path.write_text(source, encoding='utf-8')
 
             proc = subprocess.Popen(
-                [sys.executable, '-m', 'delphiast.lsp_server'],
+                [sys.executable, '-m', 'delphi_lsp.lsp_server'],
                 cwd=root_dir,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -952,7 +952,7 @@ end.
             source_path.write_text(source, encoding='utf-8')
 
             proc = subprocess.Popen(
-                [sys.executable, '-m', 'delphiast.lsp_server'],
+                [sys.executable, '-m', 'delphi_lsp.lsp_server'],
                 cwd=root_dir,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -1017,7 +1017,7 @@ end.
             )
 
             proc = subprocess.Popen(
-                [sys.executable, '-m', 'delphiast.lsp_server'],
+                [sys.executable, '-m', 'delphi_lsp.lsp_server'],
                 cwd=root_dir,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -1087,7 +1087,7 @@ end.
                 (workspace_dir / f'Other{index}Unit.pas').write_text(unit_source, encoding='utf-8')
 
             proc = subprocess.Popen(
-                [sys.executable, '-m', 'delphiast.lsp_server'],
+                [sys.executable, '-m', 'delphi_lsp.lsp_server'],
                 cwd=root_dir,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -1154,7 +1154,7 @@ end.
             decl_line = source.count('\n', 0, source.index('  Value: Integer;', proc_start))
 
             proc = subprocess.Popen(
-                [sys.executable, '-m', 'delphiast.lsp_server'],
+                [sys.executable, '-m', 'delphi_lsp.lsp_server'],
                 cwd=root_dir,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -1223,7 +1223,7 @@ end.
             use_col = len('  Value := ')
 
             proc = subprocess.Popen(
-                [sys.executable, '-m', 'delphiast.lsp_server'],
+                [sys.executable, '-m', 'delphi_lsp.lsp_server'],
                 cwd=root_dir,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -1292,7 +1292,7 @@ end.
             decl_line = source.count('\n', 0, source.index('  Value: Integer;', proc_start))
 
             proc = subprocess.Popen(
-                [sys.executable, '-m', 'delphiast.lsp_server'],
+                [sys.executable, '-m', 'delphi_lsp.lsp_server'],
                 cwd=root_dir,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -1365,7 +1365,7 @@ end.
             decl_line = source.count('\n', 0, source.index('  Value: Integer;', proc_start))
 
             proc = subprocess.Popen(
-                [sys.executable, '-m', 'delphiast.lsp_server'],
+                [sys.executable, '-m', 'delphi_lsp.lsp_server'],
                 cwd=root_dir,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,

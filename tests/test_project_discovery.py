@@ -2,14 +2,14 @@ import textwrap
 import os
 from pathlib import Path
 
-from delphiast.project_discovery import (
+from delphi_lsp.project_discovery import (
     DelphiProjectDiscovery,
     DiscoveryProblem,
     discover_delphi_project,
     populate_workspace_sources,
 )
-from delphiast.project_indexer import ProjectIndexer
-from delphiast.lsp_server import LspWorkspaceState, WorkspaceConfig
+from delphi_lsp.project_indexer import ProjectIndexer
+from delphi_lsp.lsp_server import LspWorkspaceState, WorkspaceConfig
 
 
 def write_text(path: Path, text: str) -> None:

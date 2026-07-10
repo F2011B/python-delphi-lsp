@@ -1368,7 +1368,7 @@ def diagnostics_for_model(model: SemanticModel):
                 ),
                 message=problem.message,
                 severity=DiagnosticSeverity.Error,
-                source='delphiast',
+                source='delphi_lsp',
             )
         )
     return diagnostics
@@ -1448,7 +1448,7 @@ def create_server():
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise RuntimeError('pygls and lsprotocol are required for the LSP server') from exc
 
-    server = LanguageServer('delphiast', '0.1.0')
+    server = LanguageServer('delphi_lsp', '0.1.0')
     state = LspWorkspaceState()
 
     def _symbol_kind(symbol: Symbol) -> LspSymbolKind:

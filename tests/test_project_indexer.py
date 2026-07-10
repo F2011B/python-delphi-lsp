@@ -4,9 +4,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from delphiast.lsp_server import outline_large_source
-from delphiast.parser import DelphiParser
-from delphiast.project_indexer import ProjectIndexer, ProjectProblemType
+from delphi_lsp.lsp_server import outline_large_source
+from delphi_lsp.parser import DelphiParser
+from delphi_lsp.project_indexer import ProjectIndexer, ProjectProblemType
 
 
 class ProjectIndexerTests(unittest.TestCase):
@@ -34,7 +34,7 @@ class ProjectIndexerTests(unittest.TestCase):
                 return original_parse(parser, text, file_name, **kwargs)
 
             with (
-                mock.patch('delphiast.project_indexer.read_source_text', side_effect=read_source),
+                mock.patch('delphi_lsp.project_indexer.read_source_text', side_effect=read_source),
                 mock.patch.object(DelphiParser, 'parse', autospec=True, side_effect=recording_parse),
             ):
                 result = ProjectIndexer(source_transform=transform).index(str(source_path))

@@ -7,9 +7,9 @@ import unicodedata
 
 import pytest
 
-import delphiast.agent_context as agent_context_module
-from delphiast.agent_context import AgentContext
-from delphiast.agent_protocol import AgentProtocolError, AgentRequest, AgentResponse, Focus
+import delphi_lsp.agent_context as agent_context_module
+from delphi_lsp.agent_context import AgentContext
+from delphi_lsp.agent_protocol import AgentProtocolError, AgentRequest, AgentResponse, Focus
 
 
 def write_source(path: Path, source: str) -> None:

@@ -52,11 +52,11 @@ dev = [
 ]
 
 [project.scripts]
-delphi-lsp = "delphiast.lsp_server:main"
-delphi-lsp-agent = "delphiast.agent_cli:main"
+delphi-lsp = "delphi_lsp.lsp_server:main"
+delphi-lsp-agent = "delphi_lsp.agent_cli:main"
 
 [tool.setuptools]
-packages = ["delphiast"]
+packages = ["delphi_lsp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

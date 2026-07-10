@@ -1,7 +1,7 @@
 import unittest
 
-from delphiast.parser import parse
-from delphiast.preprocessor import PreprocessorOptions
+from delphi_lsp.parser import parse
+from delphi_lsp.preprocessor import PreprocessorOptions
 
 
 class PreprocessorTests(unittest.TestCase):

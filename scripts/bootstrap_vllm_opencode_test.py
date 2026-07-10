@@ -80,7 +80,7 @@ def write_mega_unit(sandbox: Path) -> Path:
 def write_sandbox_config(*, root: Path, sandbox: Path, python_executable: Path) -> Path:
     sandbox.mkdir(parents=True, exist_ok=True)
     config = json.loads((root / 'opencode.json').read_text(encoding='utf-8'))
-    config['lsp']['delphi']['command'] = [str(python_executable), '-m', 'delphiast.lsp_server']
+    config['lsp']['delphi']['command'] = [str(python_executable), '-m', 'delphi_lsp.lsp_server']
     config['lsp']['delphi']['env']['PYTHONPATH'] = str(root)
     config['lsp']['delphi']['initialization']['includePaths'] = [
         str(root / 'tests' / 'fixtures'),

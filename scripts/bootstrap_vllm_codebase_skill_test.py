@@ -10,7 +10,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from delphiast.agent_templates import install_opencode_support
+from delphi_lsp.agent_templates import install_opencode_support
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT = SCRIPT_DIR.parent
@@ -79,7 +79,7 @@ end.
 
     config = json.loads((root / "opencode.json").read_text(encoding="utf-8"))
     config.setdefault("lsp", {}).setdefault("delphi", {})
-    config["lsp"]["delphi"]["command"] = [str(python_executable), "-m", "delphiast.lsp_server"]
+    config["lsp"]["delphi"]["command"] = [str(python_executable), "-m", "delphi_lsp.lsp_server"]
     config["lsp"]["delphi"]["env"] = {"PYTHONPATH": str(root)}
     config["lsp"]["delphi"]["initialization"] = {"autoDiscoverPaths": True}
     (sandbox / "opencode.json").write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")

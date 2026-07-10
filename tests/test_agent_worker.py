@@ -11,8 +11,8 @@ import threading
 
 import pytest
 
-from delphiast import agent_cli
-from delphiast.agent_protocol import AgentProtocolError
+from delphi_lsp import agent_cli
+from delphi_lsp.agent_protocol import AgentProtocolError
 
 
 def _write_source(path: Path, source: str) -> None:
@@ -28,7 +28,7 @@ def _worker(
     command = [
         sys.executable,
         "-m",
-        "delphiast.agent_cli",
+        "delphi_lsp.agent_cli",
         "worker",
         "--root",
         str(root),
@@ -74,7 +74,7 @@ end.
 """,
     )
     process = subprocess.Popen(
-        [sys.executable, "-m", "delphiast.agent_cli", "worker", "--root", str(tmp_path)],
+        [sys.executable, "-m", "delphi_lsp.agent_cli", "worker", "--root", str(tmp_path)],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -179,7 +179,7 @@ def test_worker_writes_utf8_when_pythonioencoding_is_ascii(tmp_path: Path) -> No
     environment["PYTHONIOENCODING"] = "ascii:strict"
 
     completed = subprocess.run(
-        [sys.executable, "-m", "delphiast.agent_cli", "worker", "--root", str(tmp_path)],
+        [sys.executable, "-m", "delphi_lsp.agent_cli", "worker", "--root", str(tmp_path)],
         input=b'{"action":"open"}\n',
         capture_output=True,
         check=False,
@@ -209,7 +209,7 @@ def test_worker_drains_oversize_record_then_serves_later_request(tmp_path: Path)
 def test_worker_reports_unterminated_oversize_record_before_newline(tmp_path: Path) -> None:
     _write_source(tmp_path / "Main.dpr", "program Main; begin end.\n")
     process = subprocess.Popen(
-        [sys.executable, "-m", "delphiast.agent_cli", "worker", "--root", str(tmp_path)],
+        [sys.executable, "-m", "delphi_lsp.agent_cli", "worker", "--root", str(tmp_path)],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -272,7 +272,7 @@ def test_worker_cleanly_exits_at_eof_with_ndjson_only(tmp_path: Path) -> None:
 def test_worker_broken_stdout_exits_one_without_shutdown_warning(tmp_path: Path) -> None:
     _write_source(tmp_path / "Main.dpr", "program Main; begin end.\n")
     process = subprocess.Popen(
-        [sys.executable, "-m", "delphiast.agent_cli", "worker", "--root", str(tmp_path)],
+        [sys.executable, "-m", "delphi_lsp.agent_cli", "worker", "--root", str(tmp_path)],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

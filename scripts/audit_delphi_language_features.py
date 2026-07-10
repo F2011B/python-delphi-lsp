@@ -272,7 +272,7 @@ def build_language_feature_matrix(root: Path = ROOT) -> dict[str, Any]:
             [
                 _evidence('tests/fixtures/legacy_snippets/umlauts.pas', []),
                 _evidence('tests/test_lsp_features.py', ['test_workspace_config_reads_bom_encoded_files', "encode('utf-16')"]),
-                _evidence('delphiast/source_reader.py', ['read_source_text', 'utf-16']),
+                _evidence('delphi_lsp/source_reader.py', ['read_source_text', 'utf-16']),
             ],
             ['documentSymbol', 'workspaceSymbol'],
             'The source reader normalizes encoded Delphi files before indexing.',
@@ -364,13 +364,13 @@ def _source_text_for_lsp_assertion(assertion: dict[str, Any], root: Path) -> tup
     if generated == 'mega_unit_100k':
         return _generated_mega_unit_source(), 'Mega100kUnit.pas'
     path = root / assertion['path']
-    from delphiast.source_reader import read_source_text
+    from delphi_lsp.source_reader import read_source_text
 
     return read_source_text(path), str(path)
 
 
 def _document_symbol_names(text: str, file_name: str) -> set[str]:
-    from delphiast.lsp_server import build_outline_semantic_model, iter_symbols
+    from delphi_lsp.lsp_server import build_outline_semantic_model, iter_symbols
 
     model = build_outline_semantic_model(text, file_name)
     return {symbol.name for symbol in iter_symbols(model.unit_scope)}

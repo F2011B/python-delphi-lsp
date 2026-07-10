@@ -1,7 +1,7 @@
 import pathlib
 import unittest
 
-from delphiast.parser import parse
+from delphi_lsp.parser import parse
 
 
 FIXTURE_DIR = pathlib.Path(__file__).parent / 'fixtures'

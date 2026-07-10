@@ -7,7 +7,7 @@ import pytest
 
 
 def _protocol():
-    return importlib.import_module('delphiast.agent_protocol')
+    return importlib.import_module('delphi_lsp.agent_protocol')
 
 
 def _encode_raw_cursor(payload: object) -> str:

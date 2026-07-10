@@ -108,7 +108,7 @@ export default tool({{
     const command = [
       PYTHON,
       "-m",
-      "delphiast.agent_cli",
+      "delphi_lsp.agent_cli",
       "view",
       "--root",
       root,

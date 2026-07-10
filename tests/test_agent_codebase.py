@@ -4,8 +4,8 @@ import sys
 import textwrap
 from pathlib import Path
 
-from delphiast.agent_layers import build_codebase_index, render_layer
-from delphiast.project_indexer import ProjectIndexer
+from delphi_lsp.agent_layers import build_codebase_index, render_layer
+from delphi_lsp.project_indexer import ProjectIndexer
 
 
 def write_text(path: Path, text: str) -> None:
@@ -158,7 +158,7 @@ def test_agent_cli_outputs_symbol_layer_as_json(tmp_path: Path) -> None:
         [
             sys.executable,
             "-m",
-            "delphiast.agent_cli",
+            "delphi_lsp.agent_cli",
             "view",
             "--root",
             str(tmp_path),
@@ -185,7 +185,7 @@ def test_opencode_install_writes_skill_and_custom_tool(tmp_path: Path) -> None:
         [
             sys.executable,
             "-m",
-            "delphiast.agent_cli",
+            "delphi_lsp.agent_cli",
             "opencode",
             "install",
             "--target",
@@ -205,7 +205,7 @@ def test_opencode_install_writes_skill_and_custom_tool(tmp_path: Path) -> None:
     assert "name: delphi-codebase-navigator" in skill.read_text(encoding="utf-8")
     tool_text = tool.read_text(encoding="utf-8")
     assert sys.executable in tool_text
-    assert "delphiast.agent_cli" in tool_text
+    assert "delphi_lsp.agent_cli" in tool_text
     assert '@opencode-ai/plugin' in tool_text
     assert "tool.schema.enum" in tool_text
     assert "tool.schema.string().optional()" in tool_text

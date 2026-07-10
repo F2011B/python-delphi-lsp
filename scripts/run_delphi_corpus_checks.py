@@ -16,8 +16,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from delphiast.parser import parse  # noqa: E402
-from delphiast.source_reader import read_source_text  # noqa: E402
+from delphi_lsp.parser import parse  # noqa: E402
+from delphi_lsp.source_reader import read_source_text  # noqa: E402
 
 
 SOURCE_SUFFIXES = {'.pas', '.dpr', '.dpk', '.inc'}

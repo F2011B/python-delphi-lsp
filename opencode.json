@@ -222,7 +222,7 @@
       "command": [
         ".venv/bin/python",
         "-m",
-        "delphiast.lsp_server"
+        "delphi_lsp.lsp_server"
       ],
       "extensions": [
         ".pas",
