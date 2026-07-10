@@ -5,6 +5,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 import delphi_lsp.lsp_server as lsp_server
 from delphi_lsp.lsp_server import LspWorkspaceState, find_reference_at_position, iter_symbols
@@ -127,16 +128,22 @@ class LspSupportTests(unittest.TestCase):
         self.assertEqual(len(transformed), len(source))
         parse(transformed, 'one_line.dpr')
 
-    def test_outline_large_source_keeps_existing_threshold_policy(self) -> None:
+    def test_workspace_rebuild_uses_outline_index_for_every_source_size(self) -> None:
         one_line = 'program P; begin DoWork; end.'
         multiline = 'program P;\nbegin\n  DoWork;\nend.\n'
 
-        self.assertEqual(lsp_server.outline_large_source(one_line, 1), one_line)
-        self.assertEqual(lsp_server.outline_large_source(multiline, 10), multiline)
-        self.assertEqual(
-            lsp_server.outline_large_source(multiline, 1),
-            _outline_source(multiline),
-        )
+        state = LspWorkspaceState()
+        with mock.patch.object(
+            lsp_server,
+            'build_outline_semantic_model',
+            wraps=lsp_server.build_outline_semantic_model,
+        ) as build_outline:
+            state.update_document('file:///OneLine.dpr', one_line)
+            state.update_document('file:///Multiline.dpr', multiline)
+
+        indexed_sources = [call.args[0] for call in build_outline.call_args_list]
+        self.assertIn(one_line, indexed_sources)
+        self.assertIn(multiline, indexed_sources)
 
     def test_outline_source_tracks_nested_case_until_the_outer_end(self) -> None:
         source = '''program NestedCase;

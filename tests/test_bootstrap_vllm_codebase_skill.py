@@ -52,6 +52,8 @@ def test_writes_codebase_skill_sandbox_with_project_paths(tmp_path: Path) -> Non
     assert "load delphi-codebase-navigator first" in config
     assert '"read": false' in config
     parsed_config = json.loads(config)
+    assert "env" not in parsed_config["lsp"]["delphi"]
+    assert "PYTHONPATH" not in config
     provider_options = parsed_config["provider"]["vllm"]["options"]
     assert provider_options["baseURL"] == module.DEFAULT_BASE_URL
     assert provider_options["apiKey"] == module.DEFAULT_API_KEY
@@ -123,6 +125,8 @@ def test_probe_command_requires_delphi_codebase_tool_and_forbids_raw_tools(tmp_p
     assert "delphi_codebase.find:MegaProc02500" in command
     assert "delphi_codebase.focus:target_id" in command
     assert "delphi_codebase.inspect:Value := Value + 40" in command
+    required_final = [command[index + 1] for index, item in enumerate(command) if item == "--require-final"]
+    assert {"src/Mega100kUnit.pas", "117464", "Value := Value + 40"}.issubset(set(required_final))
     assert "load the delphi-codebase-navigator skill" in command[-1]
     assert "action open" in command[-1]
     assert "action find" in command[-1]

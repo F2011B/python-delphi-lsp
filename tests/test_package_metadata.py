@@ -37,6 +37,7 @@ def test_release_metadata_declares_2_0_0_sole_namespace_author_and_windows_suppo
     assert '"Operating System :: OS Independent"' in project
     assert '"Operating System :: Microsoft :: Windows"' in project
     assert '"Operating System :: MacOS"' in project
+    assert '"Development Status :: 5 - Production/Stable"' in project
     assert '{ name = "Dark Light" }' in project
     assert pyproject.count('{ name = "Dark Light" }') == 1
     assert 'packages = ["delphi_lsp"]' in pyproject
@@ -79,6 +80,8 @@ def test_readme_documents_v2_release_plugin_protocol_discovery_and_vllm_proof() 
     assert forbidden not in readme.casefold()
     assert 'delphi-lsp-agent opencode install --target . --write-config' in readme
     assert 'Auto-discovery reads `.dpr`, `.dpk`, `.dproj`, `.cfg`, and `.dof` files' in readme
+    assert 'no file-size threshold' in readme
+    assert 'final answer' in readme
 
 
 def test_root_opencode_config_is_portable_and_has_no_pythonpath_requirement() -> None:

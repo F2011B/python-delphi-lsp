@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Iterable
 import json
 
-from .lsp_server import build_outline_semantic_model, outline_large_source
+from .lsp_server import build_outline_semantic_model, outline_source
 from .project_discovery import DelphiProjectDiscovery, discover_delphi_project
 from .project_indexer import ProjectIndexResult, ProjectIndexer
 from .semantic import Scope, SourceRange, Symbol, SymbolIndex, SymbolKind
@@ -38,7 +38,7 @@ def build_codebase_index(
             text = read_source_text(path)
         except (OSError, UnicodeError):
             continue
-        models[source] = build_outline_semantic_model(outline_large_source(text, 1), source)
+        models[source] = build_outline_semantic_model(outline_source(text), source)
 
     symbol_index = SymbolIndex()
     for model in models.values():

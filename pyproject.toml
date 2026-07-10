@@ -15,7 +15,7 @@ authors = [
 ]
 keywords = ["delphi", "object-pascal", "pascal", "lsp", "language-server", "parser"]
 classifiers = [
-  "Development Status :: 3 - Alpha",
+  "Development Status :: 5 - Production/Stable",
   "Intended Audience :: Developers",
   "Operating System :: OS Independent",
   "Operating System :: MacOS",

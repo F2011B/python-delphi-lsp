@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from delphi_lsp.lsp_server import outline_large_source
+from delphi_lsp.lsp_server import outline_source
 from delphi_lsp.parser import DelphiParser
 from delphi_lsp.project_indexer import ProjectIndexer, ProjectProblemType
 
@@ -242,7 +242,7 @@ class ProjectIndexerTests(unittest.TestCase):
             indexer = ProjectIndexer(
                 search_paths=[str(root)],
                 include_paths=[str(root)],
-                source_transform=lambda text: outline_large_source(text, 1),
+                source_transform=outline_source,
             )
             result = indexer.index(str(root / 'Bundle.dpk'))
 

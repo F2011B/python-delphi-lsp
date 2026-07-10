@@ -323,6 +323,59 @@ def test_run_probe_waits_until_all_required_tools_are_seen(tmp_path) -> None:
     assert len((tmp_path / 'probe.jsonl').read_text(encoding='utf-8').splitlines()) == 2
 
 
+def test_run_probe_waits_for_required_final_response_after_tools(tmp_path, capsys) -> None:
+    probe = _load_probe_module()
+    events = [
+        {
+            'type': 'tool_use',
+            'part': {
+                'tool': 'delphi_codebase',
+                'state': {
+                    'status': 'completed',
+                    'input': {'action': 'inspect', 'detail': 'body'},
+                    'output': 'Value := Value + 40',
+                    'time': {'start': 1000, 'end': 1093},
+                },
+            },
+        },
+        {
+            'type': 'text',
+            'part': {'text': 'src/Mega100kUnit.pas:117464 contains Value := Value + 40.'},
+        },
+    ]
+    event_lines = [json.dumps(event) for event in events]
+    probe.build_opencode_command = lambda **_kwargs: [
+        sys.executable,
+        '-c',
+        (
+            f'lines = {event_lines!r}; '
+            'print(lines[0], flush=True); '
+            'print(lines[1], flush=True)'
+        ),
+    ]
+    args = Namespace(
+        title='final-response-test',
+        model='vllm/ornith-lspctx',
+        agent='vllm-delphi-codebase',
+        prompt='inspect and explain',
+        cwd=str(ROOT),
+        output=str(tmp_path / 'probe.jsonl'),
+        timeout=2.0,
+        tool='delphi_codebase',
+        expected='Value := Value + 40',
+        require_tool=['delphi_codebase.inspect:Value := Value + 40'],
+        require_final=['src/Mega100kUnit.pas', '117464', 'Value := Value + 40'],
+        forbid_tool=['bash', 'read', 'grep'],
+    )
+
+    result = probe.run_probe(args)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert result == 0
+    assert payload['final_response'] == 'src/Mega100kUnit.pas:117464 contains Value := Value + 40.'
+    assert len((tmp_path / 'probe.jsonl').read_text(encoding='utf-8').splitlines()) == 2
+
+
 def test_run_probe_rejects_forbidden_tools_before_required_evidence(tmp_path) -> None:
     probe = _load_probe_module()
     events = [

@@ -92,7 +92,7 @@ end.
     provider_options["apiKey"] = api_key
     config.setdefault("lsp", {}).setdefault("delphi", {})
     config["lsp"]["delphi"]["command"] = [str(python_executable), "-m", "delphi_lsp.lsp_server"]
-    config["lsp"]["delphi"]["env"] = {"PYTHONPATH": str(root)}
+    config["lsp"]["delphi"].pop("env", None)
     config["lsp"]["delphi"]["initialization"] = {"autoDiscoverPaths": True}
     (sandbox / "opencode.json").write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     install_opencode_support(
@@ -137,6 +137,12 @@ def build_probe_command(
         "delphi_codebase.inspect:Value := Value + 40",
         "--require-tool",
         "skill:delphi-codebase-navigator",
+        "--require-final",
+        "src/Mega100kUnit.pas",
+        "--require-final",
+        "117464",
+        "--require-final",
+        "Value := Value + 40",
         "--forbid-tool",
         "bash",
         "--forbid-tool",

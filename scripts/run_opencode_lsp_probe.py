@@ -205,6 +205,15 @@ def evidences_from_jsonl(
     return found
 
 
+def final_response_from_event(event: dict[str, Any], *, required: list[str]) -> str | None:
+    if event.get('type') != 'text':
+        return None
+    text = str((event.get('part') or {}).get('text') or '').strip()
+    if not text or not all(expected in text for expected in required):
+        return None
+    return text
+
+
 def run_probe(args: argparse.Namespace) -> int:
     command = build_opencode_command(
         title=args.title,
@@ -230,6 +239,8 @@ def run_probe(args: argparse.Namespace) -> int:
     forbidden_tools = set(getattr(args, 'forbid_tool', None) or [])
     forbidden_event: dict[str, Any] | None = None
     evidences: list[ToolEvidence] = []
+    required_final = list(getattr(args, 'require_final', None) or [])
+    final_response: str | None = None
     proc = subprocess.Popen(
         command,
         cwd=args.cwd,
@@ -294,7 +305,9 @@ def run_probe(args: argparse.Namespace) -> int:
                     evidences.append(evidence)
                     remaining_requirements.remove(requirement)
                     break
-            if not remaining_requirements:
+            if not remaining_requirements and required_final:
+                final_response = final_response_from_event(event, required=required_final)
+            if not remaining_requirements and (not required_final or final_response is not None):
                 break
     finally:
         _stop_process(proc)
@@ -317,7 +330,7 @@ def run_probe(args: argparse.Namespace) -> int:
             print(stderr, file=sys.stderr)
         return 2
 
-    if remaining_requirements:
+    if remaining_requirements or (required_final and final_response is None):
         stderr = stderr_tail.get().strip()
         if stderr:
             print(stderr, file=sys.stderr)
@@ -336,12 +349,14 @@ def run_probe(args: argparse.Namespace) -> int:
     }
     if len(evidences) == 1:
         payload.update(payload['evidences'][0])
+    if final_response is not None:
+        payload['final_response'] = final_response
     print(json.dumps(payload, sort_keys=True))
     return 0
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description='Run an opencode LSP probe and stop after tool evidence.')
+    parser = argparse.ArgumentParser(description='Run an opencode LSP probe and verify tool and final-answer evidence.')
     parser.add_argument('prompt')
     parser.add_argument('--cwd', default='.')
     parser.add_argument('--model', default='ollama/ornith-lspctx')
@@ -357,7 +372,12 @@ def main() -> int:
     parser.add_argument(
         '--forbid-tool',
         action='append',
-        help='Fail immediately if this tool is used before the required evidence is complete. Repeatable.',
+        help='Fail immediately if this tool is used before the complete probe evidence is available. Repeatable.',
+    )
+    parser.add_argument(
+        '--require-final',
+        action='append',
+        help='Text that must occur in one final response after all required tools complete. Repeatable.',
     )
     parser.add_argument('--timeout', type=float, default=45.0)
     parser.add_argument('--npm-cache', help='Writable npm cache for the isolated opencode probe process.')

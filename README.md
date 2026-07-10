@@ -69,6 +69,12 @@ The root `opencode.json` starts the installed package portably:
 environment section; LSP remains available for normal editor and OpenCode use,
 including large sources.
 
+The LSP builds its structural index through the same optimized outline path for
+every source, with no file-size threshold. Definition, hover, references,
+rename, completion, document symbols, workspace symbols, and diagnostics remain
+registered for every file size; source-aware fallbacks keep body-level queries
+available without returning the complete file as agent context.
+
 ### Automatic discovery
 
 Auto-discovery reads `.dpr`, `.dpk`, `.dproj`, `.cfg`, and `.dof` files.
@@ -203,8 +209,10 @@ workflow and does not grant the navigator any raw source tools.
 
 ## Reproducible large-project vLLM proof
 
-The proof generates a 117,511-line project. The verifier requires `skill`, `open` (`Main.dpr` evidence), `find`, `focus`, and `inspect`, checks `MegaProc02500` and
-`Value := Value + 40`, and forbids raw `bash`, `read`, `glob`, and `grep`.
+The proof generates a 117,511-line project. The verifier requires `skill`, `open` (`Main.dpr` evidence), `find`, `focus`, and `inspect`,
+checks `MegaProc02500` and `Value := Value + 40`, and forbids raw `bash`,
+`read`, `glob`, and `grep`. It then waits for the final answer and requires the
+source path, line 117464, and the inspected statement in that answer.
 The proof uses the local Ornith vLLM OpenAI-compatible
 endpoint at `http://127.0.0.1:8001/v1`.
 

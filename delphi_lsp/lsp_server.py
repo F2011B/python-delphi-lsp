@@ -51,7 +51,6 @@ class WorkspaceConfig:
     search_paths: list[str] = field(default_factory=list)
     defines: list[str] = field(default_factory=list)
     extensions: tuple[str, ...] = ('.pas', '.dpr', '.dpk', '.inc')
-    outline_line_threshold: int = 50_000
     eager_index: bool = False
     auto_discover_paths: bool = True
     discovered_include_paths: list[str] = field(default_factory=list)
@@ -116,7 +115,6 @@ class LspWorkspaceState:
             search_paths=search_paths,
             defines=defines,
             extensions=config.extensions,
-            outline_line_threshold=config.outline_line_threshold,
             eager_index=config.eager_index,
             auto_discover_paths=config.auto_discover_paths,
             discovered_include_paths=discovered_include_paths,
@@ -142,7 +140,7 @@ class LspWorkspaceState:
         sources = {path: snapshot.text for path, snapshot in self.file_cache.items()}
         for doc in self.documents.values():
             sources[doc.file_name] = doc.text
-        self.workspace_symbol_index = self._outline_workspace_semantics(sources, require_all_large=False)
+        self.workspace_symbol_index = self._outline_workspace_semantics(sources)
 
     def workspace_symbols_for_query(self, query: str) -> Optional[WorkspaceSemanticResult]:
         normalized_query = query.strip().casefold()
@@ -165,7 +163,7 @@ class LspWorkspaceState:
         for doc in self.documents.values():
             if normalized_query in doc.text.casefold():
                 sources[doc.file_name] = doc.text
-        result = self._outline_workspace_semantics(sources, require_all_large=False)
+        result = self._outline_workspace_semantics(sources)
         if result is None:
             result = WorkspaceSemanticResult(models={}, index=SymbolIndex())
         self.workspace_symbol_query_cache[normalized_query] = result
@@ -215,11 +213,11 @@ class LspWorkspaceState:
 
     def _collect_sources(self) -> dict[str, str]:
         sources = {
-            path: outline_large_source(snapshot.text, self.config.outline_line_threshold)
+            path: snapshot.text
             for path, snapshot in self.file_cache.items()
         }
         for doc in self.documents.values():
-            sources[doc.file_name] = outline_large_source(doc.text, self.config.outline_line_threshold)
+            sources[doc.file_name] = doc.text
         return sources
 
     def _rebuild(self) -> None:
@@ -229,20 +227,10 @@ class LspWorkspaceState:
         if not sources:
             self.workspace = None
             return
-        outline_result = self._outline_workspace_semantics(sources)
-        if outline_result is not None:
-            self.workspace = outline_result
-            for doc in self.documents.values():
-                doc.semantic = outline_result.models.get(doc.file_name)
-            return
-        result = build_workspace_semantics(
-            sources,
-            include_paths=self.config.include_paths,
-            defines=self.config.defines,
-        )
+        result = self._outline_workspace_semantics(sources)
         self.workspace = result
         for doc in self.documents.values():
-            doc.semantic = result.models.get(doc.file_name)
+            doc.semantic = result.models.get(doc.file_name) if result is not None else None
 
     def semantic_for_uri(self, uri: str) -> Optional[SemanticModel]:
         doc = self.documents.get(uri)
@@ -261,10 +249,15 @@ class LspWorkspaceState:
             text = read_source_text(path)
         except (OSError, UnicodeError):
             return None
-        if is_large_source(text, self.config.outline_line_threshold):
-            return build_outline_semantic_model(text, file_name)
+        return build_outline_semantic_model(text, file_name)
+
+    def full_semantic_for_uri(self, uri: str) -> Optional[SemanticModel]:
+        file_name = uri_to_path(uri)
+        text = self.text_for_uri(uri)
+        if text is None:
+            return None
         result = build_workspace_semantics(
-            {file_name: outline_large_source(text, self.config.outline_line_threshold)},
+            {file_name: text},
             include_paths=self.config.include_paths,
             defines=self.config.defines,
         )
@@ -297,12 +290,8 @@ class LspWorkspaceState:
     def _outline_workspace_semantics(
         self,
         sources: dict[str, str],
-        *,
-        require_all_large: bool = True,
     ) -> Optional[WorkspaceSemanticResult]:
         if not sources:
-            return None
-        if require_all_large and not all(is_large_source(text, self.config.outline_line_threshold) for text in sources.values()):
             return None
         models = {file_name: build_outline_semantic_model(text, file_name) for file_name, text in sources.items()}
         index = SymbolIndex()
@@ -354,12 +343,6 @@ def uri_to_path(uri: str) -> str:
     return path or uri
 
 
-def outline_large_source(text: str, line_threshold: int) -> str:
-    if not is_large_source(text, line_threshold):
-        return text
-    return outline_source(text)
-
-
 def outline_source(text: str) -> str:
     return _blank_compound_statement_bodies(text)
 
@@ -379,10 +362,6 @@ def multiline_string_block_end(text: str, start: int) -> int | None:
         close = text.find(delimiter, content_start)
         return len(text) if close < 0 else close + quote_count
     return None
-
-
-def is_large_source(text: str, line_threshold: int) -> bool:
-    return line_threshold > 0 and text.count('\n') + 1 > line_threshold
 
 
 # These are the statement grammar alternatives that close with END.
@@ -1591,18 +1570,13 @@ def create_server():
 
     def _symbol_at_position(uri: str, position: Position) -> Optional[Symbol]:
         text = state.text_for_uri(uri)
-        seen: set[int] = set()
         model = state.semantic_for_uri(uri)
         if model is not None:
-            seen.add(id(model))
             symbol = _symbol_at_position_in_model(model, uri, position, text)
             if symbol is not None:
                 return symbol
-        model = state.structure_semantic_for_uri(uri)
+        model = state.full_semantic_for_uri(uri)
         if model is not None:
-            if id(model) in seen:
-                return None
-            seen.add(id(model))
             symbol = _symbol_at_position_in_model(model, uri, position, text)
             if symbol is not None:
                 return symbol
@@ -1815,7 +1789,7 @@ def create_server():
             else:
                 symbols = completion_items_for_scope(active_scope)
             if not symbols:
-                full_model = state.semantic_for_uri(params.text_document.uri)
+                full_model = state.full_semantic_for_uri(params.text_document.uri)
                 if full_model is not None and full_model is not model:
                     full_scope = scope_at_line(full_model.unit_scope, params.position.line + 1) or full_model.unit_scope
                     full_base_symbol = resolve_reference(full_model, base_expr, full_scope)
@@ -1824,7 +1798,7 @@ def create_server():
                     if full_base_symbol is not None:
                         symbols = list(iter_member_symbols(full_model, full_base_symbol))
         else:
-            full_model = state.semantic_for_uri(params.text_document.uri)
+            full_model = state.full_semantic_for_uri(params.text_document.uri)
             if full_model is not None:
                 full_scope = scope_at_line(full_model.unit_scope, params.position.line + 1) or full_model.unit_scope
                 symbols = completion_items_for_scope(full_scope)
@@ -1851,7 +1825,6 @@ __all__ = [
     'resolve_reference',
     'extract_completion_base',
     'outline_source',
-    'outline_large_source',
     'multiline_string_block_end',
     'main',
 ]
