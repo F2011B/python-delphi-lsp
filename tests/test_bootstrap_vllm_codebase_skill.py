@@ -1,5 +1,8 @@
 import importlib.util
+import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 
@@ -48,6 +51,63 @@ def test_writes_codebase_skill_sandbox_with_project_paths(tmp_path: Path) -> Non
     assert '"temperature": 0' in config
     assert "load delphi-codebase-navigator first" in config
     assert '"read": false' in config
+    parsed_config = json.loads(config)
+    provider_options = parsed_config["provider"]["vllm"]["options"]
+    assert provider_options["baseURL"] == module.DEFAULT_BASE_URL
+    assert provider_options["apiKey"] == module.DEFAULT_API_KEY
+
+
+def test_written_sandbox_mega_unit_has_documented_line_count(tmp_path: Path) -> None:
+    module = load_module()
+
+    module.write_codebase_skill_sandbox(
+        root=ROOT,
+        sandbox=tmp_path,
+        python_executable=venv_python(tmp_path),
+    )
+
+    source = (tmp_path / "src" / "Mega100kUnit.pas").read_text(encoding="utf-8")
+    assert len(source.splitlines()) == 117_511
+
+
+def test_script_help_runs_outside_checkout_without_pythonpath(tmp_path: Path) -> None:
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--help"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "--base-url" in result.stdout
+    script = SCRIPT.read_text(encoding="utf-8")
+    root_bootstrap = "sys.path.insert(0, str(ROOT))"
+    agent_import = "from delphi_lsp.agent_templates import install_opencode_support"
+    assert root_bootstrap in script
+    assert script.index(root_bootstrap) < script.index(agent_import)
+
+
+def test_writes_requested_vllm_provider_config(tmp_path: Path) -> None:
+    module = load_module()
+    python_exe = venv_python(tmp_path)
+
+    module.write_codebase_skill_sandbox(
+        root=ROOT,
+        sandbox=tmp_path,
+        python_executable=python_exe,
+        base_url="http://127.0.0.1:9000/v1/",
+        api_key="custom-vllm-key",
+    )
+
+    config = json.loads((tmp_path / "opencode.json").read_text(encoding="utf-8"))
+    provider_options = config["provider"]["vllm"]["options"]
+    assert provider_options["baseURL"] == "http://127.0.0.1:9000/v1"
+    assert provider_options["apiKey"] == "custom-vllm-key"
 
 
 def test_probe_command_requires_delphi_codebase_tool_and_forbids_raw_tools(tmp_path: Path) -> None:
@@ -59,10 +119,12 @@ def test_probe_command_requires_delphi_codebase_tool_and_forbids_raw_tools(tmp_p
     assert "vllm/ornith-lspctx" in command
     assert "vllm-delphi-codebase" in command
     assert "skill:delphi-codebase-navigator" in command
+    assert "delphi_codebase.open:Main.dpr" in command
     assert "delphi_codebase.find:MegaProc02500" in command
     assert "delphi_codebase.focus:target_id" in command
     assert "delphi_codebase.inspect:Value := Value + 40" in command
     assert "load the delphi-codebase-navigator skill" in command[-1]
+    assert "action open" in command[-1]
     assert "action find" in command[-1]
     assert "action focus" in command[-1]
     assert "action inspect" in command[-1]

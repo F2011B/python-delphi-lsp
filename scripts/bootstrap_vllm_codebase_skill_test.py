@@ -5,17 +5,19 @@ import argparse
 import json
 import os
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 
-from delphi_lsp.agent_templates import install_opencode_support
-
 SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT = SCRIPT_DIR.parent
 
-import sys
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from delphi_lsp.agent_templates import install_opencode_support  # noqa: E402
 
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
@@ -43,7 +45,14 @@ def write_text(path: Path, text: str) -> None:
     path.write_text(text.strip() + "\n", encoding="utf-8")
 
 
-def write_codebase_skill_sandbox(*, root: Path, sandbox: Path, python_executable: Path) -> None:
+def write_codebase_skill_sandbox(
+    *,
+    root: Path,
+    sandbox: Path,
+    python_executable: Path,
+    base_url: str = DEFAULT_BASE_URL,
+    api_key: str = DEFAULT_API_KEY,
+) -> None:
     sandbox.mkdir(parents=True, exist_ok=True)
     write_text(
         sandbox / "Main.dpr",
@@ -78,6 +87,9 @@ end.
     write_text(sandbox / "src" / "Mega100kUnit.pas", source)
 
     config = json.loads((root / "opencode.json").read_text(encoding="utf-8"))
+    provider_options = config.setdefault("provider", {}).setdefault("vllm", {}).setdefault("options", {})
+    provider_options["baseURL"] = base_url.rstrip("/")
+    provider_options["apiKey"] = api_key
     config.setdefault("lsp", {}).setdefault("delphi", {})
     config["lsp"]["delphi"]["command"] = [str(python_executable), "-m", "delphi_lsp.lsp_server"]
     config["lsp"]["delphi"]["env"] = {"PYTHONPATH": str(root)}
@@ -115,6 +127,8 @@ def build_probe_command(
         DEFAULT_MODEL,
         "--agent",
         DEFAULT_AGENT,
+        "--require-tool",
+        "delphi_codebase.open:Main.dpr",
         "--require-tool",
         f"delphi_codebase.find:{DEFAULT_SYMBOL}",
         "--require-tool",
@@ -188,7 +202,13 @@ def main() -> int:
 
     python_executable = ensure_venv(ROOT, install=not args.skip_install)
     sandbox = args.sandbox.resolve()
-    write_codebase_skill_sandbox(root=ROOT, sandbox=sandbox, python_executable=python_executable)
+    write_codebase_skill_sandbox(
+        root=ROOT,
+        sandbox=sandbox,
+        python_executable=python_executable,
+        base_url=args.base_url,
+        api_key=args.api_key,
+    )
     print(f"Wrote {sandbox}")
     require_opencode()
 

@@ -1,55 +1,21 @@
 # Python Delphi LSP
 
-Python Delphi LSP is a standalone Python package for Delphi/Object Pascal
-parsing, semantic indexing, diagnostics, and Language Server Protocol support.
+`python-delphi-lsp` parses Delphi/Object Pascal, builds semantic and project
+indexes, serves LSP, and provides bounded codebase navigation for agents.
+Version 2.0.0 is authored by Dark Light and supports Windows, macOS, and Linux.
 
-The distributable package is named `python-delphi-lsp`. The import package keeps
-the established `delphi_lsp` name. The language-server executable is
-`delphi-lsp`, and the agent-facing codebase navigator executable is
-`delphi-lsp-agent`.
+## Install and quick start
 
-## What It Provides
-
-- Parser support for `.pas`, `.dpr`, `.dpk`, and `.inc` files
-- Delphi preprocessor handling for include files, conditionals, and compiler
-  directives
-- Semantic symbols for units, types, methods, fields, properties, variables,
-  constants, and references
-- Workspace indexing across Delphi projects
-- LSP support for document symbols, workspace symbols, hover, definition,
-  references, rename, completion, and diagnostics
-- Automatic project path discovery from `.dpr`, `.dpk`, `.dproj`, `.cfg`, and
-  `.dof` files
-- opencode integration through the experimental LSP tool and an installable
-  `.agents` skill with a dedicated codebase-inspection tool
-
-## Installation
-
-Install the package from a built distribution or from PyPI once published:
+Install into the Python environment that will run the command:
 
 ```bash
 python -m pip install python-delphi-lsp
 ```
 
-For development from a checkout:
-
-```bash
-python -m venv .venv
-. .venv/bin/activate
-python -m pip install -e ".[dev]"
-python -m pytest -q
-```
-
-On Windows PowerShell:
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -e ".[dev]"
-python -m pytest -q
-```
-
-## Python API Example
+On Windows, use `py -m pip install python-delphi-lsp` if that is your system
+convention. On macOS and Linux, use `python3 -m pip install python-delphi-lsp`
+when `python` is unavailable. Normal installed use needs neither a checkout
+nor `PYTHONPATH`.
 
 ```python
 from delphi_lsp import parse
@@ -58,338 +24,250 @@ result = parse("unit Unit1; interface implementation end.", "Unit1.pas")
 print(result.root)
 ```
 
-Enable semantic analysis when you need symbols or diagnostics:
+For semantic work across units, `build_workspace_semantics` returns per-file
+models and a shared symbol index. `ProjectIndexer` follows a project entry
+with explicit search paths, include paths, and defines.
 
 ```python
-from delphi_lsp import parse
+from delphi_lsp import ProjectIndexer, build_workspace_semantics
 
-source = """
-unit Unit1;
+workspace = build_workspace_semantics({
+    "Unit1.pas": "unit Unit1; interface uses Unit2; implementation end.",
+    "Unit2.pas": "unit Unit2; interface implementation end.",
+})
+print(workspace.index.lookup("Unit2"))
 
-interface
-
-type
-  TGreeter = class
-  public
-    procedure SayHello;
-  end;
-
-implementation
-
-procedure TGreeter.SayHello;
-begin
-end;
-
-end.
-"""
-
-result = parse(source, "Unit1.pas", build_semantic=True)
-for symbol in result.semantic.symbols:
-    print(symbol.name, symbol.kind)
+project = ProjectIndexer(
+    search_paths=["src"], include_paths=["include"], defines=["DEBUG"]
+).index("Main.dpr")
+print(project.parsed_units)
 ```
 
-## Language Server Usage
-
-Start the LSP server over stdio:
-
-```bash
-delphi-lsp
-```
-
-From a checkout, the equivalent command is:
+Run the stdio language server with `delphi-lsp`, or equivalently:
 
 ```bash
 python -m delphi_lsp.lsp_server
 ```
 
-The server expects normal LSP JSON-RPC over stdio. Editors and tools should set
-the workspace root to the Delphi project directory.
+## OpenCode LSP configuration
 
-Auto-discovery reads `.dpr`, `.dpk`, `.dproj`, `.cfg`, and `.dof` files to
-collect unit search paths, include paths, defines, direct `Unit in 'path.pas'`
-references, and workspace source directories. Manual initialization options are
-still accepted as overrides, but a normal project should not require users to
-set include or source paths by hand.
+The root `opencode.json` starts the installed package portably:
 
 ```json
 {
-  "$schema": "https://opencode.ai/config.json",
   "lsp": {
     "delphi": {
-      "command": ["python", "-m", "delphi_lsp.lsp_server"],
+      "command": ["delphi-lsp"],
       "extensions": [".pas", ".dpr", ".dpk", ".inc"],
-      "initialization": {
-        "autoDiscoverPaths": true
-      }
+      "initialization": {"autoDiscoverPaths": true}
     }
   }
 }
 ```
 
-## Agent Codebase Navigator
+`autoDiscoverPaths` is the default. It discovers compiler context without an
+environment section; LSP remains available for normal editor and OpenCode use,
+including large sources.
 
-Install the opencode skill and custom tool in a Delphi checkout:
+### Automatic discovery
+
+Auto-discovery reads `.dpr`, `.dpk`, `.dproj`, `.cfg`, and `.dof` files.
+Its resolution order is:
+
+1. An explicit project selection takes precedence.
+2. Otherwise, `.dpr` and `.dpk` candidates are considered.
+3. `MainSource` in a `.dproj` contributes its entry project.
+4. A selected entry associates same-stem `.dproj`, `.cfg`, and `.dof`.
+5. Unit search paths, include paths, and defines are accumulated from explicit
+   settings, project metadata, and the associated settings files.
+6. Direct `Unit in 'path/Unit.pas'` references contribute their parent
+   directory to unit search paths.
+
+A single discovered project is selected automatically. With no project entry,
+the server uses a synthetic workspace of supported sources. Scans skip build
+and cache directories such as `build`, `dist`, environments, VCS folders,
+`node_modules`, and tool caches. Missing paths and invalid metadata become
+problems; paths are not guessed.
+
+## Agent CLI and Interface/Protocol v2
+
+`delphi-lsp-agent` has these subcommands and options:
+
+```text
+delphi-lsp-agent view --root PATH [--project-file FILE] --layer LAYER
+                      [--query TEXT] [--format markdown|json] [--deep-projects]
+delphi-lsp-agent index --root PATH [--project-file FILE] [--out FILE]
+delphi-lsp-agent skill install [--target PATH] [--force]
+delphi-lsp-agent opencode install [--target PATH] [--python PYTHON]
+                                  [--force] [--write-config]
+delphi-lsp-agent worker --root PATH [--project-file FILE]
+```
+
+`view --layer` accepts `overview`, `projects`, `units`, `unit`,
+`symbols`, `symbol`, `implementation`, `references`, and `problems`.
+`index` materializes overview, projects, and problems JSON. `skill install`
+writes the skill; `opencode install` writes both integration files, while
+`--write-config` additionally writes the restricted agent configuration.
+`worker` serves NDJSON over standard input/output.
+
+Protocol v2 actions are `open`, `find`, `inspect`, `trace`, `focus`,
+and `problems`. Detail values are `summary`, `declaration`, `members`,
+`context`, `body`, and `implementations`. Relations are `references`,
+`callers`, `callees`, `uses`, `used_by`, `inherits`, and
+`implements`.
+
+A request requires `action` and can include `query`, `target_id`,
+`project_id`, `detail`, `relation`, `cursor`, `max_items`, and
+`max_chars`. Defaults are empty text fields, `detail: "summary"`, no
+relation, `max_items: 12`, and `max_chars: 12000`. Ranges are 1–50 items
+and 256–40000 characters. A successful envelope has `schema: 2`,
+`workspace_revision`, `focus` (project, unit, and target IDs), `result`,
+`page`, and `context`; errors have `schema: 2` and a code/message.
+
+Focus preserves the selected project, unit, or target. Cursors bind a workspace
+revision and request fingerprint, so source changes and cross-target or
+cross-detail reuse invalidate them. `max_items` and `max_chars` bound each
+response. A `sound_partial` relation is sound but incomplete: unresolved and
+ambiguous relations are never fabricated.
+
+For every source size the navigator builds an outline first, loads source detail
+lazily for a selected target, and returns only selected fragments. Typed source
+chunks are at most 6000 characters and also respect the response budget. This
+optimization does not remove LSP functionality.
+
+## OpenCode semantic navigator
+
+Install the generated integration in a worktree:
 
 ```bash
 delphi-lsp-agent opencode install --target . --write-config
 ```
 
-This writes:
+It writes:
 
-- `.agents/skills/delphi-codebase-navigator/SKILL.md`
-- `.opencode/tools/delphi_codebase.ts`
-- an optional `vllm-delphi-codebase` agent entry in `opencode.json`
-
-The skill tells agents to inspect Delphi code through layered semantic views
-instead of loading full source files. The custom opencode tool calls
-`python -m delphi_lsp.agent_cli` directly, so the agent does not need shell text
-search or raw file-reading tools to understand the codebase.
-
-Useful direct commands:
-
-```bash
-delphi-lsp-agent view --root . --layer overview
-delphi-lsp-agent view --root . --layer projects
-delphi-lsp-agent view --root . --layer unit --query Mega100kUnit
-delphi-lsp-agent view --root . --layer symbols --query TWorker --format json
-delphi-lsp-agent view --root . --layer implementation --query TWorker.Run
-delphi-lsp-agent view --root . --layer implementation --query TWorker --format json
-delphi-lsp-agent view --root . --layer problems
+```text
+.agents/skills/delphi-codebase-navigator/SKILL.md
+.opencode/plugins/delphi_codebase.ts
 ```
 
-Available layers are `overview`, `projects`, `units`, `unit`, `symbols`,
-`symbol`, `implementation`, `references`, and `problems`. The output includes
-file and line citations, declarations, ownership, visibility, type information,
-and dependency/problem summaries. Outline layers keep routine bodies out of the
-agent context. Use `implementation` with a concrete class, routine, or member
-query to read only that complete source fragment from the original file. For a
-class query, the layer returns the class declaration plus matching method
-implementations; for a routine query, it returns the full routine body.
+The generated configuration enables only the named
+`delphi-codebase-navigator` skill and `delphi_codebase`. It denies
+`bash`, `read`, `glob`, `grep`, and `lsp`, along with edit/write and
+other raw source tools. The skill is enabled. The installer does not use the
+retired `.opencode/tools` path.
 
-## opencode Usage
+The plugin maintains one worker per session/root, reusing focus and indexes.
+During compaction it restores the focus and summary into the new context.
+Transport failure, session deletion, and plugin disposal clean up the worker.
 
-This repository includes an `opencode.json` that registers the Delphi LSP tool
-and model aliases for local Ollama and vLLM endpoints.
-
-To add the Delphi language server to another opencode project without the
-agent tool, install the package in the Python environment used by opencode and
-add an `lsp.delphi` entry to that project's `opencode.json`:
+A generated OpenCode agent looks like this; providers and unrelated agents stay
+unchanged:
 
 ```json
 {
-  "$schema": "https://opencode.ai/config.json",
-  "lsp": {
-    "delphi": {
-      "command": ["python", "-m", "delphi_lsp.lsp_server"],
-      "extensions": [".pas", ".dpr", ".dpk", ".inc"],
-      "initialization": {
-        "autoDiscoverPaths": true
-      }
-    }
-  }
-}
-```
-
-For checkout development, this repository's own `opencode.json` uses the local
-virtual environment and sets `PYTHONPATH` so opencode loads the source tree
-directly:
-
-```json
-{
-  "lsp": {
-    "delphi": {
-      "command": [".venv/bin/python", "-m", "delphi_lsp.lsp_server"],
-      "extensions": [".pas", ".dpr", ".dpk", ".inc"],
-      "env": {
-        "PYTHONPATH": "."
+  "agent": {
+    "vllm-delphi-codebase": {
+      "tools": {
+        "delphi_codebase": true, "skill": true, "lsp": false,
+        "bash": false, "read": false, "glob": false, "grep": false
       },
-      "initialization": {
-        "autoDiscoverPaths": true
+      "permission": {
+        "delphi_codebase": "allow",
+        "skill": {"*": "deny", "delphi-codebase-navigator": "allow"},
+        "lsp": "deny"
       }
     }
   }
 }
 ```
 
-On Windows checkout development, replace `.venv/bin/python` with
-`.venv\\Scripts\\python.exe`. If `python-delphi-lsp` is installed normally, the
-portable `["python", "-m", "delphi_lsp.lsp_server"]` command above works without
-`PYTHONPATH`.
+Select `vllm-delphi-codebase`, ask it to load
+`delphi-codebase-navigator`, then use `delphi_codebase` actions such as
+`open`, `find`, `focus`, and `inspect`. Use semantic tool calls, not raw
+source tools.
 
-For normal local opencode work, use the Ollama alias with a larger context and
-enable opencode's experimental LSP tool when starting opencode:
-
-```bash
-OPENCODE_EXPERIMENTAL_LSP_TOOL=true opencode run --dir . --model ollama/ornith-lspctx
-```
-
-On Windows PowerShell:
-
-```powershell
-$env:OPENCODE_EXPERIMENTAL_LSP_TOOL = "true"
-opencode run --dir . --model ollama/ornith-lspctx
-```
-
-For large Delphi files, prefer LSP operations over reading the file into the
-model prompt. The reduced `vllm-lsp` agent disables filesystem and shell tools
-and leaves only the LSP tool enabled:
+For the root LSP configuration, a local model can be used as follows:
 
 ```bash
-OPENCODE_EXPERIMENTAL_LSP_TOOL=true \
-python scripts/run_opencode_lsp_probe.py \
-  --cwd output/mega_lsp_chain_project \
-  --model vllm/ornith-lspctx \
-  --agent vllm-lsp \
-  --require-tool lsp.workspaceSymbol:MegaProc02500 \
-  --forbid-tool bash --forbid-tool read --forbid-tool glob --forbid-tool grep \
-  --forbid-tool edit --forbid-tool write --forbid-tool task \
-  --forbid-tool webfetch --forbid-tool todowrite --forbid-tool skill \
-  'Use only the Delphi LSP tool. In file Mega100kUnit.pas, run workspaceSymbol with filePath "Mega100kUnit.pas", line 1, character 1, and query "MegaProc02500".'
+opencode run --dir . --model ollama/ornith-lspctx --agent vllm-lsp \
+  "Find the declaration of a Delphi symbol through LSP."
 ```
 
-For an LSP-first edit proof, use `vllm-lsp-edit`. It permits the opencode edit
-tool after LSP lookup while still forbidding shell and direct file-reading tools:
+Use `--agent vllm-lsp-edit` only for the separate, focused LSP/edit
+verification workflow; the semantic navigator agent above remains restricted
+to its named skill and tool.
+
+That separate verification uses `vllm/ornith-lspctx` and accepts the focused
+LSP result `edit:Edit applied successfully`; it is not the semantic navigator
+workflow and does not grant the navigator any raw source tools.
+
+## Reproducible large-project vLLM proof
+
+The proof generates a 117,511-line project. The verifier requires `skill`, `open` (`Main.dpr` evidence), `find`, `focus`, and `inspect`, checks `MegaProc02500` and
+`Value := Value + 40`, and forbids raw `bash`, `read`, `glob`, and `grep`.
+The proof uses the local Ornith vLLM OpenAI-compatible
+endpoint at `http://127.0.0.1:8001/v1`.
+
+Default scripts are offline and must not redownload the model. First check the
+cache:
 
 ```bash
-OPENCODE_EXPERIMENTAL_LSP_TOOL=true \
-python scripts/run_opencode_lsp_probe.py \
-  --cwd output/mega_lsp_chain_project \
-  --model vllm/ornith-lspctx \
-  --agent vllm-lsp-edit \
-  --require-tool lsp.workspaceSymbol:MegaProc02500 \
-  --require-tool 'edit:Edit applied successfully' \
-  --forbid-tool bash --forbid-tool read --forbid-tool glob --forbid-tool grep \
-  --forbid-tool write --forbid-tool task --forbid-tool webfetch \
-  --forbid-tool todowrite --forbid-tool skill \
-  'Use LSP first, then edit the exact MegaProc02500 block.'
+python scripts/check_ornith_cache.py --require-complete
 ```
 
-## Reproducing the vLLM opencode Test
-
-The vLLM test is designed to prove that opencode can work on Delphi files larger
-than the model context by calling LSP instead of loading the source file into the
-prompt.
-
-The test does the following:
-
-1. Creates `output/mega_lsp_chain_project/Mega100kUnit.pas`, a generated Delphi
-   unit with more than 100,000 lines and the symbol `MegaProc02500`.
-2. Writes an opencode sandbox config with an absolute `delphi-lsp` command and
-   `PYTHONPATH` pointing at the checkout.
-3. Uses `vllm/ornith-lspctx` with the reduced `vllm-lsp` agent.
-4. Requires a completed `lsp.workspaceSymbol` tool call that returns
-   `MegaProc02500`.
-5. Fails immediately if opencode calls `read`, `bash`, `glob`, `grep`, `edit`,
-   `write`, `task`, `webfetch`, `todowrite`, or `skill`.
-
-On macOS, start the local vLLM helper and run the proof:
-
-```bash
-scripts/bootstrap_vllm_opencode_test.sh --start-vllm
-```
-
-By default the vLLM helper is offline-only. It checks the Hugging Face cache and
-does not download model shards. Pass `--allow-download` only when you explicitly
-want the helper to fill missing cache files.
-
-On Windows PowerShell, use an already running vLLM-compatible endpoint:
-
-```powershell
-.\scripts\bootstrap_vllm_opencode_test.ps1 -UseRunningServer
-```
-
-Use a custom endpoint when vLLM runs in WSL, Docker, or on another machine:
-
-```powershell
-.\scripts\bootstrap_vllm_opencode_test.ps1 -UseRunningServer -BaseUrl "http://127.0.0.1:8001/v1"
-```
-
-The macOS helper uses these defaults:
-
-- `MODEL_ID=deepreinforce-ai/Ornith-1.0-9B`
-- `SERVED_MODEL_NAME=ornith-vllm-metal`
-- `MAX_MODEL_LEN=44352`
-- `MAX_NUM_SEQS=1`
-- `VLLM_METAL_MEMORY_FRACTION=0.97`
-- `TOOL_CALL_PARSER=qwen3_xml`
-
-The release evidence from the local proof recorded:
-
-- default opencode request: 29,318 system-prompt characters and 10 tool schemas
-- reduced LSP-only request: 8,978 system-prompt characters and 1 tool schema
-- generated test unit: 117k lines
-- GitHub corpus file: 14,309 lines
-- `context_budget.status = "pass"`
-- `goal_audit.status = "pass"`
-
-## Reproducing the vLLM opencode Skill Test
-
-The codebase skill proof validates the `.agents` skill and opencode custom tool
-instead of only the raw LSP tool. It creates a sandbox Delphi project with:
-
-- `Main.dpr`
-- `Main.dproj`
-- `src/Mega100kUnit.pas` with more than 100,000 lines
-- `include/build.inc`
-- `.agents/skills/delphi-codebase-navigator/SKILL.md`
-- `.opencode/tools/delphi_codebase.ts`
-
-Run it against the local Ornith vLLM endpoint:
+With an already-running endpoint on any supported platform, run:
 
 ```bash
 python scripts/bootstrap_vllm_codebase_skill_test.py --use-running-server
 ```
 
-Or let the macOS helper start vLLM without downloading model shards:
+On macOS, the offline cached auto-start path is:
 
 ```bash
 python scripts/bootstrap_vllm_codebase_skill_test.py --start-vllm
 ```
 
-This skill probe defaults the vLLM helper to `MAX_MODEL_LEN=32768`, which was
-the stable local Metal setting for the reduced codebase-agent prompt plus the
-`delphi_codebase` tool call. Override with `--max-model-len` when your machine
-has enough headroom.
+Automatic local vLLM startup is macOS-only. The package and OpenCode plugin are
+supported on Windows. On Windows, start an OpenAI-compatible vLLM endpoint, then
+run the Python bootstrap from PowerShell:
 
-The probe verifies that the `delphi-codebase-navigator` skill is installed, then
-requires opencode to call `delphi_codebase`, find `MegaProc02500`, and read the
-method body through the `implementation` layer. The vLLM test agent keeps
-opencode's generic `skill` tool disabled so the model context stays focused on
-the Delphi navigation tool. The probe fails if opencode uses `bash`, `read`,
-`glob`, `grep`, `edit`, `write`, `task`, `webfetch`, or `todowrite` before the
-required evidence is complete.
-
-## Verification
-
-Run the local test suite:
-
-```bash
-python -m pytest -q
+```powershell
+python .\scripts\bootstrap_vllm_codebase_skill_test.py --use-running-server
 ```
 
-Generate the Delphi language-feature matrix:
+For an endpoint at another URL, add `--base-url`:
 
-```bash
-python scripts/audit_delphi_language_features.py
+```powershell
+python .\scripts\bootstrap_vllm_codebase_skill_test.py --use-running-server --base-url http://127.0.0.1:9000/v1
 ```
 
-Build and check distributable artifacts:
+`--skip-install` is an optional acceleration for an already prepared `.venv`;
+omit it on a clean checkout so the bootstrap installs `.[dev]`.
+
+The bundled automatic helper is not a cross-platform startup mechanism.
+
+## Migration to 2.0
+
+`delphi_lsp` is the only supported import namespace. Update imports directly;
+there is no compatibility import alias.
+
+## Verification and limitations
+
+For a checkout:
 
 ```bash
+python -m pip install -e ".[dev]"
+python -m pytest
 python -m build
 python -m twine check dist/*
 ```
 
-## Repository Layout
-
-- `delphi_lsp/` - parser, preprocessor, project discovery, semantic model,
-  workspace indexer, agent layers, and LSP server
-- `scripts/` - release evidence, cache checks, opencode probes, and bootstrap
-  helpers
-- `tests/` - parser, semantic, workspace, diagnostics, packaging, and LSP tests
-- `tests/fixtures/` - Delphi/Object Pascal fixtures and legacy DelphiLSP snippets
+CI tests Ubuntu, macOS, and Windows on Python 3.10 and 3.14, then builds and
+smoke-installs the wheel on Ubuntu/Python 3.14. Results depend on available
+project files, defines, includes, and paths; unsupported compiler behavior and
+unresolvable references are reported as problems. The vLLM proof additionally
+requires OpenCode, a local endpoint, and a complete local cache.
 
 ## License
 
-This project is licensed under the Mozilla Public License 2.0. See
-[`LICENSE`](LICENSE).
+Mozilla Public License 2.0. See [LICENSE](LICENSE).

@@ -220,9 +220,7 @@
   "lsp": {
     "delphi": {
       "command": [
-        ".venv/bin/python",
-        "-m",
-        "delphi_lsp.lsp_server"
+        "delphi-lsp"
       ],
       "extensions": [
         ".pas",
@@ -230,9 +228,6 @@
         ".dpk",
         ".inc"
       ],
-      "env": {
-        "PYTHONPATH": "."
-      },
       "initialization": {
         "autoDiscoverPaths": true
       }
