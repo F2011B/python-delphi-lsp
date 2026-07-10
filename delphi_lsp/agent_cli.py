@@ -89,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.flush()
     except BrokenPipeError:
         _discard_broken_stdout()
-        return 1
+        os._exit(1)
     return 0
 
 

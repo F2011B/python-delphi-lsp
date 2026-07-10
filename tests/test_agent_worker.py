@@ -300,7 +300,7 @@ def test_worker_broken_stdout_exits_one_without_shutdown_warning(tmp_path: Path)
                 process.wait(timeout=5)
 
 
-def test_main_flushes_stdout_and_handles_a_deferred_broken_pipe(monkeypatch) -> None:
+def test_main_flushes_stdout_and_hard_exits_after_a_deferred_broken_pipe(monkeypatch) -> None:
     class Parser:
         def parse_args(self, argv):
             return SimpleNamespace(func=lambda args: None)
@@ -318,8 +318,19 @@ def test_main_flushes_stdout_and_handles_a_deferred_broken_pipe(monkeypatch) -> 
     broken_stdout = BrokenStdout()
     monkeypatch.setattr(agent_cli.sys, "stdout", broken_stdout)
     monkeypatch.setattr(agent_cli.sys, "__stdout__", broken_stdout)
+    exit_codes: list[int] = []
 
-    assert agent_cli.main([]) == 1
+    def exit_process(code: int) -> None:
+        exit_codes.append(code)
+        raise SystemExit(code)
+
+    monkeypatch.setattr(agent_cli.os, "_exit", exit_process)
+
+    with pytest.raises(SystemExit) as exit_info:
+        agent_cli.main([])
+
+    assert exit_info.value.code == 1
+    assert exit_codes == [1]
     assert agent_cli.sys.stdout is agent_cli.sys.__stdout__
 
 
