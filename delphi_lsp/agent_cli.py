@@ -86,7 +86,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         args.func(args)
-        sys.stdout.flush()
+        if not getattr(sys.stdout, "closed", False):
+            sys.stdout.flush()
     except BrokenPipeError:
         _discard_broken_stdout()
         os._exit(1)
@@ -151,7 +152,13 @@ def _opencode_install(args: argparse.Namespace) -> None:
 
 def _worker(args: argparse.Namespace) -> None:
     context = AgentContext.open(args.root, args.project_file)
-    _serve_worker(context, sys.stdin.buffer, sys.stdout.buffer, sys.stderr)
+    try:
+        _serve_worker(context, sys.stdin.buffer, sys.stdout.buffer, sys.stderr)
+    finally:
+        try:
+            sys.stdout.close()
+        except (BrokenPipeError, OSError) as error:
+            raise BrokenPipeError from error
 
 
 def _serve_worker(context: AgentContext, input_stream: BinaryIO, output_stream: BinaryIO, error_stream: TextIO) -> None:
