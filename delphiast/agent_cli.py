@@ -2,11 +2,23 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
+from typing import BinaryIO, TextIO
 
+from .agent_context import AgentContext
 from .agent_layers import build_codebase_index, layer_payload, render_layer
+from .agent_protocol import AgentProtocolError
 from .agent_templates import install_opencode_support, install_skill
+
+
+_MAX_WORKER_RECORD_BYTES = 1024 * 1024
+_INVALID_JSON_MESSAGE = "Invalid JSON request."
+_INVALID_ENCODING_MESSAGE = "Invalid UTF-8 request."
+_REQUEST_TOO_LARGE_MESSAGE = "Request exceeds the 1 MiB limit."
+_INTERNAL_ERROR_MESSAGE = "Internal request error."
+_SOURCE_UNAVAILABLE_MESSAGE = "Selected source is unavailable."
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -61,6 +73,11 @@ def build_parser() -> argparse.ArgumentParser:
     opencode_install.add_argument("--write-config", action="store_true")
     opencode_install.set_defaults(func=_opencode_install)
 
+    worker = subcommands.add_parser("worker", help="Serve Protocol v2 NDJSON requests.")
+    worker.add_argument("--root", type=Path, required=True)
+    worker.add_argument("--project-file", type=Path)
+    worker.set_defaults(func=_worker)
+
     return parser
 
 
@@ -70,6 +87,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         args.func(args)
     except BrokenPipeError:
+        devnull_fd = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(devnull_fd, sys.stdout.fileno())
+        finally:
+            os.close(devnull_fd)
         return 1
     return 0
 
@@ -107,6 +129,82 @@ def _opencode_install(args: argparse.Namespace) -> None:
     print(tool_path)
     if config_path is not None:
         print(config_path)
+
+
+def _worker(args: argparse.Namespace) -> None:
+    context = AgentContext.open(args.root, args.project_file)
+    _serve_worker(context, sys.stdin.buffer, sys.stdout.buffer, sys.stderr)
+
+
+def _serve_worker(context: AgentContext, input_stream: BinaryIO, output_stream: BinaryIO, error_stream: TextIO) -> None:
+    discarding_oversize_record = False
+    while True:
+        record = input_stream.readline(_MAX_WORKER_RECORD_BYTES + 1)
+        if not record:
+            return
+        if discarding_oversize_record:
+            if record.endswith(b"\n"):
+                discarding_oversize_record = False
+            continue
+        if not record.endswith(b"\n") and len(record) > _MAX_WORKER_RECORD_BYTES:
+            if record.endswith(b"\r") and input_stream.read(1) == b"\n":
+                record = record[:-1]
+            else:
+                discarding_oversize_record = True
+                _write_worker_message(
+                    output_stream,
+                    _worker_error("request_too_large", _REQUEST_TOO_LARGE_MESSAGE),
+                )
+                continue
+
+        record = record.rstrip(b"\r\n")
+        if len(record) > _MAX_WORKER_RECORD_BYTES:
+            _write_worker_message(
+                output_stream,
+                _worker_error("request_too_large", _REQUEST_TOO_LARGE_MESSAGE),
+            )
+            continue
+        try:
+            text = record.decode("utf-8")
+        except UnicodeDecodeError:
+            _write_worker_message(
+                output_stream,
+                _worker_error("invalid_encoding", _INVALID_ENCODING_MESSAGE),
+            )
+            continue
+        if not text.strip():
+            continue
+        try:
+            request = json.loads(text)
+        except json.JSONDecodeError:
+            _write_worker_message(output_stream, _worker_error("invalid_json", _INVALID_JSON_MESSAGE))
+            continue
+        try:
+            response = context.handle(request)
+            _write_worker_message(output_stream, response.to_mapping())
+        except BrokenPipeError:
+            raise
+        except AgentProtocolError as error:
+            message = _SOURCE_UNAVAILABLE_MESSAGE if error.code == "source_unavailable" else error.message
+            _write_worker_message(output_stream, _worker_error(error.code, message))
+        except Exception as error:
+            error_stream.write(f"{type(error).__name__}\n")
+            error_stream.flush()
+            _write_worker_message(output_stream, _worker_error("internal_error", _INTERNAL_ERROR_MESSAGE))
+def _worker_error(code: str, message: str) -> dict[str, object]:
+    return {"schema": 2, "error": {"code": code, "message": message}}
+
+
+def _write_worker_message(output_stream: BinaryIO, message: object) -> None:
+    serialized = json.dumps(
+        message,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    output_stream.write(serialized + b"\n")
+    output_stream.flush()
 
 
 if __name__ == "__main__":
