@@ -196,12 +196,28 @@ def _opencode_completed_tool_events(jsonl_path: Path) -> list[dict[str, Any]]:
     return events
 
 
-def _dist_artifact(path: Path) -> dict[str, Any]:
+def _dist_artifact(path: Path, *, root: Path) -> dict[str, Any]:
     return {
-        'path': str(path),
+        'path': _portable_evidence_path(path, root=root),
         'exists': path.exists(),
         'bytes': path.stat().st_size if path.exists() else 0,
     }
+
+
+def _portable_evidence_path(
+    path: Path,
+    *,
+    root: Path | None = None,
+    external_alias: str | None = None,
+) -> str:
+    if external_alias is not None:
+        return f'@external/{external_alias.strip("/")}'
+    if root is not None:
+        try:
+            return Path(path).resolve().relative_to(root.resolve()).as_posix()
+        except ValueError:
+            return f'@external/{Path(path).name}'
+    return path.as_posix()
 
 
 def _opencode_model_config(root: Path, model_ref: str = DEFAULT_OPENCODE_MODEL) -> dict[str, Any]:
@@ -338,7 +354,7 @@ def _vllm_preflight(root: Path, hf_home: Path, repo_id: str = VLLM_MODEL_ID) -> 
         'opencode_lsp_model': opencode_config['opencode_lsp_model'],
         'opencode_lsp_context': opencode_config['opencode_lsp_context'],
         'opencode_lsp_tool_call': opencode_config['opencode_lsp_tool_call'],
-        'opencode_lsp_jsonl': str(OPENCODE_VLLM_LSP_JSONL),
+        'opencode_lsp_jsonl': _portable_evidence_path(OPENCODE_VLLM_LSP_JSONL),
         'opencode_lsp_forbidden_tools_seen': vllm_lsp_forbidden_tools_seen,
         'opencode_lsp_only': bool(vllm_lsp_tools_seen)
         and all(tool == 'lsp' for tool in vllm_lsp_tools_seen)
@@ -349,7 +365,7 @@ def _vllm_preflight(root: Path, hf_home: Path, repo_id: str = VLLM_MODEL_ID) -> 
         'opencode_lsp_edit_model': opencode_config['opencode_lsp_edit_model'],
         'opencode_lsp_edit_context': opencode_config.get('opencode_lsp_edit_context'),
         'opencode_lsp_edit_tool_call': opencode_config.get('opencode_lsp_edit_tool_call'),
-        'opencode_lsp_edit_jsonl': str(OPENCODE_VLLM_LSP_EDIT_JSONL),
+        'opencode_lsp_edit_jsonl': _portable_evidence_path(OPENCODE_VLLM_LSP_EDIT_JSONL),
         'opencode_lsp_edit_forbidden_tools': FORBIDDEN_OPENCODE_LSP_EDIT_TOOLS,
         'opencode_lsp_edit_forbidden_tools_seen': vllm_lsp_edit_forbidden_tools_seen,
         'opencode_lsp_edit_only': bool(vllm_lsp_edit_tools_seen)
@@ -362,7 +378,7 @@ def _vllm_preflight(root: Path, hf_home: Path, repo_id: str = VLLM_MODEL_ID) -> 
         'opencode_lsp_edit_marker': VLLM_EDIT_MARKER,
         'opencode_lsp_edit_marker_count': mega_text.count(VLLM_EDIT_MARKER),
         'start_defaults': _vllm_start_defaults(root),
-        'hf_home': str(hf_home),
+        'hf_home': _portable_evidence_path(hf_home, external_alias='huggingface-cache'),
         'offline_only': True,
         'cache_complete': complete,
         'start_permitted': complete,
@@ -370,13 +386,45 @@ def _vllm_preflight(root: Path, hf_home: Path, repo_id: str = VLLM_MODEL_ID) -> 
         'required_shards': cache.get('required_shards') or [],
         'present_shards': present,
         'missing_shards': missing,
-        'incomplete_files': cache.get('incomplete_files') or [],
-        'cache_prepare': preparer.prepare_cache(
+        'incomplete_files': _portable_incomplete_cache_files(
+            cache.get('incomplete_files') or [],
             hf_home=hf_home,
-            repo_id=repo_id,
-            allow_download=False,
+        ),
+        'cache_prepare': _portable_cache_prepare_evidence(
+            preparer.prepare_cache(
+                hf_home=hf_home,
+                repo_id=repo_id,
+                allow_download=False,
+            )
         ),
     }
+
+
+def _portable_cache_prepare_evidence(plan: dict[str, Any]) -> dict[str, Any]:
+    portable = dict(plan)
+    if 'hf_home' in portable:
+        portable['hf_home'] = '@external/huggingface-cache'
+    if 'cache_dir' in portable:
+        portable['cache_dir'] = '@external/huggingface-cache/hub'
+    return portable
+
+
+def _portable_incomplete_cache_files(
+    items: list[dict[str, Any]],
+    *,
+    hf_home: Path,
+) -> list[dict[str, Any]]:
+    portable_items: list[dict[str, Any]] = []
+    for item in items:
+        portable = dict(item)
+        path = Path(str(item.get('path') or 'unknown'))
+        try:
+            relative = path.resolve().relative_to(hf_home.resolve()).as_posix()
+        except ValueError:
+            relative = path.name
+        portable['path'] = f'@external/huggingface-cache/{relative}'
+        portable_items.append(portable)
+    return portable_items
 
 
 def _request_budget_summary(payloads: dict[str, Any], name: str) -> dict[str, Any]:
@@ -584,9 +632,9 @@ def _github_lsp_edit_evidence(
     return {
         'agent': GITHUB_LSP_EDIT_AGENT,
         'model': model,
-        'source_path': str(GITHUB_LSP_EDIT_SOURCE),
-        'sandbox_path': str(GITHUB_LSP_EDIT_SANDBOX),
-        'jsonl': str(jsonl_path),
+        'source_path': _portable_evidence_path(GITHUB_LSP_EDIT_SOURCE),
+        'sandbox_path': _portable_evidence_path(GITHUB_LSP_EDIT_SANDBOX),
+        'jsonl': _portable_evidence_path(jsonl_path),
         'source_status': source_status,
         'source_clean': source_clean,
         'source_line_count': _line_count(source_text),
@@ -626,9 +674,9 @@ def _github_vllm_lsp_operations_evidence(root: Path) -> dict[str, Any]:
     return {
         'agent': VLLM_LSP_AGENT,
         'model': f'vllm/{VLLM_LSP_MODEL_NAME}',
-        'source_path': str(GITHUB_LSP_EDIT_SOURCE),
-        'sandbox_path': str(GITHUB_LSP_EDIT_SANDBOX),
-        'jsonl': str(jsonl_path),
+        'source_path': _portable_evidence_path(GITHUB_LSP_EDIT_SOURCE),
+        'sandbox_path': _portable_evidence_path(GITHUB_LSP_EDIT_SANDBOX),
+        'jsonl': _portable_evidence_path(jsonl_path),
         'source_status': source_status,
         'source_clean': source_clean,
         'source_line_count': _line_count(source_text),
@@ -669,8 +717,8 @@ def build_release_evidence(root: Path = ROOT, *, hf_home: Path = VLLM_HF_HOME) -
     sdist = next((root / 'dist').glob('*.tar.gz'), root / 'dist' / 'missing.tar.gz')
     github_status = _git_status(root, 'test_projects/github_repos')
     opencode_evidence = {
-        'lsp_jsonl': str(OPENCODE_LSP_JSONL),
-        'edit_jsonl': str(OPENCODE_EDIT_JSONL),
+        'lsp_jsonl': _portable_evidence_path(OPENCODE_LSP_JSONL),
+        'edit_jsonl': _portable_evidence_path(OPENCODE_EDIT_JSONL),
         'model': opencode_config['model'],
         'context': opencode_config['context'],
         'tool_call': opencode_config['tool_call'],
@@ -729,8 +777,8 @@ def build_release_evidence(root: Path = ROOT, *, hf_home: Path = VLLM_HF_HOME) -
             large_file_line_count=_line_count(mega_text),
         ),
         'packaging': {
-            'wheel': _dist_artifact(wheel),
-            'sdist': _dist_artifact(sdist),
+            'wheel': _dist_artifact(wheel, root=root),
+            'sdist': _dist_artifact(sdist, root=root),
         },
         'constraints': {
             'github_repos_status': github_status,

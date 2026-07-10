@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import textwrap
 
 import pytest
@@ -813,6 +813,151 @@ def test_project_deep_load_problem_sanitizes_known_external_path(
         ),
         "path": safe_path,
     }
+
+
+def test_display_project_path_sanitizes_cross_platform_absolute_paths(tmp_path: Path) -> None:
+    root = tmp_path
+    inside_root = PurePosixPath(f"{tmp_path}/Source/Main.pas")
+    outside_posix = PurePosixPath("/private/secret/Outside.pas")
+    outside_windows = PureWindowsPath(r"C:\private\secret\Outside.pas")
+    windows_root = Path("C:/workspace-root")
+    windows_inside = PureWindowsPath("C:/workspace-root/Source/Main.pas")
+
+    assert agent_relations._display_project_path(inside_root, root) == "Source/Main.pas"
+    assert agent_relations._display_project_path(outside_posix, root) == "@external/relation/Outside.pas"
+    assert agent_relations._display_project_path(outside_windows, root) == "@external/relation/Outside.pas"
+    assert agent_relations._display_project_path(windows_inside, windows_root) == "Source/Main.pas"
+
+
+def test_safe_problem_message_sanitizes_cross_platform_absolute_references(tmp_path: Path) -> None:
+    root = tmp_path
+    message = (
+        "Dependency load failed: /private/secret/Outside.pas and C:\\private\\secret\\Outside.pas"
+    )
+    safe = agent_relations._safe_problem_message(
+        message,
+        root,
+        (
+            PurePosixPath("/private/secret/Outside.pas"),
+            PureWindowsPath(r"C:\private\secret\Outside.pas"),
+        ),
+    )
+
+    assert "/private/secret/Outside.pas" not in safe
+    assert "C:\\private\\secret\\Outside.pas" not in safe
+    assert safe.count("@external/relation/Outside.pas") == 2
+
+
+@pytest.mark.parametrize(
+    ("known_path", "diagnostic_path"),
+    (
+        (
+            PureWindowsPath(r"C:\private\secret\Outside.pas"),
+            "C:/private/secret/Outside.pas",
+        ),
+        (
+            PureWindowsPath(r"\\server\share\secret\Outside.pas"),
+            "//server/share/secret/Outside.pas",
+        ),
+        (
+            "//server/share/secret/Outside.pas",
+            r"\\server\share\secret\Outside.pas",
+        ),
+    ),
+)
+def test_safe_problem_message_sanitizes_equivalent_path_spellings(
+    tmp_path: Path,
+    known_path: str | PureWindowsPath,
+    diagnostic_path: str,
+) -> None:
+    assert agent_relations._safe_problem_message(
+        diagnostic_path,
+        tmp_path,
+        (known_path,),
+    ) == "@external/relation/Outside.pas"
+
+
+@pytest.mark.parametrize(
+    ("known_path", "diagnostic_path"),
+    (
+        (
+            PureWindowsPath(r"C:\private\secret\Outside.pas"),
+            r"C:\private/secret\Outside.pas",
+        ),
+        (
+            PureWindowsPath(r"C:\private\secret\Outside.pas"),
+            r"C:/private\secret/Outside.pas",
+        ),
+        (
+            PureWindowsPath(r"C:\private\secret\Outside.pas"),
+            r"c:/PRIVATE\Secret/outside.PAS",
+        ),
+        (
+            PureWindowsPath(r"\\server\share\secret\Outside.pas"),
+            r"\\server/share\secret/Outside.pas",
+        ),
+        (
+            PureWindowsPath(r"\\server\share\secret\Outside.pas"),
+            r"//server\share/secret\Outside.pas",
+        ),
+    ),
+)
+def test_safe_problem_message_sanitizes_mixed_path_separators(
+    tmp_path: Path,
+    known_path: PureWindowsPath,
+    diagnostic_path: str,
+) -> None:
+    assert agent_relations._safe_problem_message(
+        diagnostic_path,
+        tmp_path,
+        (known_path,),
+    ) == "@external/relation/Outside.pas"
+
+
+def test_safe_problem_message_preserves_posix_path_before_windows_parsing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    class SimulatedWindowsPath(PureWindowsPath):
+        def expanduser(self):
+            return self
+
+        def resolve(self):
+            return self
+
+    external_path = "/private/secret/Outside.pas"
+    monkeypatch.setattr(agent_relations, "Path", SimulatedWindowsPath)
+
+    assert (
+        agent_relations._safe_problem_message(external_path, tmp_path, (external_path,))
+        == "@external/relation/Outside.pas"
+    )
+
+
+def test_project_problem_item_preserves_posix_path_before_windows_parsing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    class SimulatedWindowsPath(PureWindowsPath):
+        def expanduser(self):
+            return self
+
+        def resolve(self):
+            return self
+
+    class ProblemType:
+        value = "cant_open_file"
+
+    class Problem:
+        problem_type = ProblemType()
+        file_name = "/private/secret/Outside.pas"
+        description = "failure"
+
+    monkeypatch.setattr(agent_relations, "Path", SimulatedWindowsPath)
+
+    assert agent_relations._project_problem_item(Problem(), tmp_path)["path"] == (
+        "@external/relation/Outside.pas"
+    )
 
 
 def test_relation_index_stays_inside_the_selected_project(tmp_path: Path) -> None:

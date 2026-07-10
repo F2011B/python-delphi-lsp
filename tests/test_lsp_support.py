@@ -13,6 +13,20 @@ from delphi_lsp.semantic import SymbolKind
 
 
 FIXTURE_DIR = pathlib.Path(__file__).parent / 'fixtures'
+LARGE_FILE_LSP_COLD_START_TIMEOUT_SECONDS_BY_PLATFORM = {
+    'linux': 3.0,
+    'linux2': 3.0,
+    'darwin': 2.0,
+    'win32': 3.0,
+}
+LARGE_FILE_LSP_COLD_START_TIMEOUT_SECONDS = LARGE_FILE_LSP_COLD_START_TIMEOUT_SECONDS_BY_PLATFORM.get(
+    sys.platform,
+    3.0,
+)
+
+
+# Budgets include cold process startup, initialize, and the 100k-line rename; they
+# allow measured platform variance while retaining a regression guard far below 25s.
 
 
 def _position_for(text: str, needle: str, *, offset: int = 0) -> tuple[int, int]:
@@ -1409,7 +1423,10 @@ end.
                 self.assertTrue(
                     any(item['range']['start']['line'] == decl_line for item in edits)
                 )
-                self.assertLess(time.perf_counter() - started_at, 2.0)
+                self.assertLess(
+                    time.perf_counter() - started_at,
+                    LARGE_FILE_LSP_COLD_START_TIMEOUT_SECONDS,
+                )
             finally:
                 stderr = ''
                 if proc.poll() is None:

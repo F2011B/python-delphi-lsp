@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +18,14 @@ def _load_module():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def test_evidence_paths_use_portable_posix_separators() -> None:
+    module = _load_module()
+
+    assert module._portable_evidence_path(
+        PureWindowsPath(r"test_projects\github_repos\mORMot2\src\core\mormot.core.base.pas")
+    ) == "test_projects/github_repos/mORMot2/src/core/mormot.core.base.pas"
 
 
 def test_build_release_evidence_summarizes_corpus_opencode_and_packaging(tmp_path) -> None:
@@ -42,6 +50,9 @@ def test_build_release_evidence_summarizes_corpus_opencode_and_packaging(tmp_pat
     dist_dir.mkdir()
     (repo_dir / 'refs').mkdir(parents=True)
     snapshot_dir.mkdir(parents=True)
+    incomplete_blob = repo_dir / 'blobs' / 'partial.incomplete'
+    incomplete_blob.parent.mkdir()
+    incomplete_blob.write_bytes(b'partial')
     (tmp_path / 'scripts').mkdir()
     (tmp_path / 'scripts' / 'start_ornith_vllm.sh').write_text(
         '\n'.join(
@@ -479,8 +490,8 @@ def test_build_release_evidence_summarizes_corpus_opencode_and_packaging(tmp_pat
         ),
         encoding='utf-8',
     )
-    (dist_dir / 'python_delphi_lsp-0.1.0-py3-none-any.whl').write_text('wheel', encoding='utf-8')
-    (dist_dir / 'python_delphi_lsp-0.1.0.tar.gz').write_text('sdist', encoding='utf-8')
+    (dist_dir / 'python_delphi_lsp-2.0.0-py3-none-any.whl').write_text('wheel', encoding='utf-8')
+    (dist_dir / 'python_delphi_lsp-2.0.0.tar.gz').write_text('sdist', encoding='utf-8')
     (pdf_dir / 'delphi_lsp_opencode_progress_2026-06-30.pdf').write_bytes(b'%PDF-1.4\n')
     (tmp_path / 'opencode.json').write_text(
         json.dumps(
@@ -550,6 +561,25 @@ def test_build_release_evidence_summarizes_corpus_opencode_and_packaging(tmp_pat
     )
 
     evidence = module.build_release_evidence(tmp_path, hf_home=hf_home)
+
+    serialized_evidence = json.dumps(evidence, sort_keys=True)
+    assert str(tmp_path) not in serialized_evidence
+    assert evidence['packaging']['wheel']['path'] == (
+        'dist/python_delphi_lsp-2.0.0-py3-none-any.whl'
+    )
+    assert evidence['packaging']['sdist']['path'] == 'dist/python_delphi_lsp-2.0.0.tar.gz'
+    assert evidence['vllm']['hf_home'] == '@external/huggingface-cache'
+    assert evidence['vllm']['cache_prepare']['hf_home'] == '@external/huggingface-cache'
+    assert evidence['vllm']['cache_prepare']['cache_dir'] == '@external/huggingface-cache/hub'
+    assert evidence['vllm']['incomplete_files'] == [
+        {
+            'path': (
+                '@external/huggingface-cache/hub/'
+                'models--deepreinforce-ai--Ornith-1.0-9B/blobs/partial.incomplete'
+            ),
+            'size': 7,
+        }
+    ]
 
     assert evidence['corpus']['ok'] == 2
     assert evidence['corpus']['fail'] == 0

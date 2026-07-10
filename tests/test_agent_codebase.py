@@ -1,5 +1,7 @@
 import json
+import os
 import shutil
+import stat
 import subprocess
 import sys
 import textwrap
@@ -206,13 +208,19 @@ def test_opencode_install_writes_protocol_v2_skill_plugin_and_config(tmp_path: P
     assert skill.exists()
     assert plugin.exists()
     assert not (tmp_path / ".opencode" / "tools" / "delphi_codebase.ts").exists()
-    skill_text = skill.read_text(encoding="utf-8")
+    skill_bytes = skill.read_bytes()
+    skill_text = skill_bytes.decode("utf-8")
     assert "name: delphi-codebase-navigator" in skill_text
     assert "only through `delphi_codebase`" in skill_text
     assert "never raw bash/read/glob/grep/cat/shell" in skill_text
     assert "sound_partial" in skill_text
-    plugin_text = plugin.read_text(encoding="utf-8")
-    assert sys.executable in plugin_text
+    assert b"\r\n" not in skill_bytes
+
+    plugin_bytes = plugin.read_bytes()
+    plugin_text = plugin_bytes.decode("utf-8")
+    assert b"\r\n" not in plugin_bytes
+    python_literal = json.dumps(sys.executable)
+    assert f"const PYTHON = {python_literal}" in plugin_text
     assert "delphi_lsp.agent_cli" in plugin_text
     assert '@opencode-ai/plugin' in plugin_text
     assert "type Plugin" in plugin_text
@@ -234,6 +242,154 @@ def test_opencode_install_writes_protocol_v2_skill_plugin_and_config(tmp_path: P
     assert "console.log" not in plugin_text
     assert "stderr" in plugin_text
     assert str(skill) in completed.stdout
+
+
+def test_skill_install_replace_failure_preserves_original_and_cleans_temp(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from delphi_lsp.agent_templates import install_skill
+
+    skill = tmp_path / ".agents" / "skills" / "delphi-codebase-navigator" / "SKILL.md"
+    write_text(skill, "original skill")
+    original = skill.read_bytes()
+    replace_call: dict[str, object] = {}
+
+    def fail_replace(source, destination):  # noqa: ANN001
+        staged = Path(source)
+        replace_call.update(
+            source=staged,
+            destination=Path(destination),
+            content=staged.read_bytes(),
+        )
+        raise PermissionError("simulated replace failure")
+
+    monkeypatch.setattr(os, "replace", fail_replace)
+
+    with pytest.raises(PermissionError, match="simulated replace failure"):
+        install_skill(tmp_path, force=True)
+
+    assert skill.read_bytes() == original
+    assert replace_call["destination"] == skill
+    assert Path(replace_call["source"]).parent == skill.parent
+    assert b"\r\n" not in replace_call["content"]
+    assert not Path(replace_call["source"]).exists()
+    assert set(skill.parent.iterdir()) == {skill}
+
+
+def test_skill_install_staging_collisions_never_delete_existing_files(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from delphi_lsp import agent_templates
+
+    skill = tmp_path / ".agents" / "skills" / "delphi-codebase-navigator" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    collision = skill.parent / f".{skill.name}.collision.tmp"
+    collision.write_text("unrelated\n", encoding="utf-8")
+    monkeypatch.setattr(agent_templates.secrets, "token_hex", lambda _size: "collision")
+
+    with pytest.raises(FileExistsError, match="Could not allocate a staging file"):
+        agent_templates.install_skill(tmp_path)
+
+    assert collision.read_text(encoding="utf-8") == "unrelated\n"
+    assert not skill.exists()
+
+
+def test_skill_install_update_preserves_existing_mode(tmp_path: Path) -> None:
+    from delphi_lsp.agent_templates import install_skill
+
+    skill = tmp_path / ".agents" / "skills" / "delphi-codebase-navigator" / "SKILL.md"
+    write_text(skill, "original skill")
+    skill.chmod(0o640)
+    original_mode = stat.S_IMODE(skill.stat().st_mode)
+
+    install_skill(tmp_path, force=True)
+
+    assert skill.read_text(encoding="utf-8").startswith("---\nname: delphi-codebase-navigator\n")
+    assert stat.S_IMODE(skill.stat().st_mode) == original_mode
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX creation modes are not available on Windows")
+def test_skill_install_new_file_uses_normal_umask_mode(tmp_path: Path) -> None:
+    from delphi_lsp.agent_templates import install_skill
+
+    reference = tmp_path / "reference.txt"
+    reference.write_text("reference\n", encoding="utf-8")
+
+    skill = install_skill(tmp_path)
+
+    assert stat.S_IMODE(skill.stat().st_mode) == stat.S_IMODE(reference.stat().st_mode)
+
+
+def test_skill_install_rejects_symlink_without_replacing_it(tmp_path: Path) -> None:
+    from delphi_lsp.agent_templates import install_skill
+
+    external = tmp_path / "external-skill.md"
+    external.write_text("external content\n", encoding="utf-8")
+    skill = tmp_path / ".agents" / "skills" / "delphi-codebase-navigator" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    try:
+        skill.symlink_to(external)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    with pytest.raises(FileExistsError, match="symbolic link"):
+        install_skill(tmp_path, force=True)
+
+    assert skill.is_symlink()
+    assert external.read_text(encoding="utf-8") == "external content\n"
+
+
+def test_opencode_install_completes_partial_generated_state_on_rerun(tmp_path: Path) -> None:
+    from delphi_lsp.agent_templates import install_opencode_support, install_skill
+
+    skill = install_skill(tmp_path)
+    skill_before = skill.read_bytes()
+
+    installed_skill, plugin, config = install_opencode_support(
+        tmp_path,
+        python_executable=sys.executable,
+        write_config=True,
+    )
+
+    assert installed_skill == skill
+    assert skill.read_bytes() == skill_before
+    assert plugin.is_file()
+    assert config is not None
+    assert config.is_file()
+    assert b"\r\n" not in plugin.read_bytes()
+    assert b"\r\n" not in config.read_bytes()
+
+
+@pytest.mark.parametrize(
+    "conflict_relative",
+    [
+        Path(".agents/skills/delphi-codebase-navigator/SKILL.md"),
+        Path(".opencode/plugins/delphi_codebase.ts"),
+    ],
+)
+def test_opencode_install_rejects_existing_crlf_destination_content(
+    tmp_path: Path,
+    conflict_relative: Path,
+) -> None:
+    from delphi_lsp.agent_templates import install_opencode_support
+
+    first_skill, first_plugin, _ = install_opencode_support(
+        tmp_path,
+        python_executable=sys.executable,
+    )
+
+    conflict = tmp_path / conflict_relative
+    other = first_plugin if conflict == first_skill else first_skill
+    other_before = other.read_bytes()
+    conflict.write_bytes(conflict.read_bytes().replace(b"\n", b"\r\n"))
+
+    with pytest.raises(FileExistsError, match="already exists with different content"):
+        install_opencode_support(tmp_path, python_executable=sys.executable)
+
+    assert b"\r\n" in conflict.read_bytes()
+    assert other.read_bytes() == other_before
 
 
 def test_generated_plugin_uses_official_compaction_hook_separately_from_event(tmp_path: Path) -> None:
@@ -708,7 +864,10 @@ def test_opencode_install_preflights_config_before_mutation(
     assert not (tmp_path / ".opencode" / "plugins" / "delphi_codebase.ts").exists()
 
 
-def test_opencode_install_rolls_back_if_config_write_fails(tmp_path: Path, monkeypatch) -> None:
+def test_opencode_install_rolls_back_content_and_modes_if_config_write_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     legacy = tmp_path / ".opencode" / "tools" / "delphi_codebase.ts"
     skill = tmp_path / ".agents" / "skills" / "delphi-codebase-navigator" / "SKILL.md"
     plugin = tmp_path / ".opencode" / "plugins" / "delphi_codebase.ts"
@@ -722,16 +881,20 @@ def test_opencode_install_rolls_back_if_config_write_fails(tmp_path: Path, monke
     write_text(plugin, "existing plugin")
     config.write_text('{"agent": {}}\n', encoding="utf-8")
     paths = (legacy, skill, plugin, config)
+    for path in paths:
+        path.chmod(0o640)
     before = {path: path.read_bytes() for path in paths}
-    original_write_text = Path.write_text
+    modes_before = {path: stat.S_IMODE(path.stat().st_mode) for path in paths}
+    original_replace = os.replace
+    write_state = {"failed": False}
 
-    def fail_after_partial_config_write(self, data, *args, **kwargs):  # noqa: ANN001
-        if self == config:
-            original_write_text(self, "partial", encoding="utf-8")
+    def fail_config_replace(source, destination):  # noqa: ANN001
+        if Path(destination) == config and not write_state["failed"]:
+            write_state["failed"] = True
             raise PermissionError("simulated config write failure")
-        return original_write_text(self, data, *args, **kwargs)
+        return original_replace(source, destination)
 
-    monkeypatch.setattr(Path, "write_text", fail_after_partial_config_write)
+    monkeypatch.setattr(os, "replace", fail_config_replace)
 
     from delphi_lsp.agent_templates import install_opencode_support
 
@@ -744,3 +907,4 @@ def test_opencode_install_rolls_back_if_config_write_fails(tmp_path: Path, monke
         )
 
     assert {path: path.read_bytes() for path in paths} == before
+    assert {path: stat.S_IMODE(path.stat().st_mode) for path in paths} == modes_before

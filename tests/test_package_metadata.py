@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import json
 import re
+import tomllib
 from pathlib import Path
+
+import delphi_lsp
+from delphi_lsp.lsp_server import create_server
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,6 +44,13 @@ def test_release_metadata_declares_2_0_0_sole_namespace_author_and_windows_suppo
     assert 'delphi-lsp = "delphi_lsp.lsp_server:main"' in scripts
     assert 'delphi-lsp-agent = "delphi_lsp.agent_cli:main"' in scripts
     assert 'F2011B' not in pyproject
+
+
+def test_public_and_lsp_versions_match_release_metadata() -> None:
+    metadata = tomllib.loads((ROOT / 'pyproject.toml').read_text(encoding='utf-8'))['project']
+
+    assert delphi_lsp.__version__ == metadata['version']
+    assert create_server().version == metadata['version']
 
 
 def test_readme_documents_v2_release_plugin_protocol_discovery_and_vllm_proof() -> None:

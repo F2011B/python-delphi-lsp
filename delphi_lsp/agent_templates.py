@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import os
+import secrets
+import stat
 
 
 SKILL_NAME = "delphi-codebase-navigator"
@@ -56,6 +59,7 @@ def install_opencode_support(
 
 
 def _preflight_legacy(legacy_path: Path, *, force: bool) -> bytes | None:
+    _reject_symbolic_link(legacy_path)
     if not legacy_path.exists():
         return None
     if not legacy_path.is_file():
@@ -73,6 +77,7 @@ def _preflight_legacy(legacy_path: Path, *, force: bool) -> bytes | None:
 
 
 def _preflight_destination(path: Path, text: str, *, force: bool) -> bytes | None:
+    _reject_symbolic_link(path)
     if not path.exists():
         return None
     if not path.is_file():
@@ -88,8 +93,7 @@ def _restore_file(path: Path, content: bytes | None) -> None:
         if path.exists():
             path.unlink()
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(content)
+    _write_bytes_atomic(path, content)
 
 
 def _is_generated_legacy_tool(text: str) -> bool:
@@ -101,10 +105,60 @@ def _is_generated_legacy_tool(text: str) -> bool:
 
 
 def _write_text(path: Path, text: str, *, force: bool) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists() and path.read_text(encoding="utf-8") != text and not force:
+    content = text.encode("utf-8")
+    _reject_symbolic_link(path)
+    if path.exists() and not path.is_file():
+        raise FileExistsError(f"Generated destination is not a file: {path}")
+    if path.exists() and path.read_bytes() != content and not force:
         raise FileExistsError(f"{path} already exists with different content; pass --force to overwrite")
-    path.write_text(text, encoding="utf-8")
+    _write_bytes_atomic(path, content)
+
+
+def _write_bytes_atomic(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _reject_symbolic_link(path)
+    try:
+        existing_mode = stat.S_IMODE(path.stat().st_mode)
+    except FileNotFoundError:
+        existing_mode = None
+    temporary_path: Path | None = None
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        for _attempt in range(10):
+            candidate = path.parent / f".{path.name}.{secrets.token_hex(8)}.tmp"
+            try:
+                descriptor = os.open(candidate, flags, 0o666)
+            except FileExistsError:
+                continue
+            temporary_path = candidate
+            break
+        else:
+            raise FileExistsError(f"Could not allocate a staging file for {path}")
+        try:
+            staged_file = os.fdopen(descriptor, "wb")
+        except BaseException:
+            os.close(descriptor)
+            raise
+        with staged_file as staged:
+            written = staged.write(content)
+            if written != len(content):
+                raise OSError(f"Could not stage complete content for {path}")
+            staged.flush()
+            if existing_mode is not None:
+                os.chmod(temporary_path, existing_mode)
+            os.fsync(staged.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def _reject_symbolic_link(path: Path) -> None:
+    if path.is_symlink():
+        raise FileExistsError(f"Generated destination must not be a symbolic link: {path}")
 
 
 def _skill_markdown() -> str:
@@ -133,7 +187,7 @@ Prefer `summary` and `declaration`, narrow `max_items` and `max_chars`, and requ
 
 ## Tool calls
 
-`delphi_codebase` accepts `action` (`open`, `find`, `inspect`, `trace`, `focus`, `problems`), optional `query`, `target_id`, `project_id`, `detail`, `relation`, `cursor`, `max_items` (1–50), and `max_chars` (256–40000). It has no root or path argument; the active OpenCode worktree is used.
+`delphi_codebase` accepts `action` (`open`, `find`, `inspect`, `trace`, `focus`, `problems`), optional `query`, `target_id`, `project_id`, `detail`, `relation`, `cursor`, `max_items` (1-50), and `max_chars` (256-40000). It has no root or path argument; the active OpenCode worktree is used.
 """
 
 
@@ -471,6 +525,7 @@ export const DelphiCodebasePlugin: Plugin = async (_input) => {
 
 
 def _render_opencode_config(config_path: Path) -> tuple[bytes | None, str]:
+    _reject_symbolic_link(config_path)
     if config_path.exists():
         if not config_path.is_file():
             raise ValueError(f"opencode config path is not a file: {config_path}")

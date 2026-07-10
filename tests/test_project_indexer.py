@@ -10,6 +10,32 @@ from delphi_lsp.project_indexer import ProjectIndexer, ProjectProblemType
 
 
 class ProjectIndexerTests(unittest.TestCase):
+    def test_source_transform_receives_normalized_newlines_for_supported_encodings(self) -> None:
+        source = 'unit Newlines;\ninterface\nimplementation\nend.\n'
+        encoded_sources = {
+            'utf-8': source.replace('\n', '\r\n').encode('utf-8'),
+            'utf-8-bom': source.replace('\n', '\r').encode('utf-8-sig'),
+            'utf-16': source.replace('\n', '\r\n').encode('utf-16'),
+            'latin-1': source.replace('Newlines', 'Néwlines').replace('\n', '\r').encode('latin-1'),
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for encoding, encoded_source in encoded_sources.items():
+                with self.subTest(encoding=encoding):
+                    source_path = root / f'{encoding}.pas'
+                    source_path.write_bytes(encoded_source)
+                    transform_inputs: list[str] = []
+
+                    ProjectIndexer(
+                        source_transform=lambda text: transform_inputs.append(text) or text,
+                    ).index(str(source_path))
+
+                    expected = source
+                    if encoding == 'latin-1':
+                        expected = source.replace('Newlines', 'Néwlines')
+                    self.assertEqual(transform_inputs, [expected])
+
     def test_source_transform_runs_after_read_and_before_parse(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             source_path = Path(tmp) / 'Ordered.pas'

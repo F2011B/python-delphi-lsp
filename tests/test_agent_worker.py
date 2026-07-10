@@ -8,6 +8,7 @@ import queue
 import subprocess
 import sys
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -297,6 +298,26 @@ def test_worker_broken_stdout_exits_one_without_shutdown_warning(tmp_path: Path)
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
+
+
+def test_main_flushes_stdout_and_handles_a_deferred_broken_pipe(monkeypatch) -> None:
+    class Parser:
+        def parse_args(self, argv):
+            return SimpleNamespace(func=lambda args: None)
+
+    class BrokenStdout:
+        encoding = "utf-8"
+
+        def flush(self) -> None:
+            raise BrokenPipeError
+
+        def close(self) -> None:
+            raise BrokenPipeError
+
+    monkeypatch.setattr(agent_cli, "build_parser", Parser)
+    monkeypatch.setattr(agent_cli.sys, "stdout", BrokenStdout())
+
+    assert agent_cli.main([]) == 1
 
 
 def test_worker_reports_invalid_encoding_and_hides_internal_failures() -> None:

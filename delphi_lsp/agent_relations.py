@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 import re
 import unicodedata
 
@@ -543,39 +543,91 @@ def _project_problem_item(problem: ProjectProblem, root: Path) -> dict[str, obje
         "item_type": "relation_problem",
         "kind": problem.problem_type.value,
         "message": _safe_problem_message(problem.description, root, (problem.file_name,)),
-        "path": _display_project_path(Path(problem.file_name), root),
+        "path": _display_project_path(problem.file_name, root),
     }
 
 
 def _safe_problem_message(
     message: str,
     root: Path,
-    known_paths: Iterable[str | Path | None],
+    known_paths: Iterable[str | PurePath | None],
 ) -> str:
     replacements: dict[str, str] = {}
     for value in known_paths:
         if value is None:
             continue
         original = str(value)
-        path = Path(original).expanduser()
-        if not path.is_absolute():
+        pattern = _separator_agnostic_absolute_path_pattern(original)
+        if pattern is None:
             continue
-        safe_path = _display_project_path(path, root)
-        replacements[original] = safe_path
-        replacements[str(path.resolve())] = safe_path
-    for original in sorted(replacements, key=len, reverse=True):
-        message = message.replace(original, replacements[original])
+        safe_path = _display_project_path(original, root)
+        replacements[pattern] = safe_path
+    for pattern in sorted(replacements, key=len, reverse=True):
+        replacement = replacements[pattern]
+        message = re.sub(pattern, lambda _match: replacement, message)
     return message
 
 
-def _display_project_path(path: Path, root: Path) -> str:
-    if not path.is_absolute():
-        return path.as_posix()
-    resolved = path.expanduser().resolve()
-    try:
-        return resolved.relative_to(root).as_posix()
-    except ValueError:
+def _display_project_path(path: str | PurePath, root: Path) -> str:
+    path_text = str(path)
+    if not _is_cross_platform_absolute(path_text):
+        return Path(path_text).as_posix()
+    host_path = Path(path_text)
+    if host_path.is_absolute():
+        resolved = host_path.expanduser().resolve()
+        relative = _portable_relative_to_root(resolved, root)
+        if relative is not None:
+            return relative
         return f"@external/relation/{_stable_component(resolved.name)}"
+    relative = _portable_relative_to_root(path_text, root)
+    if relative is not None:
+        return relative
+    return f"@external/relation/{_stable_component(_portable_name(path_text))}"
+
+
+def _is_cross_platform_absolute(path: str | PurePath) -> bool:
+    text = str(path)
+    return PurePosixPath(text).is_absolute() or PureWindowsPath(text).is_absolute()
+
+
+def _separator_agnostic_absolute_path_pattern(path: str | PurePath) -> str | None:
+    text = str(path)
+    windows_path = PureWindowsPath(text)
+    if windows_path.is_absolute():
+        canonical = windows_path.as_posix()
+        case_insensitive = True
+    else:
+        posix_path = PurePosixPath(text)
+        if not posix_path.is_absolute():
+            return None
+        canonical = posix_path.as_posix()
+        case_insensitive = False
+    pattern = r"[\\/]+".join(re.escape(component) for component in canonical.split("/"))
+    return f"(?i:{pattern})" if case_insensitive else pattern
+
+
+def _portable_relative_to_root(path: str | PurePath, root: Path) -> str | None:
+    text = str(path)
+    posix_path = PurePosixPath(text)
+    posix_root = PurePosixPath(str(root))
+    if posix_path.is_absolute() and posix_root.is_absolute():
+        try:
+            return posix_path.relative_to(posix_root).as_posix()
+        except ValueError:
+            pass
+
+    windows_path = PureWindowsPath(text)
+    windows_root = PureWindowsPath(str(root))
+    if windows_path.is_absolute() and windows_root.is_absolute():
+        try:
+            return windows_path.relative_to(windows_root).as_posix()
+        except ValueError:
+            pass
+    return None
+
+
+def _portable_name(path: str | PurePath) -> str:
+    return PurePosixPath(str(path).replace("\\", "/")).name or "unknown"
 
 
 def _resolve_type_symbol(type_ref: TypeRef, scope: Scope, index: SymbolIndex) -> Symbol | None:

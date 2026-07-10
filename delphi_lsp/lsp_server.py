@@ -26,6 +26,7 @@ from .semantic_builder import SemanticBuilder, SemanticModel
 from .source_reader import read_source_text
 from .workspace import WorkspaceSemanticResult, build_workspace_semantics
 from .project_discovery import discover_delphi_project
+from ._version import __version__
 
 
 @dataclass
@@ -1448,7 +1449,7 @@ def create_server():
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise RuntimeError('pygls and lsprotocol are required for the LSP server') from exc
 
-    server = LanguageServer('delphi_lsp', '0.1.0')
+    server = LanguageServer('delphi_lsp', __version__)
     state = LspWorkspaceState()
 
     def _symbol_kind(symbol: Symbol) -> LspSymbolKind:

@@ -1,3 +1,4 @@
+from ._version import __version__
 from .binary import BinarySerializer, dumps, loads
 from .consts import AttributeName, SyntaxNodeType
 from .nodes import (
@@ -60,6 +61,7 @@ from .project_indexer import (
 )
 
 __all__ = [
+    '__version__',
     'AttributeName',
     'BinarySerializer',
     'CommentNode',

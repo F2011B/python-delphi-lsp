@@ -86,14 +86,30 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         args.func(args)
+        sys.stdout.flush()
     except BrokenPipeError:
-        devnull_fd = os.open(os.devnull, os.O_WRONLY)
-        try:
-            os.dup2(devnull_fd, sys.stdout.fileno())
-        finally:
-            os.close(devnull_fd)
+        _discard_broken_stdout()
         return 1
     return 0
+
+
+def _discard_broken_stdout() -> None:
+    stdout = sys.stdout
+    try:
+        stdout_fd = stdout.fileno()
+    except (AttributeError, OSError, ValueError):
+        stdout_fd = None
+    if stdout_fd is not None:
+        devnull_fd = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(devnull_fd, stdout_fd)
+        finally:
+            os.close(devnull_fd)
+    try:
+        stdout.close()
+    except (BrokenPipeError, OSError, ValueError):
+        pass
+    sys.stdout = open(os.devnull, "w", encoding=getattr(stdout, "encoding", None) or "utf-8")
 
 
 def _view(args: argparse.Namespace) -> None:
