@@ -105,11 +105,13 @@ def _discard_broken_stdout() -> None:
             os.dup2(devnull_fd, stdout_fd)
         finally:
             os.close(devnull_fd)
+    replacement = open(os.devnull, "w", encoding=getattr(stdout, "encoding", None) or "utf-8")
+    sys.stdout = replacement
+    sys.__stdout__ = replacement
     try:
         stdout.close()
     except (BrokenPipeError, OSError, ValueError):
         pass
-    sys.stdout = open(os.devnull, "w", encoding=getattr(stdout, "encoding", None) or "utf-8")
 
 
 def _view(args: argparse.Namespace) -> None:

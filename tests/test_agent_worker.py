@@ -315,9 +315,12 @@ def test_main_flushes_stdout_and_handles_a_deferred_broken_pipe(monkeypatch) -> 
             raise BrokenPipeError
 
     monkeypatch.setattr(agent_cli, "build_parser", Parser)
-    monkeypatch.setattr(agent_cli.sys, "stdout", BrokenStdout())
+    broken_stdout = BrokenStdout()
+    monkeypatch.setattr(agent_cli.sys, "stdout", broken_stdout)
+    monkeypatch.setattr(agent_cli.sys, "__stdout__", broken_stdout)
 
     assert agent_cli.main([]) == 1
+    assert agent_cli.sys.stdout is agent_cli.sys.__stdout__
 
 
 def test_worker_reports_invalid_encoding_and_hides_internal_failures() -> None:

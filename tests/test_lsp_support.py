@@ -1137,7 +1137,10 @@ end.
 
                 self.assertNotIn('error', response)
                 self.assertEqual([item['name'] for item in response['result']], ['MegaProc02500'])
-                self.assertLess(time.perf_counter() - started_at, 1.5)
+                self.assertLess(
+                    time.perf_counter() - started_at,
+                    LARGE_FILE_LSP_COLD_START_TIMEOUT_SECONDS,
+                )
             finally:
                 stderr = ''
                 if proc.poll() is None:
