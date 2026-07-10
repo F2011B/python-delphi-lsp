@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import re
-import tomllib
 from pathlib import Path
 
 import delphi_lsp
@@ -47,10 +46,13 @@ def test_release_metadata_declares_2_0_0_sole_namespace_author_and_windows_suppo
 
 
 def test_public_and_lsp_versions_match_release_metadata() -> None:
-    metadata = tomllib.loads((ROOT / 'pyproject.toml').read_text(encoding='utf-8'))['project']
+    pyproject = (ROOT / 'pyproject.toml').read_text(encoding='utf-8')
+    match = re.search(r'^version = "([^"]+)"$', _section('project', pyproject), re.MULTILINE)
+    assert match is not None
+    version = match.group(1)
 
-    assert delphi_lsp.__version__ == metadata['version']
-    assert create_server().version == metadata['version']
+    assert delphi_lsp.__version__ == version
+    assert create_server().version == version
 
 
 def test_readme_documents_v2_release_plugin_protocol_discovery_and_vllm_proof() -> None:
