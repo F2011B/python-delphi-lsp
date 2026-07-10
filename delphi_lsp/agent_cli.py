@@ -206,16 +206,17 @@ def _serve_worker(context: AgentContext, input_stream: BinaryIO, output_stream: 
             continue
         try:
             response = context.handle(request)
-            _write_worker_message(output_stream, response.to_mapping())
+            message = response.to_mapping()
         except BrokenPipeError:
             raise
         except AgentProtocolError as error:
             message = _SOURCE_UNAVAILABLE_MESSAGE if error.code == "source_unavailable" else error.message
-            _write_worker_message(output_stream, _worker_error(error.code, message))
+            message = _worker_error(error.code, message)
         except Exception as error:
             error_stream.write(f"{type(error).__name__}\n")
             error_stream.flush()
-            _write_worker_message(output_stream, _worker_error("internal_error", _INTERNAL_ERROR_MESSAGE))
+            message = _worker_error("internal_error", _INTERNAL_ERROR_MESSAGE)
+        _write_worker_message(output_stream, message)
 def _worker_error(code: str, message: str) -> dict[str, object]:
     return {"schema": 2, "error": {"code": code, "message": message}}
 
@@ -228,8 +229,13 @@ def _write_worker_message(output_stream: BinaryIO, message: object) -> None:
         separators=(",", ":"),
         allow_nan=False,
     ).encode("utf-8")
-    output_stream.write(serialized + b"\n")
-    output_stream.flush()
+    try:
+        output_stream.write(serialized + b"\n")
+        output_stream.flush()
+    except BrokenPipeError:
+        raise
+    except OSError as error:
+        raise BrokenPipeError from error
 
 
 if __name__ == "__main__":

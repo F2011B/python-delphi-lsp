@@ -356,6 +356,35 @@ def test_worker_reports_invalid_encoding_and_hides_internal_failures() -> None:
     assert errors.getvalue() == "RuntimeError\n"
 
 
+def test_worker_treats_output_oserror_as_transport_failure_without_logging() -> None:
+    class StaticResponse:
+        def to_mapping(self) -> dict[str, object]:
+            return {"schema": 2, "result": []}
+
+    class StaticContext:
+        def handle(self, request: object) -> StaticResponse:
+            return StaticResponse()
+
+    class BrokenOutput:
+        def write(self, data: bytes) -> int:
+            raise OSError("closed pipe")
+
+        def flush(self) -> None:
+            raise AssertionError("flush must not run after a failed write")
+
+    errors = io.StringIO()
+
+    with pytest.raises(BrokenPipeError):
+        agent_cli._serve_worker(
+            StaticContext(),
+            io.BytesIO(b'{"action":"open"}\n'),
+            BrokenOutput(),
+            errors,
+        )
+
+    assert errors.getvalue() == ""
+
+
 def test_worker_redacts_source_unavailable_protocol_details() -> None:
     class MissingSourceContext:
         def handle(self, request: object) -> object:
