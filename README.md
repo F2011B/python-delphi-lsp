@@ -253,6 +253,8 @@ python .\scripts\bootstrap_vllm_codebase_skill_test.py --use-running-server --ba
 
 `--skip-install` is an optional acceleration for an already prepared `.venv`;
 omit it on a clean checkout so the bootstrap installs `.[dev]`.
+The final-answer verifier defaults to a 420-second probe timeout. On a slower
+local model server, increase it explicitly with `--probe-timeout SECONDS`.
 
 The bundled automatic helper is not a cross-platform startup mechanism.
 

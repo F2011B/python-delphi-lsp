@@ -146,6 +146,7 @@ def test_skill_bootstrap_defaults_to_smaller_vllm_context_for_metal_stability() 
     script = SCRIPT.read_text(encoding="utf-8")
 
     assert 'DEFAULT_MAX_MODEL_LEN = "32768"' in script
+    assert 'parser.add_argument("--probe-timeout", type=float, default=420.0)' in script
     assert 'os.environ["MAX_MODEL_LEN"] = args.max_model_len' in script
     assert 'env.setdefault("NPM_CONFIG_CACHE"' in script
     assert 'env.setdefault("BUN_INSTALL_CACHE_DIR"' in script

@@ -202,7 +202,7 @@ def main() -> int:
     parser.add_argument("--skip-install", action="store_true", help="Do not install package/dev dependencies into .venv.")
     parser.add_argument("--max-model-len", default=DEFAULT_MAX_MODEL_LEN)
     parser.add_argument("--ready-timeout", type=float, default=180.0)
-    parser.add_argument("--probe-timeout", type=float, default=180.0)
+    parser.add_argument("--probe-timeout", type=float, default=420.0)
     args = parser.parse_args()
 
     python_executable = ensure_venv(ROOT, install=not args.skip_install)
