@@ -86,6 +86,108 @@ end.
     source = generated_mega_unit_source().replace("interface\n\n", "interface\n{$I 'build.inc'}\n\n", 1)
     write_text(sandbox / "src" / "Mega100kUnit.pas", source)
 
+    _install_sandbox_support(
+        root=root,
+        sandbox=sandbox,
+        python_executable=python_executable,
+        base_url=base_url,
+        api_key=api_key,
+    )
+
+
+def write_metrics_skill_sandbox(
+    *,
+    root: Path,
+    sandbox: Path,
+    python_executable: Path,
+    base_url: str = DEFAULT_BASE_URL,
+    api_key: str = DEFAULT_API_KEY,
+) -> None:
+    sandbox.mkdir(parents=True, exist_ok=True)
+    write_text(
+        sandbox / "Main.dpr",
+        """
+program MetricsProbe;
+
+uses
+  ComplexUnit in 'src/ComplexUnit.pas',
+  SimpleUnit in 'src/SimpleUnit.pas';
+
+begin
+end.
+""",
+    )
+    write_text(
+        sandbox / "Main.dproj",
+        """
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <MainSource>Main.dpr</MainSource>
+    <DCC_UnitSearchPath>src</DCC_UnitSearchPath>
+    <DCC_IncludePath>include</DCC_IncludePath>
+    <DCC_Define>METRICS_PROBE</DCC_Define>
+  </PropertyGroup>
+  <ItemGroup>
+    <DCCReference Include="src/ComplexUnit.pas" />
+    <DCCReference Include="src/SimpleUnit.pas" />
+  </ItemGroup>
+</Project>
+""",
+    )
+    write_text(sandbox / "include" / "build.inc", "const MetricsProbeIncludedValue = 1;")
+    write_text(
+        sandbox / "src" / "ComplexUnit.pas",
+        """
+unit ComplexUnit;
+interface
+{$I 'build.inc'}
+uses SimpleUnit;
+function Score(Value: Integer): Integer;
+implementation
+function Score(Value: Integer): Integer;
+var
+  Index: Integer;
+begin
+  Result := 0;
+  if Value > 0 then
+    for Index := 1 to Value do
+      case Index of
+        1: Result := Result + 1;
+        2: Result := Result + 2;
+      else
+        Result := Result + Index;
+      end;
+end;
+end.
+""",
+    )
+    write_text(
+        sandbox / "src" / "SimpleUnit.pas",
+        """
+unit SimpleUnit;
+interface
+type IService = interface end;
+implementation
+end.
+""",
+    )
+    _install_sandbox_support(
+        root=root,
+        sandbox=sandbox,
+        python_executable=python_executable,
+        base_url=base_url,
+        api_key=api_key,
+    )
+
+
+def _install_sandbox_support(
+    *,
+    root: Path,
+    sandbox: Path,
+    python_executable: Path,
+    base_url: str,
+    api_key: str,
+) -> None:
     config = json.loads((root / "opencode.json").read_text(encoding="utf-8"))
     provider_options = config.setdefault("provider", {}).setdefault("vllm", {}).setdefault("options", {})
     provider_options["baseURL"] = base_url.rstrip("/")
@@ -170,6 +272,71 @@ def build_probe_command(
     ]
 
 
+def build_metrics_probe_command(
+    *,
+    root: Path,
+    python_executable: Path,
+    sandbox: Path,
+    timeout: float,
+    output: Path | None = None,
+) -> list[str]:
+    output_path = output or sandbox / "bootstrap_vllm_metrics_probe.jsonl"
+    prompt = (
+        "First load the delphi-codebase-navigator skill. Use only delphi_codebase to inspect the Delphi project. "
+        "Do not write explanatory text before the required calls. Call action metrics without a query and identify "
+        "the unit with the highest cyclomatic maximum. Then call action metrics with that unit's target_id and "
+        "detail members. Return exactly these four labeled facts on separate lines: Total LOC, Most complex unit, "
+        "Cyclomatic maximum, and Instability. Preserve the numeric values returned by the tool."
+    )
+    command = [
+        str(python_executable),
+        str(root / "scripts" / "run_opencode_lsp_probe.py"),
+        "--cwd",
+        str(sandbox),
+        "--model",
+        DEFAULT_MODEL,
+        "--agent",
+        DEFAULT_AGENT,
+        "--require-tool",
+        'delphi_codebase.metrics:"total_loc":34',
+        "--require-tool",
+        'delphi_codebase.metrics:"routines"',
+        "--require-tool",
+        "skill:delphi-codebase-navigator",
+    ]
+    for required in (
+        "Total LOC: 34",
+        "Most complex unit: ComplexUnit",
+        "Cyclomatic maximum: 5",
+        "Instability: 0.5",
+    ):
+        command.extend(["--require-final", required])
+    for forbidden in (
+        "bash",
+        "read",
+        "glob",
+        "grep",
+        "edit",
+        "write",
+        "task",
+        "webfetch",
+        "todowrite",
+    ):
+        command.extend(["--forbid-tool", forbidden])
+    command.extend(
+        [
+            "--npm-cache",
+            str(sandbox / ".opencode" / ".npm-cache"),
+            "--timeout",
+            str(timeout),
+            "--output",
+            str(output_path),
+            prompt,
+        ]
+    )
+    return command
+
+
 def endpoint_ready(base_url: str, *, api_key: str = DEFAULT_API_KEY) -> bool:
     request = urllib.request.Request(
         f"{base_url.rstrip('/')}/models",
@@ -203,11 +370,13 @@ def main() -> int:
     parser.add_argument("--max-model-len", default=DEFAULT_MAX_MODEL_LEN)
     parser.add_argument("--ready-timeout", type=float, default=180.0)
     parser.add_argument("--probe-timeout", type=float, default=420.0)
+    parser.add_argument("--probe", choices=("body", "metrics"), default="body")
     args = parser.parse_args()
 
     python_executable = ensure_venv(ROOT, install=not args.skip_install)
     sandbox = args.sandbox.resolve()
-    write_codebase_skill_sandbox(
+    sandbox_writer = write_metrics_skill_sandbox if args.probe == "metrics" else write_codebase_skill_sandbox
+    sandbox_writer(
         root=ROOT,
         sandbox=sandbox,
         python_executable=python_executable,
@@ -240,8 +409,9 @@ def main() -> int:
         bun_cache.mkdir(parents=True, exist_ok=True)
         env.setdefault("NPM_CONFIG_CACHE", str(npm_cache))
         env.setdefault("BUN_INSTALL_CACHE_DIR", str(bun_cache))
+        probe_builder = build_metrics_probe_command if args.probe == "metrics" else build_probe_command
         run(
-            build_probe_command(
+            probe_builder(
                 root=ROOT,
                 python_executable=python_executable,
                 sandbox=sandbox,

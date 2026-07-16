@@ -142,6 +142,52 @@ def test_probe_command_requires_delphi_codebase_tool_and_forbids_raw_tools(tmp_p
     )
 
 
+def test_writes_deterministic_architecture_metrics_sandbox(tmp_path: Path) -> None:
+    module = load_module()
+
+    module.write_metrics_skill_sandbox(
+        root=ROOT,
+        sandbox=tmp_path,
+        python_executable=venv_python(tmp_path),
+    )
+
+    source_files = [tmp_path / "Main.dpr", *sorted((tmp_path / "src").glob("*.pas"))]
+    assert sum(len(path.read_text(encoding="utf-8").splitlines()) for path in source_files) == 34
+    assert len((tmp_path / "include" / "build.inc").read_text(encoding="utf-8").splitlines()) == 1
+    assert '"metrics"' in (tmp_path / ".opencode" / "plugins" / "delphi_codebase.ts").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_metrics_probe_requires_exact_model_answer_and_forbids_raw_tools(tmp_path: Path) -> None:
+    module = load_module()
+    python_exe = venv_python(tmp_path)
+
+    command = module.build_metrics_probe_command(
+        root=ROOT,
+        python_executable=python_exe,
+        sandbox=tmp_path,
+        timeout=120,
+    )
+
+    assert "skill:delphi-codebase-navigator" in command
+    assert 'delphi_codebase.metrics:"total_loc":34' in command
+    assert 'delphi_codebase.metrics:"routines"' in command
+    required_final = [command[index + 1] for index, item in enumerate(command) if item == "--require-final"]
+    assert required_final == [
+        "Total LOC: 34",
+        "Most complex unit: ComplexUnit",
+        "Cyclomatic maximum: 5",
+        "Instability: 0.5",
+    ]
+    forbidden = [command[index + 1] for index, item in enumerate(command) if item == "--forbid-tool"]
+    assert {"bash", "read", "glob", "grep", "edit", "write", "task", "webfetch", "todowrite"}.issubset(
+        set(forbidden)
+    )
+    assert "Call action metrics without a query" in command[-1]
+    assert "detail members" in command[-1]
+
+
 def test_skill_bootstrap_defaults_to_smaller_vllm_context_for_metal_stability() -> None:
     script = SCRIPT.read_text(encoding="utf-8")
 
