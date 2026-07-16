@@ -18,14 +18,16 @@ from .agent_protocol import (
     make_target_id,
     paginate_items,
 )
+from .agent_metrics import build_workspace_metrics, project_metric_item, unit_metric_item
 from .agent_relations import ProjectRelationIndex, RelationTarget
-from .agent_workspace import AgentUnit, AgentWorkspace
+from .agent_workspace import AgentWorkspace, unit_display_path, unit_source_path, unit_target_id
 from .consts import AttributeName, SyntaxNodeType
 from .lsp_server import build_outline_semantic_model, multiline_string_block_end
 from .nodes import CompoundSyntaxNode, SyntaxNode
 from .parser import DelphiParser
 from .semantic import Scope, ScopeKind, Symbol, SymbolKind
 from .source_reader import read_source_text
+from .metrics import ProjectMetrics
 
 
 _ROUTINE_KINDS = frozenset(
@@ -238,6 +240,8 @@ class AgentContext:
         self._last_revision = workspace.workspace_revision
         self._registry: _Registry | None = None
         self._relation_index: ProjectRelationIndex | None = None
+        self._metrics: ProjectMetrics | None = None
+        self._metrics_revision = ""
 
     @classmethod
     def open(
@@ -270,6 +274,8 @@ class AgentContext:
             self._require_selected_project()
             items = self._problem_items()
             return self._response(parsed, revision, items)
+        if parsed.action == "metrics":
+            return self._handle_metrics(parsed, revision)
         if parsed.action == "focus":
             return self._handle_focus(parsed, revision)
         if parsed.action == "find":
@@ -294,10 +300,14 @@ class AgentContext:
         if current_project_id != previous_project_id:
             self._registry = None
             self._relation_index = None
+            self._metrics = None
+            self._metrics_revision = ""
             self._focus = Focus(project_id=current_project_id) if current_project_id else Focus()
         elif revision != self._last_revision:
             self._registry = None
             self._relation_index = None
+            self._metrics = None
+            self._metrics_revision = ""
         elif self._focus.project_id != current_project_id:
             self._focus = Focus(project_id=current_project_id) if current_project_id else Focus()
         self._last_revision = revision
@@ -323,12 +333,11 @@ class AgentContext:
             return items
 
         for unit in self._workspace.units:
-            source_path = _unit_source_path(self._workspace.root, unit)
-            display_path = _stable_source_display_path(self._workspace.root, unit, source_path)
+            display_path = unit_display_path(self._workspace.root, unit)
             items.append(
                 {
                     "item_type": "unit",
-                    "unit_id": make_target_id("unit", display_path, unit.name),
+                    "unit_id": unit_target_id(self._workspace.root, unit),
                     "name": unit.name,
                     "path": display_path,
                     "has_error": unit.has_error,
@@ -406,6 +415,55 @@ class AgentContext:
         elif request.project_id:
             self._focus = Focus(project_id=self._workspace.active_project_id)
         return self._response(request, revision, [self._focus.to_mapping()])
+
+    def _handle_metrics(self, request: AgentRequest, revision: str) -> AgentResponse:
+        if request.detail not in {"summary", "members"}:
+            raise AgentProtocolError(
+                "invalid_detail",
+                "Metrics supports only summary or members detail.",
+            )
+        metrics = self._require_metrics(revision)
+        detail = request.detail == "members"
+        if request.target_id:
+            unit = next(
+                (candidate for candidate in metrics.units if candidate.unit_id == request.target_id),
+                None,
+            )
+            if unit is None:
+                raise AgentProtocolError(
+                    "target_not_found",
+                    f"Target not found: {request.target_id}.",
+                )
+            return self._response(
+                request,
+                revision,
+                [unit_metric_item(unit, detail=detail)],
+                target_id=unit.unit_id,
+            )
+
+        units = metrics.units
+        if request.query:
+            query = request.query.casefold()
+            units = tuple(
+                unit
+                for unit in units
+                if query in unit.name.casefold() or query in unit.path.casefold()
+            )
+            items = [unit_metric_item(unit, detail=detail) for unit in units]
+        else:
+            items = [
+                project_metric_item(metrics),
+                *(unit_metric_item(unit, detail=detail) for unit in units),
+            ]
+        return self._response(request, revision, items)
+
+    def _require_metrics(self, revision: str) -> ProjectMetrics:
+        self._require_selected_project()
+        if self._metrics is not None and self._metrics_revision == revision:
+            return self._metrics
+        self._metrics = build_workspace_metrics(self._workspace)
+        self._metrics_revision = revision
+        return self._metrics
 
     def _require_registry(self, revision: str) -> _Registry:
         project_id = self._require_selected_project()
@@ -608,8 +666,8 @@ def _build_registry(workspace: AgentWorkspace, project_id: str, revision: str) -
     raw_symbols: list[_RawSymbol] = []
     sources: dict[Path, _SourceDocument] = {}
     for unit in workspace.units:
-        source_path = _unit_source_path(workspace.root, unit)
-        display_path = _stable_source_display_path(workspace.root, unit, source_path)
+        source_path = unit_source_path(workspace.root, unit)
+        display_path = unit_display_path(workspace.root, unit)
         try:
             text = read_source_text(source_path)
         except OSError as exc:
@@ -725,22 +783,6 @@ def _build_registry(workspace: AgentWorkspace, project_id: str, revision: str) -
         by_target={entry.target_id: entry for entry in entries_tuple},
         sources=sources,
     )
-
-
-def _unit_source_path(root: Path, unit: AgentUnit) -> Path:
-    path = Path(unit.path)
-    if not path.is_absolute():
-        path = root / path
-    return path.expanduser().resolve()
-
-
-def _stable_source_display_path(root: Path, unit: AgentUnit, source_path: Path) -> str:
-    try:
-        return source_path.relative_to(root).as_posix()
-    except ValueError:
-        unit_component = _stable_path_component(unit.name or source_path.stem)
-        file_component = _stable_path_component(source_path.name)
-        return f"@external/{unit_component}/{file_component}"
 
 
 def _stable_path_component(value: str) -> str:

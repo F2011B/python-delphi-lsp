@@ -19,6 +19,7 @@ SUPPORTED_ACTIONS = (
     'trace',
     'focus',
     'problems',
+    'metrics',
 )
 
 SUPPORTED_DETAILS = (

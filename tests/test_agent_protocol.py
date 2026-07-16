@@ -43,7 +43,17 @@ def test_schema_and_supported_values_are_versioned_and_deterministic() -> None:
         'trace',
         'focus',
         'problems',
+        'metrics',
     )
+
+
+def test_request_accepts_additive_metrics_action() -> None:
+    protocol = _protocol()
+
+    request = protocol.AgentRequest.from_mapping({'action': 'metrics', 'query': 'Alpha'})
+
+    assert request.action == 'metrics'
+    assert request.query == 'Alpha'
     assert protocol.SUPPORTED_DETAILS == (
         'summary',
         'declaration',

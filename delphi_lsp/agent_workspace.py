@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
+import unicodedata
 
 from .agent_protocol import AgentProtocolError, Focus, make_target_id
 from .consts import AttributeName, SyntaxNodeType
@@ -369,6 +370,32 @@ def _display_path(path: Path, root: Path) -> str:
         return resolved.as_posix()
 
 
+def unit_source_path(root: Path, unit: AgentUnit) -> Path:
+    path = Path(unit.path)
+    if not path.is_absolute():
+        path = root / path
+    return path.expanduser().resolve()
+
+
+def unit_display_path(root: Path, unit: AgentUnit) -> str:
+    source_path = unit_source_path(root, unit)
+    try:
+        return source_path.relative_to(root).as_posix()
+    except ValueError:
+        unit_component = _stable_path_component(unit.name or source_path.stem)
+        file_component = _stable_path_component(source_path.name)
+        return f"@external/{unit_component}/{file_component}"
+
+
+def unit_target_id(root: Path, unit: AgentUnit) -> str:
+    return make_target_id("unit", unit_display_path(root, unit), unit.name)
+
+
+def _stable_path_component(value: str) -> str:
+    normalized = unicodedata.normalize("NFC", value).replace("\\", "_").replace("/", "_")
+    return normalized or "unknown"
+
+
 def _outline_agent_source(text: str) -> str:
     return _compact_outline_whitespace(outline_source(text))
 
@@ -658,4 +685,11 @@ def _file_records(
     return records
 
 
-__all__ = ["AgentProject", "AgentUnit", "AgentWorkspace"]
+__all__ = [
+    "AgentProject",
+    "AgentUnit",
+    "AgentWorkspace",
+    "unit_display_path",
+    "unit_source_path",
+    "unit_target_id",
+]
