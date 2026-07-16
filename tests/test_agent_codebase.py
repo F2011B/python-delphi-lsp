@@ -187,6 +187,20 @@ def test_agent_cli_outputs_symbol_layer_as_json(tmp_path: Path) -> None:
 
 def test_agent_cli_outputs_project_and_unit_metrics_as_json(tmp_path: Path) -> None:
     make_project(tmp_path)
+    write_text(
+        tmp_path / "Main.dproj",
+        """
+        <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+          <PropertyGroup>
+            <MainSource>Main.dpr</MainSource>
+            <DCC_UnitSearchPath>src</DCC_UnitSearchPath>
+          </PropertyGroup>
+          <ItemGroup>
+            <DCCReference Include="src/Worker.pas" />
+          </ItemGroup>
+        </Project>
+        """,
+    )
 
     completed = subprocess.run(
         [
@@ -196,6 +210,8 @@ def test_agent_cli_outputs_project_and_unit_metrics_as_json(tmp_path: Path) -> N
             "view",
             "--root",
             str(tmp_path),
+            "--project-file",
+            "Main.dpr",
             "--layer",
             "metrics",
             "--query",

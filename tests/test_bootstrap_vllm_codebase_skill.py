@@ -122,6 +122,7 @@ def test_probe_command_requires_delphi_codebase_tool_and_forbids_raw_tools(tmp_p
     assert "vllm-delphi-codebase" in command
     assert "skill:delphi-codebase-navigator" in command
     assert "delphi_codebase.open:Main.dpr" in command
+    assert "delphi_codebase.open:Main.dpr" in command
     assert "delphi_codebase.find:MegaProc02500" in command
     assert "delphi_codebase.focus:target_id" in command
     assert "delphi_codebase.inspect:Value := Value + 40" in command
@@ -184,7 +185,7 @@ def test_metrics_probe_requires_exact_model_answer_and_forbids_raw_tools(tmp_pat
     assert {"bash", "read", "glob", "grep", "edit", "write", "task", "webfetch", "todowrite"}.issubset(
         set(forbidden)
     )
-    assert "Call action metrics without a query" in command[-1]
+    assert "Call action open, then call action metrics without a query" in command[-1]
     assert "detail members" in command[-1]
 
 

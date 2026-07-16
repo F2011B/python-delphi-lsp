@@ -140,8 +140,8 @@ end.
         """
 unit ComplexUnit;
 interface
-{$I 'build.inc'}
 uses SimpleUnit;
+{$I 'build.inc'}
 function Score(Value: Integer): Integer;
 implementation
 function Score(Value: Integer): Integer;
@@ -283,7 +283,7 @@ def build_metrics_probe_command(
     output_path = output or sandbox / "bootstrap_vllm_metrics_probe.jsonl"
     prompt = (
         "First load the delphi-codebase-navigator skill. Use only delphi_codebase to inspect the Delphi project. "
-        "Do not write explanatory text before the required calls. Call action metrics without a query and identify "
+        "Do not write explanatory text before the required calls. Call action open, then call action metrics without a query and identify "
         "the unit with the highest cyclomatic maximum. Then call action metrics with that unit's target_id and "
         "detail members. Return exactly these four labeled facts on separate lines: Total LOC, Most complex unit, "
         "Cyclomatic maximum, and Instability. Preserve the numeric values returned by the tool."
@@ -297,6 +297,8 @@ def build_metrics_probe_command(
         DEFAULT_MODEL,
         "--agent",
         DEFAULT_AGENT,
+        "--require-tool",
+        "delphi_codebase.open:Main.dpr",
         "--require-tool",
         'delphi_codebase.metrics:"total_loc":34',
         "--require-tool",

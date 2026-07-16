@@ -2,7 +2,7 @@
 
 `python-delphi-lsp` parses Delphi/Object Pascal, builds semantic and project
 indexes, serves LSP, and provides bounded codebase navigation for agents.
-Version 2.0.0 is authored by Dark Light and supports Windows, macOS, and Linux.
+Version 2.0.1 is authored by Dark Light and supports Windows, macOS, and Linux.
 
 ## Install and quick start
 
@@ -42,6 +42,39 @@ project = ProjectIndexer(
 ).index("Main.dpr")
 print(project.parsed_units)
 ```
+
+## Architecture metrics
+
+The public metrics API analyzes a single unit or aggregates a complete project:
+
+```python
+from delphi_lsp import analyze_project, analyze_unit
+
+unit = analyze_unit(
+    "unit Alpha; interface implementation procedure Run; begin end; end.",
+    "Alpha.pas",
+)
+print(unit.lines.total_lines, unit.cyclomatic.maximum)
+
+project = analyze_project({
+    "Main.dpr": "program Main; uses Alpha; begin end.",
+    "Alpha.pas": "unit Alpha; interface implementation end.",
+})
+print(project.total_loc)
+```
+
+Line results distinguish total, source, blank, comment-only, mixed-comment, and
+compiler-directive lines. Project `total_loc` counts each `.dpr`, `.dpk`, and
+`.pas` source once; `include_loc` counts unique `.inc` inputs separately, and
+`total_loc_with_includes` combines both totals.
+
+Cyclomatic complexity is reported per routine and as unit/project aggregates.
+The result also includes complete Halstead counts and derived values, a
+normalized 0–100 maintainability index, symbol counts, dependency edges,
+afferent coupling (fan-in), efferent coupling (fan-out), instability,
+abstractness, and distance from the main sequence. Coupling detail separates
+internal from external dependencies. Empty or partial inputs produce finite
+JSON values; unreadable agent-workspace inputs are reported as metric problems.
 
 Run the stdio language server with `delphi-lsp`, or equivalently:
 
@@ -110,14 +143,21 @@ delphi-lsp-agent worker --root PATH [--project-file FILE]
 ```
 
 `view --layer` accepts `overview`, `projects`, `units`, `unit`,
-`symbols`, `symbol`, `implementation`, `references`, and `problems`.
+`symbols`, `symbol`, `implementation`, `references`, `problems`, and
+`metrics`. For example, `delphi-lsp-agent view --layer metrics --format json`
+returns a project summary and detailed unit metric objects; `--query` filters
+units by name or path.
 `index` materializes overview, projects, and problems JSON. `skill install`
 writes the skill; `opencode install` writes both integration files, while
 `--write-config` additionally writes the restricted agent configuration.
 `worker` serves NDJSON over standard input/output.
 
 Protocol v2 actions are `open`, `find`, `inspect`, `trace`, `focus`,
-and `problems`. Detail values are `summary`, `declaration`, `members`,
+`problems`, and `metrics`. A `metrics` request without a query returns the
+project summary followed by unit cards. A query filters units, while a unit
+`target_id` from `open` selects one unit; `detail: "members"` adds routine,
+Halstead, dependency, and symbol-count detail without returning source text.
+Detail values are `summary`, `declaration`, `members`,
 `context`, `body`, and `implementations`. Relations are `references`,
 `callers`, `callees`, `uses`, `used_by`, `inherits`, and
 `implements`.
@@ -192,6 +232,10 @@ Select `vllm-delphi-codebase`, ask it to load
 `open`, `find`, `focus`, and `inspect`. Use semantic tool calls, not raw
 source tools.
 
+For architecture questions, call `metrics` without a query to compare unit
+cards and read project LOC. Then select a returned unit ID with another
+`metrics` call and `detail: "members"` to inspect its routines and coupling.
+
 For the root LSP configuration, a local model can be used as follows:
 
 ```bash
@@ -257,6 +301,18 @@ The final-answer verifier defaults to a 420-second probe timeout. On a slower
 local model server, increase it explicitly with `--probe-timeout SECONDS`.
 
 The bundled automatic helper is not a cross-platform startup mechanism.
+
+The architecture-metrics proof uses a separate deterministic 34-LOC project.
+It requires the restricted model to load the skill, call `metrics` for the
+project and most-complex unit, and report exact LOC, cyclomatic maximum, and
+instability values. Raw source, search, shell, and write tools remain forbidden:
+
+```bash
+python scripts/bootstrap_vllm_codebase_skill_test.py --probe metrics --use-running-server
+```
+
+Use `--probe metrics --start-vllm --max-model-len 24576` for the cached macOS
+auto-start path when no endpoint is already running.
 
 ## Migration to 2.0
 
