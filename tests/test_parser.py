@@ -1669,6 +1669,56 @@ end.
         self.assertEqual(result.root.get_attribute(AttributeName.anName), 'VarProcTypeCallingConventionDemo')
         self.assertTrue(result.semantic.index.lookup('Load'))
 
+    def test_preserves_case_selectors_and_abstract_class_modifier(self) -> None:
+        text = '''
+unit MetricsSyntax;
+
+interface
+
+type
+  TAbstractThing = class abstract
+  end;
+
+implementation
+
+procedure Score(Value: Integer);
+begin
+  case Value of
+    1: Value := 2;
+    2, 3: Value := 4;
+  else
+    Value := 0;
+  end;
+end;
+
+end.
+'''.strip()
+
+        result = parse(text, 'metrics_syntax.pas', build_semantic=False)
+
+        def descendants(node):
+            yield node
+            for child in node.child_nodes:
+                yield from descendants(child)
+
+        case_node = next(
+            (node for node in descendants(result.root) if node.typ == SyntaxNodeType.ntCase),
+            None,
+        )
+        self.assertIsNotNone(case_node)
+        assert case_node is not None
+        self.assertEqual(
+            sum(child.typ == SyntaxNodeType.ntCaseSelector for child in case_node.child_nodes),
+            2,
+        )
+        type_node = next(
+            (node for node in descendants(result.root) if node.typ == SyntaxNodeType.ntType),
+            None,
+        )
+        self.assertIsNotNone(type_node)
+        assert type_node is not None
+        self.assertEqual(type_node.get_attribute(AttributeName.anAbstract), 'true')
+
 
 if __name__ == '__main__':
     unittest.main()

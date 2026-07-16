@@ -654,7 +654,19 @@ def build_syntax_tree(
                     for item in child:
                         if isinstance(item, SyntaxNode):
                             node.add_child(item)
+                elif isinstance(child, set):
+                    if 'abstract' in child:
+                        node.set_attribute(AttributeName.anAbstract, 'true')
+                    if 'sealed' in child:
+                        node.set_attribute(AttributeName.anSealed, 'true')
             return node
+
+        def class_modifiers(self, meta: Any, *children: Any) -> set[str]:
+            return {
+                token_value(child).casefold()
+                for child in children
+                if self._is_text(child) or is_token(child)
+            }
 
         def forward_class_decl(self, meta: Any, *children: Any) -> SyntaxNode:
             node = self._make_node(SyntaxNodeType.ntType, meta)
@@ -1957,7 +1969,7 @@ def build_syntax_tree(
 
         def case_statement(self, meta: Any, *children: Any) -> SyntaxNode:
             node = self._make_node(SyntaxNodeType.ntCase, meta)
-            for child in children:
+            for child in self._flatten(children):
                 if isinstance(child, SyntaxNode):
                     node.add_child(child)
             return node
