@@ -189,6 +189,16 @@ def test_metrics_probe_requires_exact_model_answer_and_forbids_raw_tools(tmp_pat
     assert "detail members" in command[-1]
 
 
+def test_metrics_probe_default_sandbox_is_outside_scanner_skip_directories() -> None:
+    module = load_module()
+
+    sandbox = module.default_sandbox("metrics")
+
+    assert sandbox.name == "python-delphi-lsp-metrics-skill-project"
+    assert not {"output", "build", "dist", ".worktrees"}.intersection(sandbox.parts)
+    assert module.default_sandbox("body") == module.ROOT / module.DEFAULT_SANDBOX
+
+
 def test_skill_bootstrap_defaults_to_smaller_vllm_context_for_metal_stability() -> None:
     script = SCRIPT.read_text(encoding="utf-8")
 

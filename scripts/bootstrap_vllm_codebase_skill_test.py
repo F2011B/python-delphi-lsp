@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -38,6 +39,12 @@ DEFAULT_AGENT = "vllm-delphi-codebase"
 DEFAULT_SYMBOL = "MegaProc02500"
 DEFAULT_API_KEY = "vllm"
 DEFAULT_MAX_MODEL_LEN = "32768"
+
+
+def default_sandbox(probe: str) -> Path:
+    if probe == "metrics":
+        return Path(tempfile.gettempdir()).resolve() / "python-delphi-lsp-metrics-skill-project"
+    return ROOT / DEFAULT_SANDBOX
 
 
 def write_text(path: Path, text: str) -> None:
@@ -362,7 +369,7 @@ def wait_for_endpoint(base_url: str, timeout: float, *, api_key: str = DEFAULT_A
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Bootstrap and run the vLLM opencode Delphi codebase skill proof.")
-    parser.add_argument("--sandbox", type=Path, default=ROOT / DEFAULT_SANDBOX)
+    parser.add_argument("--sandbox", type=Path)
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--api-key", default=DEFAULT_API_KEY)
     parser.add_argument("--start-vllm", action="store_true", help="Start the local macOS vLLM helper before probing.")
@@ -376,7 +383,7 @@ def main() -> int:
     args = parser.parse_args()
 
     python_executable = ensure_venv(ROOT, install=not args.skip_install)
-    sandbox = args.sandbox.resolve()
+    sandbox = (args.sandbox or default_sandbox(args.probe)).resolve()
     sandbox_writer = write_metrics_skill_sandbox if args.probe == "metrics" else write_codebase_skill_sandbox
     sandbox_writer(
         root=ROOT,
