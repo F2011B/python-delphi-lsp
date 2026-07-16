@@ -44,6 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
             "implementation",
             "references",
             "problems",
+            "metrics",
         ],
     )
     view.add_argument("--query", default="")

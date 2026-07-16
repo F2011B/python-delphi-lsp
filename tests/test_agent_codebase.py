@@ -185,6 +185,36 @@ def test_agent_cli_outputs_symbol_layer_as_json(tmp_path: Path) -> None:
     assert "procedure TWorker.Run;" in completed.stdout
 
 
+def test_agent_cli_outputs_project_and_unit_metrics_as_json(tmp_path: Path) -> None:
+    make_project(tmp_path)
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "delphi_lsp.agent_cli",
+            "view",
+            "--root",
+            str(tmp_path),
+            "--layer",
+            "metrics",
+            "--query",
+            "worker",
+            "--format",
+            "json",
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    payload = json.loads(completed.stdout)
+    assert payload["layer"] == "metrics"
+    assert payload["project"]["total_loc"] == 25
+    assert [item["name"] for item in payload["items"]] == ["Worker"]
+    assert payload["items"][0]["cyclomatic"]["routine_count"] == 1
+
+
 def test_opencode_install_writes_protocol_v2_skill_plugin_and_config(tmp_path: Path) -> None:
     completed = subprocess.run(
         [
@@ -214,6 +244,7 @@ def test_opencode_install_writes_protocol_v2_skill_plugin_and_config(tmp_path: P
     assert "only through `delphi_codebase`" in skill_text
     assert "never raw bash/read/glob/grep/cat/shell" in skill_text
     assert "sound_partial" in skill_text
+    assert "Call `metrics`" in skill_text
     assert b"\r\n" not in skill_bytes
 
     plugin_bytes = plugin.read_bytes()
@@ -237,6 +268,7 @@ def test_opencode_install_writes_protocol_v2_skill_plugin_and_config(tmp_path: P
     assert "root: tool.schema" not in plugin_text
     assert "max_items" in plugin_text
     assert "max_chars" in plugin_text
+    assert '"metrics"' in plugin_text
     assert "WorkerProtocolError" in plugin_text
     assert "error instanceof WorkerProtocolError" in plugin_text
     assert "console.log" not in plugin_text

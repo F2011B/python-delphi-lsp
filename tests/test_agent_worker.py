@@ -53,12 +53,14 @@ def test_parser_adds_worker_without_changing_legacy_commands() -> None:
 
     worker = parser.parse_args(["worker", "--root", "workspace", "--project-file", "Main.dpr"])
     view = parser.parse_args(["view", "--layer", "overview"])
+    metrics = parser.parse_args(["view", "--layer", "metrics"])
 
     assert worker.command == "worker"
     assert worker.root == Path("workspace")
     assert worker.project_file == Path("Main.dpr")
     assert view.command == "view"
     assert view.layer == "overview"
+    assert metrics.layer == "metrics"
 
 
 def test_worker_preserves_focus_across_requests_in_one_process(tmp_path: Path) -> None:

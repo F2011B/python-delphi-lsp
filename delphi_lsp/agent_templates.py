@@ -181,13 +181,14 @@ Inspect Delphi/Object Pascal only through `delphi_codebase`; never raw bash/read
 3. Inspect focused details in this order as needed: `summary`, `declaration`, `members`, `context`, `body`, `implementations`.
 4. Trace relations with `references`, `callers`, `callees`, `uses`, `used_by`, `inherits`, or `implements`.
 5. Call `problems` before declaring evidence missing. Explain any `sound_partial` relation metadata rather than treating partial results as complete.
-6. Follow `page.next_cursor` with `cursor` until the needed evidence is available.
+6. Call `metrics` for project LOC and architecture metrics. Use `query` for unit summaries or a unit `target_id` with `detail=members` for full Halstead, complexity, coupling, abstractness, instability, and distance details.
+7. Follow `page.next_cursor` with `cursor` until the needed evidence is available.
 
 Prefer `summary` and `declaration`, narrow `max_items` and `max_chars`, and request `body` only when it is necessary. Keep the focused target stable while collecting evidence.
 
 ## Tool calls
 
-`delphi_codebase` accepts `action` (`open`, `find`, `inspect`, `trace`, `focus`, `problems`), optional `query`, `target_id`, `project_id`, `detail`, `relation`, `cursor`, `max_items` (1-50), and `max_chars` (256-40000). It has no root or path argument; the active OpenCode worktree is used.
+`delphi_codebase` accepts `action` (`open`, `find`, `inspect`, `trace`, `focus`, `problems`, `metrics`), optional `query`, `target_id`, `project_id`, `detail`, `relation`, `cursor`, `max_items` (1-50), and `max_chars` (256-40000). It has no root or path argument; the active OpenCode worktree is used.
 """
 
 
@@ -199,7 +200,7 @@ const PYTHON = __PYTHON_EXECUTABLE__
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000
 
 type AgentRequest = {
-  action: "open" | "find" | "inspect" | "trace" | "focus" | "problems"
+  action: "open" | "find" | "inspect" | "trace" | "focus" | "problems" | "metrics"
   query?: string
   target_id?: string
   project_id?: string
@@ -464,7 +465,7 @@ export const DelphiCodebasePlugin: Plugin = async (_input) => {
       delphi_codebase: tool({
         description: "Protocol v2 semantic Delphi/Object Pascal codebase navigation.",
         args: {
-          action: tool.schema.enum(["open", "find", "inspect", "trace", "focus", "problems"]),
+          action: tool.schema.enum(["open", "find", "inspect", "trace", "focus", "problems", "metrics"]),
           query: tool.schema.string().optional(),
           target_id: tool.schema.string().optional(),
           project_id: tool.schema.string().optional(),

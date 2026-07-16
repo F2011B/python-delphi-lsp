@@ -6,6 +6,7 @@ from typing import Any, Iterable
 import json
 
 from .lsp_server import build_outline_semantic_model, outline_source
+from .metrics import analyze_project
 from .project_discovery import DelphiProjectDiscovery, discover_delphi_project
 from .project_indexer import ProjectIndexResult, ProjectIndexer
 from .semantic import Scope, SourceRange, Symbol, SymbolIndex, SymbolKind
@@ -98,6 +99,8 @@ def layer_payload(index: CodebaseIndex, layer: str, *, query: str = "") -> dict[
         return _references_payload(index, query=query)
     if normalized_layer == "problems":
         return _problems_payload(index)
+    if normalized_layer == "metrics":
+        return _metrics_payload(index, query=query)
     raise ValueError(f"Unknown layer: {layer}")
 
 
@@ -369,6 +372,44 @@ def _problems_payload(index: CodebaseIndex) -> dict[str, Any]:
     return {"layer": "problems", "root": index.root, "items": items}
 
 
+def _metrics_payload(index: CodebaseIndex, *, query: str) -> dict[str, Any]:
+    sources: dict[str, str] = {}
+    include_sources: dict[str, str] = {}
+    for value in index.discovery.source_files:
+        path = Path(value)
+        try:
+            text = read_source_text(path)
+        except (OSError, UnicodeError):
+            continue
+        if path.suffix.casefold() == ".inc":
+            include_sources[str(path)] = text
+        elif path.suffix.casefold() in {".pas", ".dpr", ".dpk"}:
+            sources[str(path)] = text
+
+    project_name = "Workspace"
+    if len(index.discovery.project_files) == 1:
+        project_name = Path(index.discovery.project_files[0]).stem
+    metrics = analyze_project(
+        sources,
+        include_sources=include_sources,
+        defines=index.discovery.defines,
+        include_paths=index.discovery.include_paths,
+        project_name=project_name,
+    )
+    needle = query.casefold().strip()
+    units = [
+        unit.to_mapping(detail=True)
+        for unit in metrics.units
+        if not needle or needle in unit.name.casefold() or needle in unit.path.casefold()
+    ]
+    return {
+        "layer": "metrics",
+        "root": index.root,
+        "project": metrics.to_mapping(),
+        "items": units,
+    }
+
+
 def _all_symbols(index: CodebaseIndex) -> Iterable[Symbol]:
     for model in index.models.values():
         yield from _iter_symbols(model.unit_scope)
@@ -486,6 +527,30 @@ def _render_markdown(payload: dict[str, Any]) -> str:
     elif payload["layer"] == "problems":
         for item in payload["items"]:
             lines.append(f"- {item['kind']}: {item['message']} (`{item.get('origin', '')}`)")
+    elif payload["layer"] == "metrics":
+        project = payload["project"]
+        lines.extend(
+            [
+                f"- Project LOC: {project['total_loc']}",
+                f"- Project LOC with includes: {project['total_loc_with_includes']}",
+                f"- Units: {project['unit_count']}",
+                f"- Maintainability index: {project['maintainability_index']:.2f}",
+            ]
+        )
+        for item in payload["items"]:
+            lines.extend(
+                [
+                    "",
+                    f"## {item['name']}",
+                    f"- Path: `{item['path']}`",
+                    f"- LOC: {item['lines']['total_lines']}",
+                    f"- Cyclomatic maximum: {item['cyclomatic']['maximum']}",
+                    f"- Maintainability index: {item['maintainability_index']:.2f}",
+                    f"- Instability: {item['instability']:.3f}",
+                    f"- Abstractness: {item['abstractness']:.3f}",
+                    f"- Distance: {item['distance']:.3f}",
+                ]
+            )
     return "\n".join(lines).rstrip() + "\n"
 
 
