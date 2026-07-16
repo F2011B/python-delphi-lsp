@@ -59,6 +59,17 @@ from .project_indexer import (
     UnitInfo,
     UnitParsedHook,
 )
+from .metrics import (
+    CyclomaticMetrics,
+    HalsteadMetrics,
+    LineMetrics,
+    MetricProblem,
+    ProjectMetrics,
+    RoutineComplexity,
+    UnitMetrics,
+    analyze_project,
+    analyze_unit,
+)
 
 __all__ = [
     '__version__',
@@ -134,6 +145,15 @@ __all__ = [
     'IncludeFileInfo',
     'GetUnitSyntaxHook',
     'UnitParsedHook',
+    'MetricProblem',
+    'LineMetrics',
+    'HalsteadMetrics',
+    'RoutineComplexity',
+    'CyclomaticMetrics',
+    'UnitMetrics',
+    'ProjectMetrics',
+    'analyze_unit',
+    'analyze_project',
     'dumps',
     'loads',
 ]
