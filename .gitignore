@@ -27,3 +27,4 @@ env/
 # Local integration artifacts
 test_projects/
 output/
+.worktrees/
