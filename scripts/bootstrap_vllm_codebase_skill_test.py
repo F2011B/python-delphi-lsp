@@ -35,7 +35,7 @@ from bootstrap_vllm_opencode_test import (  # noqa: E402
 
 DEFAULT_SANDBOX = Path("output/mega_codebase_skill_project")
 DEFAULT_MODEL = "vllm/ornith-lspctx"
-DEFAULT_AGENT = "vllm-delphi-codebase"
+DEFAULT_AGENT = "python-delphi-lsp"
 DEFAULT_SYMBOL = "MegaProc02500"
 DEFAULT_API_KEY = "vllm"
 DEFAULT_MAX_MODEL_LEN = "32768"
@@ -208,7 +208,6 @@ def _install_sandbox_support(
         sandbox,
         python_executable=str(python_executable),
         force=True,
-        write_config=True,
     )
 
 
@@ -222,7 +221,7 @@ def build_probe_command(
 ) -> list[str]:
     output_path = output or sandbox / "bootstrap_vllm_codebase_skill_probe.jsonl"
     prompt = (
-        "First load the delphi-codebase-navigator skill. Use only delphi_codebase to inspect the Delphi project. "
+        "First load the python-delphi-lsp skill. Use only delphi_codebase to inspect the Delphi project. "
         "Do not write explanatory text before the required calls. Call action open, then action find with query "
         '"MegaProc02500", focus the returned target with action focus and target_id, then call action inspect '
         "with detail body. In the final answer cite the returned body range as path:start_line-end_line; do not "
@@ -246,7 +245,7 @@ def build_probe_command(
         "--require-tool",
         "delphi_codebase.inspect:Value := Value + 40",
         "--require-tool",
-        "skill:delphi-codebase-navigator",
+        "skill:python-delphi-lsp",
         "--require-final",
         "src/Mega100kUnit.pas:117464-117509",
         "--require-final",
@@ -289,7 +288,7 @@ def build_metrics_probe_command(
 ) -> list[str]:
     output_path = output or sandbox / "bootstrap_vllm_metrics_probe.jsonl"
     prompt = (
-        "First load the delphi-codebase-navigator skill. Use only delphi_codebase to inspect the Delphi project. "
+        "First load the python-delphi-lsp skill. Use only delphi_codebase to inspect the Delphi project. "
         "Do not write explanatory text before the required calls. Call action open, then call action metrics without a query and identify "
         "the unit with the highest cyclomatic maximum. Then call action metrics with that unit's target_id and "
         "detail members. Return exactly these four labeled facts on separate lines: Total LOC, Most complex unit, "
@@ -311,7 +310,7 @@ def build_metrics_probe_command(
         "--require-tool",
         'delphi_codebase.metrics:"routines"',
         "--require-tool",
-        "skill:delphi-codebase-navigator",
+        "skill:python-delphi-lsp",
     ]
     for required in (
         "Total LOC: 34",

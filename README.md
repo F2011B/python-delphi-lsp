@@ -138,7 +138,7 @@ delphi-lsp-agent view --root PATH [--project-file FILE] --layer LAYER
 delphi-lsp-agent index --root PATH [--project-file FILE] [--out FILE]
 delphi-lsp-agent skill install [--target PATH] [--force]
 delphi-lsp-agent opencode install [--target PATH] [--python PYTHON]
-                                  [--force] [--write-config]
+                                  [--force] [--write-agent|--write-config]
 delphi-lsp-agent worker --root PATH [--project-file FILE]
 ```
 
@@ -148,8 +148,9 @@ delphi-lsp-agent worker --root PATH [--project-file FILE]
 returns a project summary and detailed unit metric objects; `--query` filters
 units by name or path.
 `index` materializes overview, projects, and problems JSON. `skill install`
-writes the skill; `opencode install` writes both integration files, while
-`--write-config` additionally writes the restricted agent configuration.
+writes the skill; `opencode install` writes the package-named skill, Markdown
+agent, and plugin. The two deprecated write flags are harmless aliases and do
+not change user configuration.
 `worker` serves NDJSON over standard input/output.
 
 Protocol v2 actions are `open`, `find`, `inspect`, `trace`, `focus`,
@@ -186,49 +187,47 @@ optimization does not remove LSP functionality.
 Install the generated integration in a worktree:
 
 ```bash
-delphi-lsp-agent opencode install --target . --write-config
+delphi-lsp-agent opencode install --target .
 ```
 
 It writes:
 
 ```text
-.agents/skills/delphi-codebase-navigator/SKILL.md
+.agents/skills/python-delphi-lsp/SKILL.md
 .opencode/plugins/delphi_codebase.ts
+.opencode/agents/python-delphi-lsp.md
 ```
 
-The generated configuration enables only the named
-`delphi-codebase-navigator` skill and `delphi_codebase`. It denies
+The package-named Markdown agent enables only the
+`python-delphi-lsp` skill and `delphi_codebase`. It denies
 `bash`, `read`, `glob`, `grep`, and `lsp`, along with edit/write and
 other raw source tools. The skill is enabled. The installer does not use the
-retired `.opencode/tools` path.
+retired `.opencode/tools` path and never reads or changes `opencode.json`; that
+file remains entirely user-owned. The deprecated `--write-config` and
+`--write-agent` options are accepted harmlessly for compatibility.
 
 The plugin maintains one worker per session/root, reusing focus and indexes.
 During compaction it restores the focus and summary into the new context.
 Transport failure, session deletion, and plugin disposal clean up the worker.
 
-A generated OpenCode agent looks like this; providers and unrelated agents stay
-unchanged:
+A generated OpenCode agent starts with this Markdown frontmatter:
 
-```json
-{
-  "agent": {
-    "vllm-delphi-codebase": {
-      "tools": {
-        "delphi_codebase": true, "skill": true, "lsp": false,
-        "bash": false, "read": false, "glob": false, "grep": false
-      },
-      "permission": {
-        "delphi_codebase": "allow",
-        "skill": {"*": "deny", "delphi-codebase-navigator": "allow"},
-        "lsp": "deny"
-      }
-    }
-  }
-}
+```markdown
+---
+description: Inspect Delphi and Object Pascal codebases through python-delphi-lsp.
+mode: subagent
+temperature: 0
+permission:
+  "*": deny
+  delphi_codebase: allow
+  skill:
+    "*": deny
+    python-delphi-lsp: allow
+---
 ```
 
-Select `vllm-delphi-codebase`, ask it to load
-`delphi-codebase-navigator`, then use `delphi_codebase` actions such as
+Select `python-delphi-lsp`, ask it to load the `python-delphi-lsp` skill, then
+use `delphi_codebase` actions such as
 `open`, `find`, `focus`, and `inspect`. Use semantic tool calls, not raw
 source tools.
 

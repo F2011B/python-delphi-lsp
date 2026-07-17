@@ -67,11 +67,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     opencode = subcommands.add_parser("opencode", help="Install opencode integration.")
     opencode_commands = opencode.add_subparsers(dest="opencode_command", required=True)
-    opencode_install = opencode_commands.add_parser("install", help="Install .agents skill and opencode plugin.")
+    opencode_install = opencode_commands.add_parser(
+        "install", help="Install the package-named skill, Markdown agent, and OpenCode plugin."
+    )
     opencode_install.add_argument("--target", type=Path, default=Path("."))
     opencode_install.add_argument("--python", default=sys.executable)
     opencode_install.add_argument("--force", action="store_true")
-    opencode_install.add_argument("--write-config", action="store_true")
+    opencode_install.add_argument(
+        "--write-agent",
+        "--write-config",
+        dest="write_config",
+        action="store_true",
+        help="Deprecated compatibility option; the Markdown agent is always installed and opencode.json is never touched.",
+    )
     opencode_install.set_defaults(func=_opencode_install)
 
     worker = subcommands.add_parser("worker", help="Serve Protocol v2 NDJSON requests.")
@@ -139,7 +147,7 @@ def _skill_install(args: argparse.Namespace) -> None:
 
 
 def _opencode_install(args: argparse.Namespace) -> None:
-    skill_path, plugin_path, config_path = install_opencode_support(
+    skill_path, plugin_path, agent_path = install_opencode_support(
         args.target,
         python_executable=args.python,
         force=args.force,
@@ -147,8 +155,7 @@ def _opencode_install(args: argparse.Namespace) -> None:
     )
     print(skill_path)
     print(plugin_path)
-    if config_path is not None:
-        print(config_path)
+    print(agent_path)
 
 
 def _worker(args: argparse.Namespace) -> None:
