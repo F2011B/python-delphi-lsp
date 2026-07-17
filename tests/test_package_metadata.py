@@ -67,7 +67,8 @@ def test_readme_documents_v2_release_plugin_protocol_discovery_and_vllm_proof() 
     assert '["delphi-lsp"]' in readme
     assert 'python -m delphi_lsp.lsp_server' in readme
     assert '"autoDiscoverPaths": true' in readme
-    assert '.agents/skills/delphi-codebase-navigator/SKILL.md' in readme
+    assert '.agents/skills/python-delphi-lsp/SKILL.md' in readme
+    assert '.opencode/agents/python-delphi-lsp.md' in readme
     assert '.opencode/plugins/delphi_codebase.ts' in readme
     assert 'Protocol v2' in readme
     assert 'sound_partial' in readme
@@ -78,7 +79,7 @@ def test_readme_documents_v2_release_plugin_protocol_discovery_and_vllm_proof() 
     assert 'Windows' in readme
     assert 'macOS-only' in readme
     assert forbidden not in readme.casefold()
-    assert 'delphi-lsp-agent opencode install --target . --write-config' in readme
+    assert 'delphi-lsp-agent opencode install --target .' in readme
     assert 'Auto-discovery reads `.dpr`, `.dpk`, `.dproj`, `.cfg`, and `.dof` files' in readme
     assert 'no file-size threshold' in readme
     assert 'final answer' in readme

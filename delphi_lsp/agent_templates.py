@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 import json
 import os
@@ -7,14 +8,20 @@ import secrets
 import stat
 
 
-SKILL_NAME = "delphi-codebase-navigator"
+SKILL_NAME = "python-delphi-lsp"
+AGENT_NAME = "python-delphi-lsp"
+_LEGACY_SKILL_NAME = "delphi-codebase-navigator"
+_LEGACY_SKILL_RELATIVE_PATH = Path(".agents") / "skills" / _LEGACY_SKILL_NAME / "SKILL.md"
+_LEGACY_SKILL_SHA256 = "0843d37bd48431c2b992f191b985175a3c60fe5b56d28e0a46b5e18db6383b28"
 _LEGACY_TOOL_RELATIVE_PATH = Path(".opencode") / "tools" / "delphi_codebase.ts"
 
 
 def install_skill(target: str | Path, *, force: bool = False) -> Path:
     target_path = Path(target).expanduser().resolve()
+    legacy_path = _preflight_legacy_skill(target_path, force=force)
     skill_path = target_path / ".agents" / "skills" / SKILL_NAME / "SKILL.md"
     _write_text(skill_path, _skill_markdown(), force=force)
+    _remove_legacy_skill(legacy_path)
     return skill_path
 
 
@@ -24,26 +31,30 @@ def install_opencode_support(
     python_executable: str,
     force: bool = False,
     write_config: bool = False,
-) -> tuple[Path, Path, Path | None]:
+) -> tuple[Path, Path, Path]:
     target_path = Path(target).expanduser().resolve()
     legacy_path = target_path / _LEGACY_TOOL_RELATIVE_PATH
+    legacy_skill_path = _preflight_legacy_skill(target_path, force=force)
     skill_path = target_path / ".agents" / "skills" / SKILL_NAME / "SKILL.md"
     plugin_path = target_path / ".opencode" / "plugins" / "delphi_codebase.ts"
-    config_path = target_path / "opencode.json" if write_config else None
+    agent_path = target_path / ".opencode" / "agents" / f"{AGENT_NAME}.md"
     skill_text = _skill_markdown()
     plugin_text = _opencode_plugin(python_executable)
+    agent_text = _agent_markdown()
 
     legacy_before = _preflight_legacy(legacy_path, force=force)
     snapshots: dict[Path, bytes | None] = {
         legacy_path: legacy_before,
+        **(
+            {legacy_skill_path: legacy_skill_path.read_bytes()}
+            if legacy_skill_path is not None
+            else {}
+        ),
         skill_path: _preflight_destination(skill_path, skill_text, force=force),
         plugin_path: _preflight_destination(plugin_path, plugin_text, force=force),
+        agent_path: _preflight_destination(agent_path, agent_text, force=force),
     }
-    writes = [(skill_path, skill_text), (plugin_path, plugin_text)]
-    if config_path is not None:
-        config_before, config_text = _render_opencode_config(config_path)
-        snapshots[config_path] = config_before
-        writes.append((config_path, config_text))
+    writes = [(skill_path, skill_text), (plugin_path, plugin_text), (agent_path, agent_text)]
 
     try:
         for path, text in writes:
@@ -51,11 +62,39 @@ def install_opencode_support(
                 _write_text(path, text, force=True)
         if legacy_before is not None:
             legacy_path.unlink()
+        _remove_legacy_skill(legacy_skill_path)
     except BaseException:
         for path, content in reversed(tuple(snapshots.items())):
             _restore_file(path, content)
         raise
-    return skill_path, plugin_path, config_path
+    _ = write_config  # Deprecated compatibility input; user configuration is never touched.
+    return skill_path, plugin_path, agent_path
+
+
+def _preflight_legacy_skill(target: Path, *, force: bool) -> Path | None:
+    legacy_path = target / _LEGACY_SKILL_RELATIVE_PATH
+    legacy_path.relative_to(target)
+    _reject_symbolic_link(legacy_path)
+    if not legacy_path.exists():
+        return None
+    if not legacy_path.is_file():
+        raise FileExistsError(f"Legacy skill path is not a file: {legacy_path}")
+    digest = hashlib.sha256(legacy_path.read_bytes()).hexdigest()
+    if digest != _LEGACY_SKILL_SHA256 and not force:
+        raise FileExistsError(
+            f"Refusing to remove modified legacy skill without force: {legacy_path}"
+        )
+    return legacy_path
+
+
+def _remove_legacy_skill(path: Path | None) -> None:
+    if path is None:
+        return
+    path.unlink()
+    try:
+        path.parent.rmdir()
+    except OSError:
+        pass
 
 
 def _preflight_legacy(legacy_path: Path, *, force: bool) -> bytes | None:
@@ -157,13 +196,18 @@ def _write_bytes_atomic(path: Path, content: bytes) -> None:
 
 
 def _reject_symbolic_link(path: Path) -> None:
-    if path.is_symlink():
-        raise FileExistsError(f"Generated destination must not be a symbolic link: {path}")
+    current = path
+    while current != current.parent:
+        if current.is_symlink():
+            raise FileExistsError(
+                f"Generated destination must not contain a symbolic link: {current}"
+            )
+        current = current.parent
 
 
 def _skill_markdown() -> str:
     return """---
-name: delphi-codebase-navigator
+name: python-delphi-lsp
 description: Inspect Delphi and Object Pascal codebases through the Protocol v2 semantic navigator.
 compatibility: opencode
 metadata:
@@ -189,6 +233,39 @@ Prefer `summary` and `declaration`, narrow `max_items` and `max_chars`, and requ
 ## Tool calls
 
 `delphi_codebase` accepts `action` (`open`, `find`, `inspect`, `trace`, `focus`, `problems`, `metrics`), optional `query`, `target_id`, `project_id`, `detail`, `relation`, `cursor`, `max_items` (1-50), and `max_chars` (256-40000). It has no root or path argument; the active OpenCode worktree is used.
+"""
+
+
+def _agent_markdown() -> str:
+    return """---
+description: Inspect Delphi and Object Pascal codebases through python-delphi-lsp.
+mode: subagent
+temperature: 0
+tools:
+  delphi_codebase: true
+  skill: true
+  lsp: false
+  bash: false
+  read: false
+  glob: false
+  grep: false
+  edit: false
+  write: false
+  task: false
+  webfetch: false
+  todowrite: false
+permission:
+  "*": deny
+  delphi_codebase: allow
+  skill:
+    "*": deny
+    python-delphi-lsp: allow
+---
+
+Load `python-delphi-lsp` first, then use only `delphi_codebase` for Delphi and
+Object Pascal codebase inspection. Do not use `lsp`, `bash`, `read`, `glob`,
+`grep`, `edit`, `write`, `task`, `webfetch`, or `todowrite`. Preserve returned
+citations exactly and report partial or ambiguous semantic evidence explicitly.
 """
 
 
@@ -523,58 +600,6 @@ export const DelphiCodebasePlugin: Plugin = async (_input) => {
 }
 '''
     return template.replace("__PYTHON_EXECUTABLE__", python_json)
-
-
-def _render_opencode_config(config_path: Path) -> tuple[bytes | None, str]:
-    _reject_symbolic_link(config_path)
-    if config_path.exists():
-        if not config_path.is_file():
-            raise ValueError(f"opencode config path is not a file: {config_path}")
-        config_before = config_path.read_bytes()
-        config = json.loads(config_before.decode("utf-8"))
-    else:
-        config_before = None
-        config = {"$schema": "https://opencode.ai/config.json"}
-    if not isinstance(config, dict):
-        raise ValueError("opencode config must be a JSON object")
-    if "agent" not in config:
-        agents = {}
-        config["agent"] = agents
-    else:
-        agents = config["agent"]
-    if not isinstance(agents, dict):
-        raise ValueError("opencode config field 'agent' must be a JSON object")
-    agents["vllm-delphi-codebase"] = {
-        "description": "Use the Delphi codebase navigator skill and plugin without direct filesystem source inspection.",
-        "temperature": 0,
-        "prompt": (
-            "load delphi-codebase-navigator first, then use only delphi_codebase for Delphi/Object Pascal "
-            "codebase inspection. Do not use lsp, bash, read, glob, grep, edit, write, task, webfetch, or todowrite."
-        ),
-        "tools": {
-            "delphi_codebase": True,
-            "skill": True,
-            "lsp": False,
-            "bash": False,
-            "read": False,
-            "glob": False,
-            "grep": False,
-            "edit": False,
-            "write": False,
-            "task": False,
-            "webfetch": False,
-            "todowrite": False,
-        },
-        "permission": {
-            "delphi_codebase": "allow",
-            "skill": {
-                "*": "deny",
-                SKILL_NAME: "allow",
-            },
-            "lsp": "deny",
-        },
-    }
-    return config_before, json.dumps(config, indent=2, sort_keys=True) + "\n"
 
 
 __all__ = ["SKILL_NAME", "install_opencode_support", "install_skill"]

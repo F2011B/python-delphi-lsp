@@ -356,7 +356,7 @@ def test_run_probe_waits_for_required_final_response_after_tools(tmp_path, capsy
     args = Namespace(
         title='final-response-test',
         model='vllm/ornith-lspctx',
-        agent='vllm-delphi-codebase',
+        agent='python-delphi-lsp',
         prompt='inspect and explain',
         cwd=str(ROOT),
         output=str(tmp_path / 'probe.jsonl'),

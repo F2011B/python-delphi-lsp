@@ -36,21 +36,12 @@ def test_writes_codebase_skill_sandbox_with_project_paths(tmp_path: Path) -> Non
     assert (tmp_path / "Main.dproj").exists()
     assert (tmp_path / "src" / "Mega100kUnit.pas").exists()
     assert (tmp_path / "include" / "build.inc").exists()
-    assert (tmp_path / ".agents" / "skills" / "delphi-codebase-navigator" / "SKILL.md").exists()
+    assert (tmp_path / ".agents" / "skills" / "python-delphi-lsp" / "SKILL.md").exists()
     assert (tmp_path / ".opencode" / "plugins" / "delphi_codebase.ts").exists()
+    assert (tmp_path / ".opencode" / "agents" / "python-delphi-lsp.md").exists()
     assert not (tmp_path / ".opencode" / "tools" / "delphi_codebase.ts").exists()
     config = (tmp_path / "opencode.json").read_text(encoding="utf-8")
-    assert "vllm-delphi-codebase" in config
-    assert '"delphi_codebase": true' in config
-    assert '"skill": true' in config
-    assert '"lsp": false' in config
-    assert '"delphi_codebase": "allow"' in config
-    assert '"skill": {' in config
-    assert '"*": "deny"' in config
-    assert '"delphi-codebase-navigator": "allow"' in config
-    assert '"temperature": 0' in config
-    assert "load delphi-codebase-navigator first" in config
-    assert '"read": false' in config
+    assert "python-delphi-lsp" not in config
     parsed_config = json.loads(config)
     assert "env" not in parsed_config["lsp"]["delphi"]
     assert "PYTHONPATH" not in config
@@ -119,8 +110,8 @@ def test_probe_command_requires_delphi_codebase_tool_and_forbids_raw_tools(tmp_p
 
     assert command[:2] == [str(python_exe), str(ROOT / "scripts" / "run_opencode_lsp_probe.py")]
     assert "vllm/ornith-lspctx" in command
-    assert "vllm-delphi-codebase" in command
-    assert "skill:delphi-codebase-navigator" in command
+    assert "python-delphi-lsp" in command
+    assert "skill:python-delphi-lsp" in command
     assert "delphi_codebase.open:Main.dpr" in command
     assert "delphi_codebase.open:Main.dpr" in command
     assert "delphi_codebase.find:MegaProc02500" in command
@@ -128,7 +119,7 @@ def test_probe_command_requires_delphi_codebase_tool_and_forbids_raw_tools(tmp_p
     assert "delphi_codebase.inspect:Value := Value + 40" in command
     required_final = [command[index + 1] for index, item in enumerate(command) if item == "--require-final"]
     assert {"src/Mega100kUnit.pas:117464-117509", "Value := Value + 40"}.issubset(set(required_final))
-    assert "load the delphi-codebase-navigator skill" in command[-1]
+    assert "load the python-delphi-lsp skill" in command[-1]
     assert "action open" in command[-1]
     assert "action find" in command[-1]
     assert "action focus" in command[-1]
@@ -171,7 +162,7 @@ def test_metrics_probe_requires_exact_model_answer_and_forbids_raw_tools(tmp_pat
         timeout=120,
     )
 
-    assert "skill:delphi-codebase-navigator" in command
+    assert "skill:python-delphi-lsp" in command
     assert 'delphi_codebase.metrics:"total_loc":34' in command
     assert 'delphi_codebase.metrics:"routines"' in command
     required_final = [command[index + 1] for index, item in enumerate(command) if item == "--require-final"]
