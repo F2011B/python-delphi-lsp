@@ -2,7 +2,7 @@
 
 `python-delphi-lsp` parses Delphi/Object Pascal, builds semantic and project
 indexes, serves LSP, and provides bounded codebase navigation for agents.
-Version 2.0.2 is authored by Dark Light and supports Windows, macOS, and Linux.
+Version 2.0.3 is authored by Dark Light and supports Windows, macOS, and Linux.
 
 ## Install and quick start
 
