@@ -15,13 +15,12 @@ from .agent_protocol import (
     AgentResponse,
     ContextBudget,
     Focus,
-    Page,
     make_target_id,
     paginate_items,
 )
 from .agent_metrics import build_workspace_metrics, project_metric_item, unit_metric_item
 from .agent_relations import ProjectRelationIndex, RelationTarget
-from .agent_workspace import AgentWorkspace, unit_display_path, unit_source_path, unit_target_id
+from .agent_workspace import AgentUnit, AgentWorkspace, unit_display_path, unit_source_path, unit_target_id
 from .consts import AttributeName, SyntaxNodeType
 from .lsp_server import build_outline_semantic_model, multiline_string_block_end
 from .nodes import CompoundSyntaxNode, SyntaxNode
@@ -122,6 +121,10 @@ class _SourceDocument:
         self.tokens = tuple(_lex_delphi(text))
         self.token_starts = tuple(token.start for token in self.tokens)
         self.directive_starts = tuple(token.start for token in self.tokens if token.directive)
+        self.declaration_section_indexes = [0]
+        self.declaration_section_checkpoints: dict[int, tuple[str, int, int, int]] = {
+            0: ("", 0, 0, 0)
+        }
         words = [token for token in self.tokens if token.word and not token.escaped]
         self.unit_kind = next(
             (token.value for token in words if token.value in {"unit", "program", "library", "package"}),
@@ -232,6 +235,7 @@ class _Registry:
     entries: tuple[_SymbolEntry, ...]
     by_target: dict[str, _SymbolEntry]
     sources: dict[Path, _SourceDocument]
+    ranked_queries: dict[str, tuple[_SymbolEntry, ...]]
 
 
 class AgentContext:
@@ -282,7 +286,12 @@ class AgentContext:
             return self._handle_focus(parsed, revision)
         if parsed.action == "find":
             registry = self._require_registry(revision)
-            items = [entry.card() for entry in _ranked_entries(registry.entries, parsed.query)]
+            ranked = registry.ranked_queries.get(parsed.query)
+            if ranked is None:
+                ranked = tuple(_ranked_entries(registry.entries, parsed.query))
+                registry.ranked_queries.clear()
+                registry.ranked_queries[parsed.query] = ranked
+            items = [entry.card() for entry in ranked]
             return self._response(parsed, revision, items)
         if parsed.action == "inspect":
             registry = self._require_registry(revision)
@@ -295,9 +304,10 @@ class AgentContext:
         previous_project_id = self._workspace.active_project_id
         selected_project_id = requested_project_id or previous_project_id
         if selected_project_id:
-            self._workspace.select_project(selected_project_id)
+            revision = self._workspace._select_project_with_revision(selected_project_id)
+        else:
+            revision = self._workspace.workspace_revision
         current_project_id = self._workspace.active_project_id
-        revision = self._workspace.workspace_revision
 
         if current_project_id != previous_project_id:
             self._registry = None
@@ -784,6 +794,7 @@ def _build_registry(workspace: AgentWorkspace, project_id: str, revision: str) -
         entries=entries_tuple,
         by_target={entry.target_id: entry for entry in entries_tuple},
         sources=sources,
+        ranked_queries={},
     )
 
 
@@ -927,32 +938,47 @@ def _correct_outline_symbol_kind(document: _SourceDocument, symbol: Symbol) -> N
         symbol.kind = SymbolKind.TYPE
 
 
+def _advance_declaration_section(
+    state: tuple[str, int, int, int],
+    token: _Token,
+) -> tuple[str, int, int, int]:
+    section, parentheses, brackets, angles = state
+    if token.directive:
+        return state
+    if token.value == "(":
+        parentheses += 1
+    elif token.value == ")":
+        parentheses = max(0, parentheses - 1)
+    elif token.value == "[":
+        brackets += 1
+    elif token.value == "]":
+        brackets = max(0, brackets - 1)
+    elif token.value == "<":
+        angles += 1
+    elif token.value == ">":
+        angles = max(0, angles - 1)
+    elif not parentheses and not brackets and not angles and token.word:
+        if token.value in {"const", "resourcestring", "threadvar", "type", "var"}:
+            section = token.value
+        elif token.value in {"implementation", "initialization", "finalization"}:
+            section = ""
+    return section, parentheses, brackets, angles
+
+
 def _declaration_section(document: _SourceDocument, offset: int) -> str:
-    section = ""
-    parentheses = 0
-    brackets = 0
-    angles = 0
-    for token in document.tokens[:document.first_token_index(offset)]:
-        if token.directive:
-            continue
-        if token.value == "(":
-            parentheses += 1
-        elif token.value == ")":
-            parentheses = max(0, parentheses - 1)
-        elif token.value == "[":
-            brackets += 1
-        elif token.value == "]":
-            brackets = max(0, brackets - 1)
-        elif token.value == "<":
-            angles += 1
-        elif token.value == ">":
-            angles = max(0, angles - 1)
-        elif not any((parentheses, brackets, angles)) and token.word:
-            if token.value in {"const", "resourcestring", "threadvar", "type", "var"}:
-                section = token.value
-            elif token.value in {"implementation", "initialization", "finalization"}:
-                section = ""
-    return section
+    target_index = document.first_token_index(offset)
+    cached = document.declaration_section_checkpoints.get(target_index)
+    if cached is not None:
+        return cached[0]
+    checkpoint_position = bisect_right(document.declaration_section_indexes, target_index) - 1
+    checkpoint_index = document.declaration_section_indexes[checkpoint_position]
+    state = document.declaration_section_checkpoints[checkpoint_index]
+    for token in document.tokens[checkpoint_index:target_index]:
+        state = _advance_declaration_section(state, token)
+    insert_at = bisect_left(document.declaration_section_indexes, target_index)
+    document.declaration_section_indexes.insert(insert_at, target_index)
+    document.declaration_section_checkpoints[target_index] = state
+    return state[0]
 
 
 def _declared_symbol_name(document: _SourceDocument, symbol: Symbol) -> str:

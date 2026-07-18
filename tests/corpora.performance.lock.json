@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "target_lines": 2000000,
+  "vendor_corpora": false,
+  "policy": "Metadata only. Acquisition is explicit and corpus files never enter distributions.",
+  "corpora": [
+    {
+      "name": "mormot2",
+      "repository": "https://github.com/synopse/mORMot2.git",
+      "revision": "58b4e9a8ca1e292d6beb89bb3ad05d3826f314f6",
+      "paths": ["src"],
+      "extensions": [".pas", ".inc"],
+      "anchors": [
+        "src/core/mormot.core.log.pas"
+      ]
+    },
+    {
+      "name": "DUnitX",
+      "repository": "https://github.com/VSoftTechnologies/DUnitX.git",
+      "revision": "dca41c181b1a7a8d4c45c51ed6946da6d326d293",
+      "paths": ["Source"],
+      "extensions": [".pas", ".inc"],
+      "anchors": [
+        "Source/DUnitX.TestFramework.pas"
+      ]
+    },
+    {
+      "name": "DelphiAST",
+      "repository": "https://github.com/RomanYankovsky/DelphiAST.git",
+      "revision": "38402535ad6018b981f08920836aac99b554cb86",
+      "paths": ["Source"],
+      "extensions": [".pas", ".inc"],
+      "anchors": [
+        "Source/DelphiAST.pas"
+      ]
+    },
+    {
+      "name": "python4delphi",
+      "repository": "https://github.com/lmbelo/python4delphi.git",
+      "revision": "d02e0fbecc65c104837ae1f103148044ef6e6f61",
+      "paths": ["Source"],
+      "extensions": [".pas", ".inc"],
+      "anchors": [
+        "Source/PythonEngine.pas"
+      ]
+    },
+    {
+      "name": "FPCSource",
+      "repository": "https://github.com/fpc/FPCSource.git",
+      "revision": "a8e7ad4e2f2f6d3bdc240850075d85e659a42ff8",
+      "paths": ["."],
+      "extensions": [".pas", ".inc"],
+      "anchors": []
+    },
+    {
+      "name": "castle-engine",
+      "repository": "https://github.com/castle-engine/castle-engine.git",
+      "revision": "a28b45bc1bd9f6bda7376e83a34bf71eea45b023",
+      "paths": ["src", "tools"],
+      "extensions": [".pas", ".inc"],
+      "anchors": [
+        "src/base/castlelog.pas"
+      ]
+    }
+  ]
+}

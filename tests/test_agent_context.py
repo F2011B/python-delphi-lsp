@@ -9,6 +9,7 @@ import unicodedata
 import pytest
 
 import delphi_lsp.agent_context as agent_context_module
+import delphi_lsp.agent_workspace as agent_workspace_module
 from delphi_lsp.agent_context import AgentContext
 from delphi_lsp.agent_protocol import AgentProtocolError, AgentRequest, AgentResponse, Focus
 
@@ -191,6 +192,86 @@ def test_find_uses_only_active_units_and_reads_each_original_once(
     assert all(Path(file_name).is_absolute() for _, file_name in calls)
     assert sorted(path.name for path in read_calls) == ["Main.dpr", "Selected.pas"]
     assert all(path.is_absolute() for path in read_calls)
+
+
+def test_repeated_find_reuses_ranked_registry_entries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_source(
+        tmp_path / "RepeatedFind.pas",
+        """
+        unit RepeatedFind;
+        interface
+        procedure Target;
+        implementation
+        end.
+        """,
+    )
+    context = AgentContext.open(tmp_path)
+    calls = 0
+    real_ranked_entries = agent_context_module._ranked_entries
+
+    def counted_ranked_entries(entries: object, query: str):
+        nonlocal calls
+        calls += 1
+        return real_ranked_entries(entries, query)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(agent_context_module, "_ranked_entries", counted_ranked_entries)
+
+    first = context.handle({"action": "find", "query": "Target"})
+    second = context.handle({"action": "find", "query": "Target"})
+
+    assert result_items(second) == result_items(first)
+    assert calls == 1
+
+
+def test_request_refreshes_the_selected_workspace_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_source(tmp_path / "Main.dpr", "program Main; begin end.")
+    context = AgentContext.open(tmp_path)
+    assert context.workspace.select_project(context.workspace.active_project_id) is None
+    calls = 0
+    real_discover = agent_workspace_module.discover_delphi_project
+
+    def counted_discover(*args: object, **kwargs: object):
+        nonlocal calls
+        calls += 1
+        return real_discover(*args, **kwargs)
+
+    monkeypatch.setattr(agent_workspace_module, "discover_delphi_project", counted_discover)
+
+    context.handle({"action": "find", "query": "Main"})
+
+    assert calls == 1
+
+
+def test_declaration_section_queries_scan_each_token_at_most_once_in_source_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    declarations = "\n".join(
+        f"TSection{index:04d} = record Value: Integer; end;" for index in range(500)
+    )
+    source = f"unit Sections;\ninterface\ntype\n{declarations}\nimplementation\nend.\n"
+    document = agent_context_module._SourceDocument(tmp_path / "Sections.pas", "Sections.pas", source)
+    visits = 0
+    real_advance = agent_context_module._advance_declaration_section
+
+    def counted_advance(state: object, token: object):
+        nonlocal visits
+        visits += 1
+        return real_advance(state, token)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(agent_context_module, "_advance_declaration_section", counted_advance)
+
+    for index in range(500):
+        offset = source.index(f"TSection{index:04d}")
+        assert agent_context_module._declaration_section(document, offset) == "type"
+
+    assert visits <= len(document.tokens)
 
 
 def test_find_ranks_exact_then_prefix_then_substring_and_has_stable_overload_ids(tmp_path: Path) -> None:
