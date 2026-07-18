@@ -150,4 +150,3 @@ Install the wheel in a new virtual environment outside the checkout, run imports
 - [ ] **Step 3: Publish only on complete green**
 
 Upload 2.0.3 to PyPI only when every recorded gate is green. Verify both PyPI JSON and Simple index, then install 2.0.3 from public PyPI in another clean environment and rerun the smoke test. Do not upload if any gate is failed, skipped, unavailable, or stale.
-

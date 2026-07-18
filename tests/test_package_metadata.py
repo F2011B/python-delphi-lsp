@@ -135,4 +135,7 @@ def test_sdist_includes_files_required_by_packaged_tests() -> None:
     assert 'include scripts/bootstrap_vllm_codebase_skill_test.py' in manifest
     assert 'include scripts/generate_release_evidence.py' in manifest
     assert 'include scripts/audit_delphi_language_features.py' in manifest
+    assert 'include scripts/build_github_performance_corpus.py' in manifest
+    assert 'include scripts/benchmark_github_corpus.py' in manifest
     assert 'include scripts/ollama/ornith-lspctx.Modelfile' in manifest
+    assert 'include tests/corpora.performance.lock.json' in manifest

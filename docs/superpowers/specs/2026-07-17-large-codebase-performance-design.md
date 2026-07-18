@@ -45,4 +45,3 @@ The OpenCode E2E uses `openrouter/google/gemma-4-31b-it` and the installed `pyth
 ## Release contract
 
 Version 2.0.3 is built from the committed source. A clean virtual environment installs the wheel, runs package smoke tests, installs the OpenCode integration into an isolated home, and reruns the real OpenRouter E2E against the two-million-line corpus. PyPI upload is allowed only if unit, integration, performance, package-content, fresh-install, and model E2E gates all pass. A failed or unavailable external gate leaves the release unpublished.
-
