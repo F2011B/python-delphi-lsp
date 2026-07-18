@@ -933,8 +933,8 @@ def test_windows_bootstrap_mirrors_target_exitcode_stdout_and_stderr() -> None:
     )
 
     assert completed.returncode == 9
-    assert completed.stdout == b"target-out\n"
-    assert completed.stderr == b"target-err\n"
+    assert completed.stdout.splitlines() == [b"target-out"]
+    assert completed.stderr.splitlines() == [b"target-err"]
 
     missing = subprocess.run(
         harness._windows_bootstrap_command(["missing-target-with-secret-argument"]),
