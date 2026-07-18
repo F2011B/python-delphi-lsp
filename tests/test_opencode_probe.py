@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import signal
 import sys
 import time
 from argparse import Namespace
@@ -59,46 +60,67 @@ def test_build_opencode_command_accepts_explicit_agent() -> None:
     assert command[command.index('--model') + 1] == 'vllm/ornith-lspctx'
 
 
+def test_build_opencode_command_accepts_explicit_binary() -> None:
+    probe = _load_probe_module()
+
+    command = probe.build_opencode_command(
+        opencode='/opt/release/opencode',
+        title='release-gate',
+        model='openrouter/google/gemma-4-31b-it',
+        agent='python-delphi-lsp',
+        cwd=str(ROOT),
+        prompt='use the semantic tools',
+    )
+
+    assert command[0] == '/opt/release/opencode'
+
+
 def test_probe_uses_portable_threaded_stdout_and_process_shutdown() -> None:
     script = SCRIPT.read_text(encoding='utf-8')
 
     assert 'import selectors' not in script
-    assert 'import signal' not in script
-    assert 'signal.SIGTERM' not in script
+    assert 'import signal' in script
+    assert 'signal.SIGTERM' in script
+    assert 'os.killpg' in script
+    assert 'start_new_session=not inherit_process_group' in script
     assert 'threading.Thread' in script
     assert 'queue.Queue' in script
-    assert 'proc.terminate()' in script
-    assert 'proc.kill()' in script
 
 
-def test_stop_process_kills_process_that_ignores_terminate() -> None:
+def test_stop_process_kills_group_even_when_leader_already_exited(monkeypatch) -> None:
     probe = _load_probe_module()
+    group_alive = True
+    signals: list[int] = []
 
     class StubbornProcess:
-        def __init__(self) -> None:
-            self.terminated = False
-            self.killed = False
+        pid = 4141
 
         def poll(self):
-            return None
-
-        def terminate(self) -> None:
-            self.terminated = True
+            return 0
 
         def wait(self, timeout=None):
-            if not self.killed:
-                raise probe.subprocess.TimeoutExpired('opencode', timeout)
-            return 1
+            del timeout
+            return 0
 
-        def kill(self) -> None:
-            self.killed = True
+    def fake_killpg(pid: int, sig: int) -> None:
+        nonlocal group_alive
+        assert pid == 4141
+        if sig == 0:
+            if not group_alive:
+                raise ProcessLookupError
+            return
+        signals.append(sig)
+        if sig == signal.SIGKILL:
+            group_alive = False
+
+    monkeypatch.setattr(probe.os, 'killpg', fake_killpg)
 
     process = StubbornProcess()
 
     probe._stop_process(process, timeout=0.01)
 
-    assert process.terminated is True
-    assert process.killed is True
+    assert signals == [signal.SIGTERM, signal.SIGKILL]
+    assert group_alive is False
 
 
 def test_evidence_from_jsonl_extracts_completed_lsp_tool_timing() -> None:
@@ -298,8 +320,7 @@ def test_run_probe_waits_until_all_required_tools_are_seen(tmp_path) -> None:
             f'lines = {event_lines!r}; '
             'print(lines[0], flush=True); '
             'time.sleep(0.1); '
-            'print(lines[1], flush=True); '
-            'time.sleep(5)'
+            'print(lines[1], flush=True)'
         ),
     ]
     args = Namespace(
@@ -413,8 +434,7 @@ def test_run_probe_rejects_forbidden_tools_before_required_evidence(tmp_path) ->
             f'lines = {event_lines!r}; '
             'print(lines[0], flush=True); '
             'time.sleep(0.1); '
-            'print(lines[1], flush=True); '
-            'time.sleep(5)'
+            'print(lines[1], flush=True)'
         ),
     ]
     args = Namespace(
@@ -434,8 +454,156 @@ def test_run_probe_rejects_forbidden_tools_before_required_evidence(tmp_path) ->
 
     assert result == 2
     lines = (tmp_path / 'probe.jsonl').read_text(encoding='utf-8').splitlines()
-    assert len(lines) == 1
+    assert len(lines) == 2
     assert json.loads(lines[0])['part']['tool'] == 'bash'
+
+
+def test_run_probe_rejects_forbidden_tool_after_matching_final(tmp_path) -> None:
+    probe = _load_probe_module()
+    required = {
+        'type': 'tool_use',
+        'part': {
+            'tool': 'lsp',
+            'state': {
+                'status': 'completed',
+                'input': {'operation': 'workspaceSymbol'},
+                'output': 'MegaProc02500',
+            },
+        },
+    }
+    final = {'type': 'text', 'part': {'text': 'MegaProc02500 found.'}}
+    forbidden = {
+        'type': 'tool_use',
+        'part': {
+            'tool': 'bash',
+            'state': {
+                'status': 'completed',
+                'input': {'command': 'cat source'},
+                'output': 'source',
+            },
+        },
+    }
+    lines = [json.dumps(event) for event in (required, final, forbidden)]
+    probe.build_opencode_command = lambda **_kwargs: [
+        sys.executable,
+        '-c',
+        f'lines={lines!r}; [print(line, flush=True) for line in lines]',
+    ]
+    output = tmp_path / 'late-forbidden.jsonl'
+    args = Namespace(
+        title='late-forbidden',
+        model='test/model',
+        prompt='probe',
+        cwd=str(tmp_path),
+        output=str(output),
+        timeout=2.0,
+        tool='lsp',
+        expected='MegaProc02500',
+        require_tool=None,
+        require_final=['MegaProc02500'],
+        forbid_tool=['bash'],
+    )
+
+    result = probe.run_probe(args)
+
+    assert result == 2
+    assert len(output.read_text(encoding='utf-8').splitlines()) == 3
+
+
+def test_run_probe_rejects_additional_tool_in_exact_mode(tmp_path) -> None:
+    probe = _load_probe_module()
+    events = [
+        {
+            'type': 'tool_use',
+            'part': {
+                'tool': 'lsp',
+                'state': {
+                    'status': 'completed',
+                    'input': {'operation': 'workspaceSymbol'},
+                    'output': 'MegaProc02500',
+                },
+            },
+        },
+        {'type': 'text', 'part': {'text': 'MegaProc02500 found.'}},
+        {
+            'type': 'tool_use',
+            'part': {
+                'tool': 'edit',
+                'state': {
+                    'status': 'completed',
+                    'input': {'filePath': 'x'},
+                    'output': 'changed',
+                },
+            },
+        },
+    ]
+    lines = [json.dumps(event) for event in events]
+    probe.build_opencode_command = lambda **_kwargs: [
+        sys.executable,
+        '-c',
+        f'lines={lines!r}; [print(line, flush=True) for line in lines]',
+    ]
+    args = Namespace(
+        title='late-extra',
+        model='test/model',
+        prompt='probe',
+        cwd=str(tmp_path),
+        output=None,
+        timeout=2.0,
+        tool='lsp',
+        expected='MegaProc02500',
+        require_tool=['lsp.workspaceSymbol:MegaProc02500'],
+        require_final=['MegaProc02500'],
+        forbid_tool=[],
+        exact_tools=True,
+    )
+
+    assert probe.run_probe(args) == 2
+
+
+def test_run_probe_waits_for_normal_completion_after_final(tmp_path) -> None:
+    probe = _load_probe_module()
+    marker = tmp_path / 'completed'
+    event = json.dumps(
+        {
+            'type': 'tool_use',
+            'part': {
+                'tool': 'lsp',
+                'state': {
+                    'status': 'completed',
+                    'input': {'operation': 'workspaceSymbol'},
+                    'output': 'MegaProc02500',
+                },
+            },
+        }
+    )
+    final = json.dumps({'type': 'text', 'part': {'text': 'MegaProc02500 found.'}})
+    probe.build_opencode_command = lambda **_kwargs: [
+        sys.executable,
+        '-c',
+        (
+            'import pathlib,time; '
+            f'print({event!r}, flush=True); print({final!r}, flush=True); '
+            'time.sleep(0.15); '
+            f'pathlib.Path({str(marker)!r}).write_text("done")'
+        ),
+    ]
+    args = Namespace(
+        title='normal-completion',
+        model='test/model',
+        prompt='probe',
+        cwd=str(tmp_path),
+        output=None,
+        timeout=2.0,
+        tool='lsp',
+        expected='MegaProc02500',
+        require_tool=None,
+        require_final=['MegaProc02500'],
+        forbid_tool=[],
+    )
+
+    assert probe.run_probe(args) == 0
+    assert marker.read_text(encoding='utf-8') == 'done'
 
 
 def test_run_probe_timeout_is_not_blocked_waiting_for_first_output(tmp_path) -> None:

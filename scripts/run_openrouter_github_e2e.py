@@ -6,10 +6,14 @@ import hashlib
 import json
 import os
 import re
+import signal
+import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from time import monotonic, sleep
 from typing import Any, Iterable, Sequence
 
 
@@ -17,7 +21,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PROBE = REPO_ROOT / "scripts" / "run_opencode_lsp_probe.py"
 DEFAULT_MODEL = "openrouter/google/gemma-4-31b-it"
 DEFAULT_AGENT = "python-delphi-lsp"
+DEFAULT_OPENCODE = "opencode"
+DEFAULT_OPENCODE_VERSION = "1.17.18"
 FORBIDDEN_TOOLS = ("bash", "read", "grep", "glob", "list", "invalid")
+_SECRET_KEY = re.compile(
+    r"(?:api[_-]?key|authorization|credential|password|secret|token)",
+    re.IGNORECASE,
+)
 
 
 class E2EValidationError(RuntimeError):
@@ -56,6 +66,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--target-line", required=True, type=int)
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--agent", default=DEFAULT_AGENT)
+    parser.add_argument("--opencode", default=DEFAULT_OPENCODE)
+    parser.add_argument("--expected-opencode-version", default=DEFAULT_OPENCODE_VERSION)
     parser.add_argument("--timeout", default=300.0, type=float)
     parser.add_argument("--probe-script", default=DEFAULT_PROBE, type=Path)
     parser.add_argument("--python", dest="python_executable", default=sys.executable)
@@ -64,6 +76,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--xdg-state-home", type=Path)
     parser.add_argument("--npm-cache", type=Path)
     parser.add_argument("--raw-jsonl", default="opencode.jsonl")
+    parser.add_argument("--session-export-json", default="session-export.json")
     parser.add_argument("--summary-json", default="summary.json")
     return parser.parse_args(argv)
 
@@ -90,12 +103,16 @@ def build_probe_command(args: argparse.Namespace, raw_jsonl: Path) -> list[str]:
         args.model,
         "--agent",
         args.agent,
+        "--opencode",
+        args.opencode,
+        "--inherit-process-group",
         "--title",
         "python-delphi-lsp-github-2m-openrouter",
         "--timeout",
         str(args.timeout),
         "--output",
         str(raw_jsonl),
+        "--exact-tools",
         "--require-tool",
         "skill:python-delphi-lsp",
         "--require-tool",
@@ -258,6 +275,8 @@ def _result_records(payload: dict[str, Any], action: str) -> list[dict[str, Any]
 def validate_transcript(
     events: Iterable[dict[str, Any]],
     target: TargetEvidence,
+    *,
+    expected_agent: str = DEFAULT_AGENT,
 ) -> TranscriptEvidence:
     materialized = list(events)
     parts = _tool_parts(materialized)
@@ -277,9 +296,9 @@ def validate_transcript(
     elapsed_by_action: dict[str, int | None] = {}
 
     skill_input, skill_output, elapsed = _state(parts[0][1], "skill")
-    if skill_input.get("name") != DEFAULT_AGENT:
+    if skill_input.get("name") != expected_agent:
         raise E2EValidationError("skill call must load python-delphi-lsp")
-    if DEFAULT_AGENT not in skill_output:
+    if expected_agent not in skill_output:
         raise E2EValidationError("skill output does not prove python-delphi-lsp was loaded")
     actual_actions.append("skill")
     elapsed_by_action["skill"] = elapsed
@@ -363,6 +382,177 @@ def validate_transcript(
     )
 
 
+def _is_error_event(value: Any) -> bool:
+    if isinstance(value, list):
+        return any(_is_error_event(item) for item in value)
+    if not isinstance(value, dict):
+        return False
+    if value.get("type") == "error":
+        return True
+    if value.get("finish") == "error" or value.get("reason") == "error":
+        return True
+    if value.get("error") not in (None, False, "", {}):
+        return True
+    return any(_is_error_event(item) for item in value.values())
+
+
+def _session_ids(value: Any) -> set[str]:
+    if isinstance(value, list):
+        result: set[str] = set()
+        for item in value:
+            result.update(_session_ids(item))
+        return result
+    if not isinstance(value, dict):
+        return set()
+    result = {
+        item
+        for key, item in value.items()
+        if key == "sessionID" and isinstance(item, str) and item
+    }
+    for item in value.values():
+        result.update(_session_ids(item))
+    return result
+
+
+def validate_stream(events: Iterable[dict[str, Any]]) -> str:
+    materialized = list(events)
+    session_ids = _session_ids(materialized)
+    if len(session_ids) != 1 or any(
+        not isinstance(event, dict) or event.get("sessionID") not in session_ids
+        for event in materialized
+    ):
+        raise E2EValidationError("transcript must contain exactly one sessionID on every event")
+    if _is_error_event(materialized):
+        raise E2EValidationError("transcript contains an error event")
+    return next(iter(session_ids))
+
+
+def _model_identity(model: str) -> tuple[str, str]:
+    provider, separator, model_id = model.partition("/")
+    if not separator or not provider or not model_id:
+        raise E2EValidationError("model must use provider/model format")
+    return provider, model_id
+
+
+def validate_session_export(
+    payload: Any,
+    *,
+    session_id: str,
+    target: TargetEvidence,
+    expected_version: str,
+    expected_agent: str,
+    expected_model: str,
+) -> TranscriptEvidence:
+    if not isinstance(payload, dict):
+        raise E2EValidationError("OpenCode session export is not an object")
+    if _is_error_event(payload):
+        raise E2EValidationError("OpenCode session export contains an error event")
+    info = payload.get("info")
+    if not isinstance(info, dict):
+        raise E2EValidationError("OpenCode session export has no info object")
+    if info.get("id") != session_id:
+        raise E2EValidationError("OpenCode session export ID does not match the transcript sessionID")
+    if _session_ids(payload) != {session_id}:
+        raise E2EValidationError("OpenCode session export contains another sessionID")
+    if info.get("version") != expected_version:
+        raise E2EValidationError(
+            f"OpenCode session version must be exactly {expected_version}"
+        )
+    if info.get("agent") != expected_agent:
+        raise E2EValidationError(f"OpenCode session agent must be exactly {expected_agent}")
+    expected_provider, expected_model_id = _model_identity(expected_model)
+    model = info.get("model")
+    if not isinstance(model, dict) or model.get("providerID") != expected_provider:
+        raise E2EValidationError(
+            f"OpenCode session provider must be exactly {expected_provider}"
+        )
+    if model.get("id") != expected_model_id:
+        raise E2EValidationError(
+            f"OpenCode session model must be exactly {expected_model_id}"
+        )
+
+    messages = payload.get("messages")
+    if not isinstance(messages, list) or not messages:
+        raise E2EValidationError("OpenCode session export has no messages")
+    last_message = messages[-1]
+    last_info = last_message.get("info") if isinstance(last_message, dict) else None
+    if (
+        not isinstance(last_info, dict)
+        or last_info.get("role") != "assistant"
+        or last_info.get("finish") != "stop"
+    ):
+        raise E2EValidationError(
+            "OpenCode messages[-1] must be the sole assistant terminal finish=stop response"
+        )
+    assistant_infos: list[dict[str, Any]] = []
+    transcript_events: list[dict[str, Any]] = []
+    terminal_texts: list[str] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            raise E2EValidationError("OpenCode session export contains an invalid message")
+        message_info = message.get("info")
+        parts = message.get("parts")
+        if not isinstance(message_info, dict) or not isinstance(parts, list):
+            raise E2EValidationError("OpenCode session export message is incomplete")
+        if message_info.get("sessionID") != session_id:
+            raise E2EValidationError("OpenCode session export contains another sessionID")
+        role = message_info.get("role")
+        if role == "user":
+            user_model = message_info.get("model")
+            if message_info.get("agent") != expected_agent:
+                raise E2EValidationError("OpenCode user message has an unexpected agent")
+            if (
+                not isinstance(user_model, dict)
+                or user_model.get("providerID") != expected_provider
+                or user_model.get("modelID") != expected_model_id
+            ):
+                raise E2EValidationError("OpenCode user message has an unexpected provider or model")
+        elif role == "assistant":
+            assistant_infos.append(message_info)
+            if message_info.get("agent") != expected_agent or message_info.get("mode") != expected_agent:
+                raise E2EValidationError("OpenCode assistant message has an unexpected agent")
+            if (
+                message_info.get("providerID") != expected_provider
+                or message_info.get("modelID") != expected_model_id
+            ):
+                raise E2EValidationError(
+                    "OpenCode assistant message has an unexpected provider or model"
+                )
+            for part in parts:
+                if not isinstance(part, dict):
+                    raise E2EValidationError("OpenCode session export contains an invalid part")
+                if part.get("sessionID") != session_id:
+                    raise E2EValidationError("OpenCode session export part has another sessionID")
+                if part.get("type") == "tool":
+                    transcript_events.append({"type": "tool_use", "part": part})
+                elif part.get("type") == "text" and message_info.get("finish") == "stop":
+                    text = str(part.get("text") or "").strip()
+                    if text:
+                        terminal_texts.append(text)
+        else:
+            raise E2EValidationError(f"OpenCode session export has unexpected role: {role!r}")
+
+    if not assistant_infos:
+        raise E2EValidationError("OpenCode session export has no assistant messages")
+    finishes = [message_info.get("finish") for message_info in assistant_infos]
+    if finishes[-1] != "stop" or finishes.count("stop") != 1:
+        raise E2EValidationError("OpenCode session must end with exactly one normal finish=stop")
+    if any(finish not in {"tool-calls", "stop"} for finish in finishes):
+        raise E2EValidationError("OpenCode session contains a non-normal assistant finish")
+    if len(terminal_texts) != 1:
+        raise E2EValidationError(
+            "OpenCode terminal assistant message with finish=stop must contain exactly one response"
+        )
+    transcript_events.append(
+        {"type": "text", "part": {"text": terminal_texts[0]}}
+    )
+    return validate_transcript(
+        transcript_events,
+        target,
+        expected_agent=expected_agent,
+    )
+
+
 def _artifact_path(artifact_dir: Path, configured: str) -> Path:
     path = Path(configured).expanduser()
     return path.resolve() if path.is_absolute() else (artifact_dir / path).resolve()
@@ -370,6 +560,21 @@ def _artifact_path(artifact_dir: Path, configured: str) -> Path:
 
 def _state_path(configured: Path | None, default: Path) -> Path:
     return (configured or default).expanduser().resolve()
+
+
+def _validate_retained_state_paths(
+    configured: dict[str, Path | None],
+    resolved: dict[str, Path],
+    artifact_dir: Path,
+) -> None:
+    for key, configured_path in configured.items():
+        if configured_path is None:
+            continue
+        state_path = resolved[key]
+        if state_path == artifact_dir or state_path.is_relative_to(artifact_dir):
+            raise E2EValidationError(
+                f"{key} must not be equal to or inside the retained artifact directory"
+            )
 
 
 def _secret_values(env: dict[str, str]) -> list[str]:
@@ -396,8 +601,112 @@ def _redact_payload(value: Any, env: dict[str, str]) -> Any:
     if isinstance(value, list):
         return [_redact_payload(item, env) for item in value]
     if isinstance(value, dict):
-        return {key: _redact_payload(item, env) for key, item in value.items()}
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            redacted_key = _redact(key_text, env)
+            redacted[redacted_key] = (
+                "[REDACTED]"
+                if _SECRET_KEY.search(key_text)
+                else _redact_payload(item, env)
+            )
+        return redacted
     return value
+
+
+def _discard_sensitive_file(path: Path) -> None:
+    if path.is_symlink():
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return
+    try:
+        size = path.stat().st_size
+        with path.open("r+b", buffering=0) as stream:
+            remaining = size
+            zeroes = b"\0" * min(1024 * 1024, max(1, size))
+            while remaining:
+                chunk = zeroes[: min(len(zeroes), remaining)]
+                stream.write(chunk)
+                remaining -= len(chunk)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except OSError:
+        pass
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _discard_sensitive_tree(root: Path) -> None:
+    if not root.exists():
+        return
+    for directory, child_directories, files in os.walk(
+        root,
+        topdown=False,
+        followlinks=False,
+    ):
+        parent = Path(directory)
+        for name in files:
+            _discard_sensitive_file(parent / name)
+        for name in child_directories:
+            child = parent / name
+            try:
+                if child.is_symlink():
+                    child.unlink(missing_ok=True)
+                else:
+                    child.rmdir()
+            except OSError:
+                pass
+    try:
+        root.rmdir()
+    except OSError:
+        pass
+    if root.exists():
+        try:
+            shutil.rmtree(root)
+        except OSError as error:
+            raise RuntimeError(f"could not remove ephemeral state directory: {root}") from error
+
+
+def materialize_redacted_jsonl(
+    raw_path: Path,
+    artifact_path: Path,
+    env: dict[str, str],
+) -> None:
+    redacted_events: list[Any] = []
+    try:
+        if raw_path.is_file():
+            try:
+                with raw_path.open("r", encoding="utf-8") as source:
+                    for line_number, line in enumerate(source, start=1):
+                        if not line.strip():
+                            continue
+                        try:
+                            event: Any = json.loads(line)
+                        except json.JSONDecodeError:
+                            event = {
+                                "type": "invalid_jsonl",
+                                "line": line_number,
+                                "raw": line.rstrip("\r\n"),
+                            }
+                        redacted_events.append(_redact_payload(event, env))
+            except (OSError, UnicodeError) as error:
+                redacted_events.append(
+                    _redact_payload(
+                        {"type": "artifact_error", "error": str(error)},
+                        env,
+                    )
+                )
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        text = "".join(
+            json.dumps(event, sort_keys=True) + "\n" for event in redacted_events
+        )
+        artifact_path.write_text(text, encoding="utf-8")
+    finally:
+        _discard_sensitive_file(raw_path)
 
 
 def _write_summary(path: Path, payload: dict[str, Any]) -> None:
@@ -425,6 +734,85 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return events
 
 
+def _process_group_exists(process_group_id: int) -> bool:
+    try:
+        os.killpg(process_group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _wait_for_process_group_exit(
+    process: subprocess.Popen[str],
+    process_group_id: int,
+    timeout: float,
+) -> bool:
+    deadline = monotonic() + timeout
+    while True:
+        process.poll()
+        if not _process_group_exists(process_group_id):
+            return True
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            return False
+        sleep(min(0.01, remaining))
+
+
+def _terminate_process_group(
+    process: subprocess.Popen[str],
+    *,
+    grace_seconds: float = 0.2,
+) -> None:
+    process_group_id = process.pid
+    try:
+        os.killpg(process_group_id, signal.SIGTERM)
+    except ProcessLookupError:
+        process.wait(timeout=grace_seconds)
+        return
+    if not _wait_for_process_group_exit(process, process_group_id, grace_seconds):
+        try:
+            os.killpg(process_group_id, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        if not _wait_for_process_group_exit(process, process_group_id, grace_seconds):
+            raise RuntimeError(
+                f"process group {process_group_id} survived SIGKILL"
+            )
+    process.wait(timeout=grace_seconds)
+
+
+def run_command(
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    timeout: float,
+) -> subprocess.CompletedProcess[str]:
+    process = subprocess.Popen(
+        list(command),
+        cwd=str(cwd),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _terminate_process_group(process)
+        raise
+    _terminate_process_group(process)
+    return subprocess.CompletedProcess(
+        list(command),
+        process.returncode,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
 def run_e2e(args: argparse.Namespace) -> dict[str, Any]:
     workspace = args.workspace.expanduser().resolve()
     manifest_path = (
@@ -435,30 +823,56 @@ def run_e2e(args: argparse.Namespace) -> dict[str, Any]:
     artifact_dir = args.artifact_dir.expanduser().resolve()
     artifact_dir.mkdir(parents=True, exist_ok=True)
     raw_jsonl = _artifact_path(artifact_dir, args.raw_jsonl)
+    session_export_json = _artifact_path(artifact_dir, args.session_export_json)
     summary_json = _artifact_path(artifact_dir, args.summary_json)
     raw_jsonl.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, raw_temp_name = tempfile.mkstemp(
+        prefix=".opencode-",
+        suffix=".unredacted.jsonl",
+        dir=raw_jsonl.parent,
+    )
+    os.close(descriptor)
+    raw_temp = Path(raw_temp_name)
+    raw_temp.chmod(0o600)
+    ephemeral_state_root = Path(
+        tempfile.mkdtemp(prefix="python-delphi-lsp-e2e-state-")
+    ).resolve()
 
     env = os.environ.copy()
-    xdg_root = artifact_dir / "xdg"
-    state_paths = {
-        "XDG_DATA_HOME": _state_path(args.xdg_data_home, xdg_root / "data"),
-        "XDG_CACHE_HOME": _state_path(args.xdg_cache_home, xdg_root / "cache"),
-        "XDG_STATE_HOME": _state_path(args.xdg_state_home, xdg_root / "state"),
-        "NPM_CONFIG_CACHE": _state_path(args.npm_cache, artifact_dir / "npm-cache"),
+    configured_state_paths = {
+        "XDG_DATA_HOME": args.xdg_data_home,
+        "XDG_CACHE_HOME": args.xdg_cache_home,
+        "XDG_STATE_HOME": args.xdg_state_home,
+        "NPM_CONFIG_CACHE": args.npm_cache,
     }
-    for key, path in state_paths.items():
-        path.mkdir(parents=True, exist_ok=True)
-        env[key] = str(path)
+    state_paths = {
+        "XDG_DATA_HOME": _state_path(args.xdg_data_home, ephemeral_state_root / "data"),
+        "XDG_CACHE_HOME": _state_path(args.xdg_cache_home, ephemeral_state_root / "cache"),
+        "XDG_STATE_HOME": _state_path(args.xdg_state_home, ephemeral_state_root / "state"),
+        "NPM_CONFIG_CACHE": _state_path(args.npm_cache, ephemeral_state_root / "npm-cache"),
+    }
 
     base_summary: dict[str, Any] = {
         "agent": args.agent,
         "forbidden_tools": list(FORBIDDEN_TOOLS),
         "manifest": str(manifest_path),
         "model": args.model,
+        "opencode": args.opencode,
+        "opencode_version": args.expected_opencode_version,
         "raw_jsonl": str(raw_jsonl),
+        "session_export": str(session_export_json),
         "workspace": str(workspace),
     }
     try:
+        _write_summary(session_export_json, {"status": "not-run"})
+        _validate_retained_state_paths(
+            configured_state_paths,
+            state_paths,
+            artifact_dir,
+        )
+        for key, path in state_paths.items():
+            path.mkdir(parents=True, exist_ok=True)
+            env[key] = str(path)
         if not args.probe_script.expanduser().resolve().is_file():
             raise E2EValidationError(f"probe script is missing: {args.probe_script}")
         target = validate_target(
@@ -468,30 +882,127 @@ def run_e2e(args: argparse.Namespace) -> dict[str, Any]:
             relative_path=args.target_path,
             line=args.target_line,
         )
-        command = build_probe_command(args, raw_jsonl)
+        try:
+            version_result = run_command(
+                [args.opencode, "--version"],
+                cwd=workspace,
+                env=env,
+                timeout=min(15.0, args.timeout + 5.0),
+            )
+        except subprocess.TimeoutExpired as error:
+            raise E2EValidationError("OpenCode version check timed out") from error
+        except OSError as error:
+            raise E2EValidationError(f"could not run OpenCode version check: {error}") from error
+        if version_result.returncode != 0:
+            detail = _redact((version_result.stderr or version_result.stdout or "").strip(), env)
+            suffix = f": {detail}" if detail else ""
+            raise E2EValidationError(
+                f"OpenCode version check exited with status {version_result.returncode}{suffix}"
+            )
+        actual_version = version_result.stdout.strip()
+        if actual_version != args.expected_opencode_version:
+            raise E2EValidationError(
+                "OpenCode version must be exactly "
+                f"{args.expected_opencode_version}; found {actual_version or '<empty>'}"
+            )
+
+        command = build_probe_command(args, raw_temp)
         command.extend(["--npm-cache", str(state_paths["NPM_CONFIG_CACHE"])])
         try:
-            result = subprocess.run(
+            result = run_command(
                 command,
-                cwd=str(workspace),
+                cwd=workspace,
                 env=env,
-                text=True,
-                capture_output=True,
                 timeout=args.timeout + 5.0,
-                check=False,
             )
         except subprocess.TimeoutExpired as error:
             raise E2EValidationError(f"probe exceeded subprocess timeout {args.timeout + 5.0:g}s") from error
+        except OSError as error:
+            raise E2EValidationError(f"could not run probe: {error}") from error
         if result.returncode != 0:
             detail = _redact((result.stderr or result.stdout or "").strip(), env)
             suffix = f": {detail}" if detail else ""
             raise E2EValidationError(f"probe exited with status {result.returncode}{suffix}")
-        transcript = validate_transcript(_read_jsonl(raw_jsonl), target)
+        raw_events = _read_jsonl(raw_temp)
+        session_id = validate_stream(raw_events)
+        probe_transcript = validate_transcript(
+            raw_events,
+            target,
+            expected_agent=args.agent,
+        )
+
+        export_command = [args.opencode, "export", session_id]
+        try:
+            export_result = run_command(
+                export_command,
+                cwd=workspace,
+                env=env,
+                timeout=min(30.0, args.timeout + 5.0),
+            )
+        except subprocess.TimeoutExpired as error:
+            _write_summary(session_export_json, {"status": "timeout"})
+            raise E2EValidationError("OpenCode session export timed out") from error
+        except OSError as error:
+            _write_summary(
+                session_export_json,
+                _redact_payload({"status": "error", "error": str(error)}, env),
+            )
+            raise E2EValidationError(f"could not export OpenCode session: {error}") from error
+        if export_result.returncode != 0:
+            export_failure = _redact_payload(
+                {
+                    "status": "fail",
+                    "returncode": export_result.returncode,
+                    "stdout": export_result.stdout,
+                    "stderr": export_result.stderr,
+                },
+                env,
+            )
+            assert isinstance(export_failure, dict)
+            _write_summary(session_export_json, export_failure)
+            detail = _redact((export_result.stderr or export_result.stdout or "").strip(), env)
+            suffix = f": {detail}" if detail else ""
+            raise E2EValidationError(
+                f"OpenCode session export exited with status {export_result.returncode}{suffix}"
+            )
+        try:
+            session_export: Any = json.loads(export_result.stdout)
+        except json.JSONDecodeError as error:
+            invalid_export = _redact_payload(
+                {"status": "invalid", "raw": export_result.stdout},
+                env,
+            )
+            assert isinstance(invalid_export, dict)
+            _write_summary(session_export_json, invalid_export)
+            raise E2EValidationError("OpenCode session export is not valid JSON") from error
+        redacted_export = _redact_payload(session_export, env)
+        if not isinstance(redacted_export, dict):
+            redacted_export = {"status": "invalid", "payload": redacted_export}
+        _write_summary(session_export_json, redacted_export)
+        transcript = validate_session_export(
+            session_export,
+            session_id=session_id,
+            target=target,
+            expected_version=args.expected_opencode_version,
+            expected_agent=args.agent,
+            expected_model=args.model,
+        )
+        if (
+            probe_transcript.target_id != transcript.target_id
+            or probe_transcript.tools != transcript.tools
+            or probe_transcript.actions != transcript.actions
+            or probe_transcript.final_response != transcript.final_response
+        ):
+            raise E2EValidationError("probe transcript does not match the complete session export")
+        provider, model_id = _model_identity(args.model)
         summary = {
             **base_summary,
             "actions": transcript.actions,
             "elapsed_ms": transcript.elapsed_ms,
             "final_response": transcript.final_response,
+            "model_id": model_id,
+            "provider": provider,
+            "session_id": session_id,
             "status": "pass",
             "target": {
                 "citation": target.citation,
@@ -517,6 +1028,11 @@ def run_e2e(args: argparse.Namespace) -> dict[str, Any]:
         assert isinstance(failure, dict)
         _write_summary(summary_json, failure)
         raise
+    finally:
+        try:
+            materialize_redacted_jsonl(raw_temp, raw_jsonl, env)
+        finally:
+            _discard_sensitive_tree(ephemeral_state_root)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
