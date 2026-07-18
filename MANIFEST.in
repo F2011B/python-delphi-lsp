@@ -13,6 +13,7 @@ include scripts/bootstrap_vllm_opencode_test.sh
 include scripts/generate_release_evidence.py
 include scripts/prepare_ornith_cache.py
 include scripts/run_opencode_lsp_probe.py
+include scripts/run_openrouter_github_e2e.py
 include scripts/start_ornith_vllm.sh
 include scripts/summarize_opencode_request_payloads.py
 include scripts/ollama/ornith-lspctx.Modelfile
