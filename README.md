@@ -215,14 +215,30 @@ A generated OpenCode agent starts with this Markdown frontmatter:
 ```markdown
 ---
 description: Inspect Delphi and Object Pascal codebases through python-delphi-lsp.
-mode: subagent
+mode: all
 temperature: 0
 permission:
-  "*": deny
   delphi_codebase: allow
   skill:
     "*": deny
     python-delphi-lsp: allow
+  lsp: deny
+  bash: deny
+  read: deny
+  glob: deny
+  grep: deny
+  list: deny
+  edit: deny
+  write: deny
+  patch: deny
+  task: deny
+  webfetch: deny
+  websearch: deny
+  question: deny
+  todowrite: deny
+  todoread: deny
+  codebase_map: deny
+  code_guidelines: deny
 ---
 ```
 

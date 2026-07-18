@@ -267,6 +267,34 @@ def test_opencode_install_writes_protocol_v2_skill_plugin_and_agent(tmp_path: Pa
     assert "Call `metrics`" in skill_text
     assert b"\r\n" not in skill_bytes
 
+    agent_text = agent.read_text(encoding="utf-8")
+    agent_frontmatter = agent_text.split("---", maxsplit=2)[1]
+    assert "mode: all" in agent_frontmatter
+    assert "\ntools:" not in agent_frontmatter
+    assert 'permission:\n  "*": deny' not in agent_frontmatter
+    assert "  delphi_codebase: allow" in agent_frontmatter
+    assert '  skill:\n    "*": deny\n    python-delphi-lsp: allow' in agent_frontmatter
+    for denied_tool in (
+        "lsp",
+        "bash",
+        "read",
+        "glob",
+        "grep",
+        "list",
+        "edit",
+        "write",
+        "patch",
+        "task",
+        "webfetch",
+        "websearch",
+        "question",
+        "todowrite",
+        "todoread",
+        "codebase_map",
+        "code_guidelines",
+    ):
+        assert f"  {denied_tool}: deny" in agent_frontmatter
+
     plugin_bytes = plugin.read_bytes()
     plugin_text = plugin_bytes.decode("utf-8")
     assert b"\r\n" not in plugin_bytes
@@ -1024,8 +1052,13 @@ def test_opencode_install_writes_package_named_skill_plugin_and_markdown_agent(
     skill, _, agent = installed
     assert "name: python-delphi-lsp" in skill.read_text(encoding="utf-8")
     agent_text = agent.read_text(encoding="utf-8")
-    assert "mode: subagent" in agent_text
+    assert "mode: all" in agent_text
     assert "temperature: 0" in agent_text
+    assert "\ntools:" not in agent_text
+    assert 'permission:\n  "*": deny' not in agent_text
+    assert "delphi_codebase: allow" in agent_text
+    assert "codebase_map: deny" in agent_text
+    assert "code_guidelines: deny" in agent_text
     assert "python-delphi-lsp: allow" in agent_text
     assert "Load `python-delphi-lsp`" in agent_text
     assert "vllm-delphi-codebase" not in agent_text
