@@ -31,6 +31,8 @@ _SECRET_KEY = re.compile(
 _IS_WINDOWS = sys.platform == "win32"
 _CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
 _SIGKILL = getattr(signal, "SIGKILL", 9)
+# Darwin can report EPERM while the last same-UID group member is already exiting.
+_POSIX_PERMISSION_DRAIN_TIMEOUT = 5.0
 _WINDOWS_JOB_EXIT_CODE = 1
 _WINDOWS_JOB_WAIT_TIMEOUT = 5.0
 _WINDOWS_BOOTSTRAP_RELEASE = b"\x00"
@@ -632,8 +634,18 @@ def validate_transcript(
     if not isinstance(focus, dict) or focus.get("target_id") != target_id:
         raise E2EValidationError("focus output does not confirm the find target_id")
 
-    if inputs["inspect"].get("target_id") != target_id:
+    inspect_has_target = "target_id" in inputs["inspect"]
+    if inspect_has_target and inputs["inspect"].get("target_id") != target_id:
         raise E2EValidationError("inspect target_id does not match the find result")
+    if not inspect_has_target:
+        inspect_focus = decoded["inspect"].get("focus")
+        if (
+            not isinstance(inspect_focus, dict)
+            or inspect_focus.get("target_id") != target_id
+        ):
+            raise E2EValidationError(
+                "inspect output does not confirm the focused target_id"
+            )
     if inputs["inspect"].get("detail") != "declaration":
         raise E2EValidationError("inspect detail must be declaration")
     inspect_matches: list[dict[str, Any]] = []
@@ -1081,11 +1093,29 @@ def _terminate_process_group(
     except ProcessLookupError:
         process.wait(timeout=grace_seconds)
         return
+    except PermissionError:
+        if _wait_for_process_group_exit(
+            process,
+            process_group_id,
+            max(grace_seconds, _POSIX_PERMISSION_DRAIN_TIMEOUT),
+        ):
+            process.wait(timeout=grace_seconds)
+            return
+        raise
     if not _wait_for_process_group_exit(process, process_group_id, grace_seconds):
         try:
             os.killpg(process_group_id, _SIGKILL)
         except ProcessLookupError:
             pass
+        except PermissionError:
+            if _wait_for_process_group_exit(
+                process,
+                process_group_id,
+                max(grace_seconds, _POSIX_PERMISSION_DRAIN_TIMEOUT),
+            ):
+                process.wait(timeout=grace_seconds)
+                return
+            raise
         if not _wait_for_process_group_exit(process, process_group_id, grace_seconds):
             raise RuntimeError(
                 f"process group {process_group_id} survived SIGKILL"

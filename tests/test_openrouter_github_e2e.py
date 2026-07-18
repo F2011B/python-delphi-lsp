@@ -361,6 +361,49 @@ def test_transcript_requires_exact_sequence_and_source_backed_final(tmp_path: Pa
     assert evidence.final_response.endswith("mormot2/src/core/mormot.core.base.pas:3.")
 
 
+def test_transcript_accepts_inspect_of_confirmed_implicit_focus(tmp_path: Path) -> None:
+    harness = _load_module()
+    workspace, manifest = _workspace(tmp_path)
+    target = harness.validate_target(
+        workspace=workspace,
+        manifest_path=manifest,
+        name="TSynLogInfo",
+        relative_path="mormot2/src/core/mormot.core.base.pas",
+        line=3,
+    )
+    events = _good_events()
+    inspect_state = events[4]["part"]["state"]
+    inspect_state["input"].pop("target_id")
+    inspect_output = json.loads(inspect_state["output"])
+    inspect_output["focus"] = {"target_id": "target_v2_123"}
+    inspect_state["output"] = json.dumps(inspect_output)
+
+    evidence = harness.validate_transcript(events, target)
+
+    assert evidence.target_id == "target_v2_123"
+
+
+def test_transcript_rejects_unconfirmed_implicit_inspect_focus(tmp_path: Path) -> None:
+    harness = _load_module()
+    workspace, manifest = _workspace(tmp_path)
+    target = harness.validate_target(
+        workspace=workspace,
+        manifest_path=manifest,
+        name="TSynLogInfo",
+        relative_path="mormot2/src/core/mormot.core.base.pas",
+        line=3,
+    )
+    events = _good_events()
+    inspect_state = events[4]["part"]["state"]
+    inspect_state["input"].pop("target_id")
+    inspect_output = json.loads(inspect_state["output"])
+    inspect_output["focus"] = {"target_id": "target_v2_wrong"}
+    inspect_state["output"] = json.dumps(inspect_output)
+
+    with pytest.raises(harness.E2EValidationError, match="focused target_id"):
+        harness.validate_transcript(events, target)
+
+
 @pytest.mark.parametrize("forbidden", ["bash", "read", "grep", "glob", "list", "invalid"])
 def test_transcript_rejects_every_forbidden_tool(tmp_path: Path, forbidden: str) -> None:
     harness = _load_module()
@@ -1067,6 +1110,118 @@ def test_outer_cleanup_kills_descendants_after_leader_exit(
 
     assert signals == [signal.SIGTERM, signal.SIGKILL]
     assert group_alive is False
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group semantics")
+def test_outer_cleanup_waits_for_exiting_group_after_sigterm_permission_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _load_module()
+    group_probes = 0
+    wait_calls: list[float | None] = []
+
+    class ExitedLeader:
+        pid = 4444
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            wait_calls.append(timeout)
+            return 0
+
+    def fake_killpg(pid: int, sig: int) -> None:
+        nonlocal group_probes
+        assert pid == 4444
+        if sig == signal.SIGTERM:
+            raise PermissionError(1, "process is already exiting")
+        assert sig == 0
+        group_probes += 1
+        if group_probes >= 2:
+            raise ProcessLookupError
+
+    monkeypatch.setattr(harness.os, "killpg", fake_killpg)
+
+    harness._terminate_process_group(ExitedLeader(), grace_seconds=0.01)
+
+    assert group_probes == 2
+    assert wait_calls == [0.01]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group semantics")
+def test_outer_cleanup_does_not_mask_persistent_sigterm_permission_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _load_module()
+    permission_error = PermissionError(1, "process group cannot be signaled")
+    waits: list[tuple[object, int, float]] = []
+
+    class ExitedLeader:
+        pid = 4545
+
+        def poll(self):
+            return 0
+
+    process = ExitedLeader()
+
+    def fake_killpg(pid: int, sig: int) -> None:
+        assert (pid, sig) == (4545, signal.SIGTERM)
+        raise permission_error
+
+    def group_never_exits(candidate, process_group_id: int, timeout: float) -> bool:
+        waits.append((candidate, process_group_id, timeout))
+        return False
+
+    monkeypatch.setattr(harness.os, "killpg", fake_killpg)
+    monkeypatch.setattr(harness, "_wait_for_process_group_exit", group_never_exits)
+
+    with pytest.raises(PermissionError) as captured:
+        harness._terminate_process_group(process, grace_seconds=0.01)
+
+    assert captured.value is permission_error
+    assert waits == [(process, 4545, 5.0)]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group semantics")
+def test_outer_cleanup_waits_for_exiting_group_after_sigkill_permission_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _load_module()
+    signals: list[int] = []
+    exit_checks = iter([False, True])
+    wait_calls: list[float | None] = []
+
+    class ExitedLeader:
+        pid = 4646
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            wait_calls.append(timeout)
+            return 0
+
+    process = ExitedLeader()
+
+    def fake_killpg(pid: int, sig: int) -> None:
+        assert pid == 4646
+        signals.append(sig)
+        if sig == getattr(signal, "SIGKILL", 9):
+            raise PermissionError(1, "process is already exiting")
+
+    def fake_wait(candidate, process_group_id: int, timeout: float) -> bool:
+        assert candidate is process
+        assert process_group_id == 4646
+        assert timeout in {0.01, 5.0}
+        return next(exit_checks)
+
+    monkeypatch.setattr(harness.os, "killpg", fake_killpg)
+    monkeypatch.setattr(harness, "_wait_for_process_group_exit", fake_wait)
+
+    harness._terminate_process_group(process, grace_seconds=0.01)
+
+    assert signals == [signal.SIGTERM, getattr(signal, "SIGKILL", 9)]
+    assert wait_calls == [0.01]
 
 
 def test_outer_timeout_kills_probe_opencode_and_real_descendant(tmp_path: Path) -> None:
