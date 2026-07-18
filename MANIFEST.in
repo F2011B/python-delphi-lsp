@@ -1,6 +1,7 @@
 include LICENSE
 include README.md
 include opencode.json
+include .github/workflows/ci.yml
 include scripts/check_ornith_cache.py
 include scripts/audit_delphi_language_features.py
 include scripts/build_github_performance_corpus.py

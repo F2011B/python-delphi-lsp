@@ -128,6 +128,7 @@ def test_ci_covers_cross_platform_test_matrix_and_release_build() -> None:
 def test_sdist_includes_files_required_by_packaged_tests() -> None:
     manifest = (ROOT / 'MANIFEST.in').read_text(encoding='utf-8')
 
+    assert 'include .github/workflows/ci.yml' in manifest
     assert 'include opencode.json' in manifest
     assert 'include scripts/check_ornith_cache.py' in manifest
     assert 'include scripts/start_ornith_vllm.sh' in manifest
