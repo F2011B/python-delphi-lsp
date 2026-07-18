@@ -136,6 +136,7 @@ def test_sdist_includes_files_required_by_packaged_tests() -> None:
     assert 'include scripts/run_openrouter_github_e2e.py' in manifest
     assert 'include scripts/bootstrap_vllm_codebase_skill_test.py' in manifest
     assert 'include scripts/generate_release_evidence.py' in manifest
+    assert 'include scripts/generate_progress_pdf.py' in manifest
     assert 'include scripts/audit_delphi_language_features.py' in manifest
     assert 'include scripts/build_github_performance_corpus.py' in manifest
     assert 'include scripts/benchmark_github_corpus.py' in manifest
