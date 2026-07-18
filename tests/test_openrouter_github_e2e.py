@@ -944,7 +944,7 @@ def test_windows_bootstrap_mirrors_target_exitcode_stdout_and_stderr() -> None:
     )
     assert missing.returncode == 126
     assert missing.stdout == b""
-    assert missing.stderr == b"Windows process bootstrap could not start target\n"
+    assert missing.stderr.splitlines() == [b"Windows process bootstrap could not start target"]
 
 
 def test_windows_cleanup_uses_job_even_when_leader_already_exited(
