@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import hashlib
 import importlib.util
 import json
@@ -199,3 +200,41 @@ def test_benchmark_budget_checks() -> None:
     assert any("2000000" in item for item in failures)
     assert any("cold" in item for item in failures)
     assert any("warm" in item for item in failures)
+
+
+def test_benchmark_module_imports_when_posix_resource_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_import = builtins.__import__
+
+    def import_without_resource(name, *args, **kwargs):
+        if name == "resource":
+            raise ModuleNotFoundError("No module named 'resource'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_resource)
+
+    benchmark = _load_module(BENCH_SCRIPT)
+
+    assert callable(benchmark._peak_rss_bytes)
+
+
+def test_peak_rss_dispatches_to_native_windows_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    benchmark = _load_module(BENCH_SCRIPT)
+    monkeypatch.setattr(benchmark.sys, "platform", "win32")
+    monkeypatch.setattr(
+        benchmark,
+        "_windows_peak_rss_bytes",
+        lambda: 123_456,
+        raising=False,
+    )
+
+    assert benchmark._peak_rss_bytes() == 123_456
+
+
+def test_peak_rss_is_reported_in_bytes_on_the_current_platform() -> None:
+    benchmark = _load_module(BENCH_SCRIPT)
+
+    assert benchmark._peak_rss_bytes() > 0

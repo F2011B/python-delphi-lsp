@@ -4,10 +4,13 @@ import importlib.util
 import json
 import os
 import signal
+import subprocess
 import sys
 import time
 from argparse import Namespace
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -75,18 +78,297 @@ def test_build_opencode_command_accepts_explicit_binary() -> None:
     assert command[0] == '/opt/release/opencode'
 
 
-def test_probe_uses_portable_threaded_stdout_and_process_shutdown() -> None:
+def test_probe_uses_portable_threaded_stdout() -> None:
     script = SCRIPT.read_text(encoding='utf-8')
 
     assert 'import selectors' not in script
-    assert 'import signal' in script
-    assert 'signal.SIGTERM' in script
-    assert 'os.killpg' in script
-    assert 'start_new_session=not inherit_process_group' in script
     assert 'threading.Thread' in script
     assert 'queue.Queue' in script
 
 
+def test_process_group_launch_kwargs_preserve_platform_and_inheritance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe = _load_probe_module()
+
+    monkeypatch.setattr(probe, '_IS_WINDOWS', False, raising=False)
+    assert probe._process_group_popen_kwargs(inherit_process_group=False) == {
+        'start_new_session': True,
+    }
+    assert probe._process_group_popen_kwargs(inherit_process_group=True) == {
+        'start_new_session': False,
+    }
+
+    monkeypatch.setattr(probe, '_IS_WINDOWS', True)
+    assert probe._process_group_popen_kwargs(inherit_process_group=False) == {
+        'creationflags': probe._CREATE_NEW_PROCESS_GROUP,
+    }
+    assert probe._process_group_popen_kwargs(inherit_process_group=True) == {
+        'creationflags': 0,
+    }
+
+
+def test_windows_owned_process_assigns_job_before_one_byte_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe = _load_probe_module()
+    lifecycle: list[str] = []
+    launched: list[str] = []
+
+    class FakeStdin:
+        closed = False
+
+        def fileno(self):
+            return 71
+
+        def close(self):
+            self.closed = True
+            lifecycle.append('stdin-close')
+
+    class FakeProcess:
+        stdin = FakeStdin()
+
+    class FakeJob:
+        def assign(self, process):
+            assert process is fake_process
+            lifecycle.append('assign')
+
+    fake_process = FakeProcess()
+    fake_job = FakeJob()
+
+    def fake_new_job():
+        lifecycle.append('new-job')
+        return fake_job
+
+    def fake_popen(command, **kwargs):
+        launched.extend(command)
+        assert kwargs['stdin'] is subprocess.PIPE
+        lifecycle.append('popen')
+        return fake_process
+
+    def fake_write(fd, payload):
+        assert fd == 71
+        assert payload == probe._WINDOWS_BOOTSTRAP_RELEASE
+        lifecycle.append('release')
+        return len(payload)
+
+    monkeypatch.setattr(probe, '_IS_WINDOWS', True)
+    monkeypatch.setattr(probe, '_new_windows_job', fake_new_job)
+    monkeypatch.setattr(probe.subprocess, 'Popen', fake_popen)
+    monkeypatch.setattr(probe.os, 'write', fake_write)
+
+    process, job = probe._start_owned_process(['opencode', '--version'], text=True)
+
+    assert process is fake_process
+    assert job is fake_job
+    assert lifecycle == ['new-job', 'popen', 'assign', 'release', 'stdin-close']
+    assert launched[:4] == [sys.executable, '-I', '-c', probe._WINDOWS_BOOTSTRAP]
+    assert launched[4:] == ['opencode', '--version']
+    assert process.stdin is None
+
+
+def test_windows_owned_process_assignment_failure_never_releases_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe = _load_probe_module()
+    lifecycle: list[str] = []
+
+    class FakeApi:
+        def assign(self, handle, process_handle):
+            lifecycle.append(f'assign:{handle}:{process_handle}')
+            raise OSError('assignment failed')
+
+        def close(self, handle):
+            lifecycle.append(f'job-close:{handle}')
+
+    class FakeStdin:
+        def fileno(self):
+            return 72
+
+        def close(self):
+            lifecycle.append('stdin-close')
+
+    class FakeProcess:
+        _handle = 74
+        stdin = FakeStdin()
+
+        def kill(self):
+            lifecycle.append('kill-wrapper')
+
+        def wait(self, timeout=None):
+            lifecycle.append(f'wait-wrapper:{timeout}')
+            return 1
+
+    process = FakeProcess()
+    job = probe._WindowsJob(api=FakeApi(), handle=73)
+    monkeypatch.setattr(probe, '_IS_WINDOWS', True)
+    monkeypatch.setattr(probe, '_new_windows_job', lambda: job)
+    monkeypatch.setattr(probe.subprocess, 'Popen', lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(
+        probe.os,
+        'write',
+        lambda *_args: pytest.fail('target must not be released after failed job assignment'),
+    )
+
+    with pytest.raises(OSError, match='assignment failed'):
+        probe._start_owned_process(['opencode'], text=True)
+
+    assert lifecycle == [
+        'assign:73:74',
+        'kill-wrapper',
+        'wait-wrapper:5.0',
+        'job-close:73',
+        'stdin-close',
+    ]
+    assert process.stdin is None
+
+
+def test_windows_bootstrap_mirrors_target_exitcode_stdout_and_stderr() -> None:
+    probe = _load_probe_module()
+    target = [
+        sys.executable,
+        '-c',
+        "import sys; print('target-out'); print('target-err', file=sys.stderr); raise SystemExit(7)",
+    ]
+
+    completed = subprocess.run(
+        probe._windows_bootstrap_command(target),
+        input=probe._WINDOWS_BOOTSTRAP_RELEASE,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 7
+    assert completed.stdout == b'target-out\n'
+    assert completed.stderr == b'target-err\n'
+
+
+def test_windows_stop_process_terminates_job_after_leader_exits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe = _load_probe_module()
+    calls: list[tuple[object, float]] = []
+
+    class ExitedProcess:
+        pid = 4242
+        returncode = 0
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            del timeout
+            return self.returncode
+
+    class FakeWindowsJob:
+        def terminate_and_wait(self, process, *, timeout):
+            calls.append((process, timeout))
+
+    process = ExitedProcess()
+    job = FakeWindowsJob()
+
+    monkeypatch.setattr(probe, '_IS_WINDOWS', True, raising=False)
+    monkeypatch.setattr(
+        probe.subprocess,
+        'run',
+        lambda *_args, **_kwargs: pytest.fail('Windows cleanup must not resolve an executable via PATH'),
+    )
+
+    probe._stop_process(process, windows_job=job, timeout=0.1)
+
+    assert calls == [(process, 0.1)]
+
+
+def test_windows_job_waits_until_all_assigned_processes_exit() -> None:
+    probe = _load_probe_module()
+    events: list[object] = []
+
+    class FakeApi:
+        active = iter([2, 1, 0])
+
+        def terminate(self, handle, exit_code):
+            events.append(('terminate', handle, exit_code))
+
+        def active_processes(self, handle):
+            events.append(('query', handle))
+            return next(self.active)
+
+        def close(self, handle):
+            events.append(('close', handle))
+
+    class ExitedLeader:
+        def wait(self, timeout=None):
+            events.append(('wait', timeout))
+            return 0
+
+    job = probe._WindowsJob(api=FakeApi(), handle=91)
+
+    job.terminate_and_wait(ExitedLeader(), timeout=0.2)
+
+    assert events[0] == ('terminate', 91, 1)
+    assert events.count(('query', 91)) == 3
+    assert events[-1] == ('close', 91)
+    assert any(isinstance(event, tuple) and event[0] == 'wait' for event in events)
+
+
+def test_windows_job_close_can_retry_after_close_handle_failure() -> None:
+    probe = _load_probe_module()
+    attempts: list[int] = []
+
+    class FlakyApi:
+        def close(self, handle):
+            attempts.append(handle)
+            if len(attempts) == 1:
+                raise OSError('CloseHandle failed')
+
+    job = probe._WindowsJob(api=FlakyApi(), handle=92)
+
+    with pytest.raises(OSError, match='CloseHandle failed'):
+        job.close()
+
+    assert job._closed is False
+    job.close()
+    job.close()
+
+    assert attempts == [92, 92]
+    assert job._closed is True
+
+
+def test_windows_job_assignment_preserves_original_error_for_exited_process(
+) -> None:
+    probe = _load_probe_module()
+    events: list[object] = []
+
+    class FakeApi:
+        def create_kill_on_close(self):
+            return 93
+
+        def assign(self, handle, process_handle):
+            events.append(('assign', handle, process_handle))
+            raise OSError('assignment failed')
+
+        def close(self, handle):
+            events.append(('close', handle))
+
+    class ExitedProcess:
+        _handle = 94
+
+        def kill(self):
+            raise ProcessLookupError
+
+        def wait(self, timeout=None):
+            events.append(('wait', timeout))
+            return 0
+
+    job = probe._WindowsJob(api=FakeApi(), handle=93)
+
+    with pytest.raises(OSError, match='assignment failed'):
+        job.assign(ExitedProcess())
+
+    assert events == [('assign', 93, 94), ('wait', 5.0), ('close', 93)]
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX can address a process group after its leader exits')
 def test_stop_process_kills_group_even_when_leader_already_exited(monkeypatch) -> None:
     probe = _load_probe_module()
     group_alive = True

@@ -657,7 +657,7 @@ def test_timeout_terminates_entire_probe_process_group(monkeypatch: pytest.Monke
         def wait(self, timeout=None):
             if not self.killed:
                 raise subprocess.TimeoutExpired(["probe"], timeout)
-            self.returncode = -signal.SIGKILL
+            self.returncode = -getattr(signal, "SIGKILL", 9)
             return self.returncode
 
     process: FakeProcess | None = None
@@ -673,20 +673,366 @@ def test_timeout_terminates_entire_probe_process_group(monkeypatch: pytest.Monke
                 raise ProcessLookupError
             return
         signals.append((pid, sig))
-        if sig == signal.SIGKILL:
+        if sig == getattr(signal, "SIGKILL", 9):
             assert process is not None
             process.killed = True
 
+    monkeypatch.setattr(harness, "_IS_WINDOWS", False, raising=False)
     monkeypatch.setattr(harness.subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(harness.os, "killpg", fake_killpg)
+    monkeypatch.setattr(harness.os, "killpg", fake_killpg, raising=False)
 
     with pytest.raises(subprocess.TimeoutExpired):
         harness.run_command(["probe"], cwd=Path("/tmp"), env={}, timeout=0.01)
 
     assert popen_kwargs["start_new_session"] is True
-    assert signals == [(4242, signal.SIGTERM), (4242, signal.SIGKILL)]
+    assert signals == [(4242, signal.SIGTERM), (4242, getattr(signal, "SIGKILL", 9))]
 
 
+def test_run_command_cleans_up_on_any_communicate_failure_without_masking_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _load_module()
+    original_error = KeyboardInterrupt("operator cancelled")
+    cleanup_calls: list[tuple[object, object]] = []
+
+    class FakeProcess:
+        returncode = None
+
+        def communicate(self, timeout=None):
+            del timeout
+            raise original_error
+
+    process = FakeProcess()
+    windows_job = object()
+    monkeypatch.setattr(
+        harness,
+        "_start_owned_process",
+        lambda *_args, **_kwargs: (process, windows_job),
+    )
+
+    def fail_cleanup(candidate, *, windows_job):
+        cleanup_calls.append((candidate, windows_job))
+        raise RuntimeError("cleanup also failed")
+
+    monkeypatch.setattr(harness, "_terminate_process_group", fail_cleanup)
+
+    with pytest.raises(KeyboardInterrupt) as captured:
+        harness.run_command(["probe"], cwd=Path("/tmp"), env={}, timeout=0.01)
+
+    assert captured.value is original_error
+    assert cleanup_calls == [(process, windows_job)]
+
+
+def test_windows_timeout_terminates_entire_probe_tree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _load_module()
+    popen_kwargs: dict[str, object] = {}
+    popen_command: list[str] = []
+    job_calls: list[tuple[object, float]] = []
+    lifecycle: list[str] = []
+
+    class FakeProcess:
+        pid = 4242
+        returncode = None
+        stdin = None
+
+        def __init__(self, _command, **kwargs) -> None:
+            popen_command.extend(_command)
+            lifecycle.append("popen")
+            popen_kwargs.update(kwargs)
+            self.stdin = FakeStdin()
+
+        def communicate(self, timeout=None):
+            raise subprocess.TimeoutExpired(["probe"], timeout)
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            self.returncode = -1
+            return self.returncode
+
+    class FakeStdin:
+        def fileno(self):
+            return 81
+
+        def close(self):
+            lifecycle.append("stdin-close")
+
+    class FakeWindowsJob:
+        def assign(self, process):
+            assert process is not None
+            lifecycle.append("assign")
+
+        def terminate_and_wait(self, process, *, timeout):
+            job_calls.append((process, timeout))
+
+    process: FakeProcess | None = None
+
+    def fake_popen(command, **kwargs):
+        nonlocal process
+        process = FakeProcess(command, **kwargs)
+        return process
+
+    job = FakeWindowsJob()
+
+    def fake_new_windows_job():
+        lifecycle.append("new-job")
+        return job
+
+    monkeypatch.setattr(harness, "_IS_WINDOWS", True, raising=False)
+    monkeypatch.setattr(harness.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        harness.os,
+        "write",
+        lambda fd, payload: (
+            lifecycle.append("release")
+            or (len(payload) if fd == 81 else pytest.fail("unexpected bootstrap fd"))
+        ),
+    )
+    monkeypatch.setattr(
+        harness,
+        "_new_windows_job",
+        fake_new_windows_job,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        harness.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail(
+            "Windows cleanup must not resolve an executable via PATH"
+        ),
+    )
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        harness.run_command(["probe"], cwd=Path("C:/tmp"), env={}, timeout=0.01)
+
+    assert popen_kwargs["creationflags"] == harness._CREATE_NEW_PROCESS_GROUP
+    assert "start_new_session" not in popen_kwargs
+    assert process is not None
+    assert lifecycle[:5] == ["new-job", "popen", "assign", "release", "stdin-close"]
+    assert popen_command[:4] == [
+        sys.executable,
+        "-I",
+        "-c",
+        harness._WINDOWS_BOOTSTRAP,
+    ]
+    assert popen_command[4:] == ["probe"]
+    assert popen_kwargs["stdin"] is subprocess.PIPE
+    assert job_calls == [(process, harness._WINDOWS_JOB_WAIT_TIMEOUT)]
+
+
+def test_windows_release_failure_stops_assigned_wrapper_before_target_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _load_module()
+    lifecycle: list[str] = []
+
+    class FakeStdin:
+        def fileno(self):
+            return 82
+
+        def close(self):
+            lifecycle.append("stdin-close")
+
+    class FakeProcess:
+        stdin = FakeStdin()
+
+        def communicate(self, timeout=None):
+            del timeout
+            pytest.fail("wrapper must not communicate after release failure")
+
+    class FakeJob:
+        def assign(self, process):
+            assert process is fake_process
+            lifecycle.append("assign")
+
+        def terminate_and_wait(self, process, *, timeout):
+            assert process is fake_process
+            lifecycle.append(f"terminate:{timeout}")
+
+    fake_process = FakeProcess()
+    fake_job = FakeJob()
+    monkeypatch.setattr(harness, "_IS_WINDOWS", True)
+    monkeypatch.setattr(harness, "_new_windows_job", lambda: fake_job)
+    monkeypatch.setattr(
+        harness.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: fake_process,
+    )
+    monkeypatch.setattr(
+        harness.os,
+        "write",
+        lambda *_args: (_ for _ in ()).throw(OSError("release pipe failed")),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="could not release Windows process bootstrap",
+    ) as captured:
+        harness.run_command(["target-with-secret-argument"], cwd=Path("C:/tmp"), env={}, timeout=1)
+
+    assert lifecycle == [
+        "assign",
+        "stdin-close",
+        f"terminate:{harness._WINDOWS_JOB_WAIT_TIMEOUT}",
+    ]
+    assert fake_process.stdin is None
+    assert "target-with-secret-argument" not in str(captured.value)
+
+
+def test_windows_popen_failure_closes_job_without_command_leak(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _load_module()
+    lifecycle: list[str] = []
+
+    class FakeJob:
+        def close(self):
+            lifecycle.append("job-close")
+
+    monkeypatch.setattr(harness, "_IS_WINDOWS", True)
+    monkeypatch.setattr(harness, "_new_windows_job", lambda: FakeJob())
+    monkeypatch.setattr(
+        harness.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("spawn failed for target-with-secret-argument")
+        ),
+    )
+    monkeypatch.setattr(
+        harness.os,
+        "write",
+        lambda *_args: pytest.fail("failed wrapper must never be released"),
+    )
+
+    with pytest.raises(
+        OSError,
+        match="could not start Windows process bootstrap",
+    ) as captured:
+        harness.run_command(["target-with-secret-argument"], cwd=Path("C:/tmp"), env={}, timeout=1)
+
+    assert lifecycle == ["job-close"]
+    assert "target-with-secret-argument" not in str(captured.value)
+
+
+def test_windows_bootstrap_mirrors_target_exitcode_stdout_and_stderr() -> None:
+    harness = _load_module()
+    target = [
+        sys.executable,
+        "-c",
+        "import sys; print('target-out'); print('target-err', file=sys.stderr); raise SystemExit(9)",
+    ]
+
+    completed = subprocess.run(
+        harness._windows_bootstrap_command(target),
+        input=harness._WINDOWS_BOOTSTRAP_RELEASE,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 9
+    assert completed.stdout == b"target-out\n"
+    assert completed.stderr == b"target-err\n"
+
+    missing = subprocess.run(
+        harness._windows_bootstrap_command(["missing-target-with-secret-argument"]),
+        input=harness._WINDOWS_BOOTSTRAP_RELEASE,
+        capture_output=True,
+        check=False,
+    )
+    assert missing.returncode == 126
+    assert missing.stdout == b""
+    assert missing.stderr == b"Windows process bootstrap could not start target\n"
+
+
+def test_windows_cleanup_uses_job_even_when_leader_already_exited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _load_module()
+    calls: list[tuple[object, float]] = []
+
+    class ExitedLeader:
+        pid = 4343
+        returncode = 0
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            del timeout
+            return self.returncode
+
+    class FakeWindowsJob:
+        def terminate_and_wait(self, process, *, timeout):
+            calls.append((process, timeout))
+
+    process = ExitedLeader()
+    job = FakeWindowsJob()
+    monkeypatch.setattr(harness, "_IS_WINDOWS", True, raising=False)
+
+    harness._terminate_process_group(process, windows_job=job, grace_seconds=0.3)
+
+    assert calls == [(process, harness._WINDOWS_JOB_WAIT_TIMEOUT)]
+
+
+def test_windows_job_waits_for_descendants_before_closing_handle() -> None:
+    harness = _load_module()
+    events: list[object] = []
+
+    class FakeApi:
+        active = iter([1, 0])
+
+        def terminate(self, handle, exit_code):
+            events.append(("terminate", handle, exit_code))
+
+        def active_processes(self, handle):
+            events.append(("query", handle))
+            return next(self.active)
+
+        def close(self, handle):
+            events.append(("close", handle))
+
+    class ExitedLeader:
+        def wait(self, timeout=None):
+            events.append(("wait", timeout))
+            return 0
+
+    job = harness._WindowsJob(api=FakeApi(), handle=92)
+
+    job.terminate_and_wait(ExitedLeader(), timeout=0.2)
+
+    assert events[0] == ("terminate", 92, 1)
+    assert events.count(("query", 92)) == 2
+    assert events[-1] == ("close", 92)
+    assert any(isinstance(event, tuple) and event[0] == "wait" for event in events)
+
+
+def test_windows_job_close_can_retry_after_close_handle_failure() -> None:
+    harness = _load_module()
+    attempts: list[int] = []
+
+    class FlakyApi:
+        def close(self, handle):
+            attempts.append(handle)
+            if len(attempts) == 1:
+                raise OSError("CloseHandle failed")
+
+    job = harness._WindowsJob(api=FlakyApi(), handle=93)
+
+    with pytest.raises(OSError, match="CloseHandle failed"):
+        job.close()
+
+    assert job._closed is False
+    job.close()
+    job.close()
+
+    assert attempts == [93, 93]
+    assert job._closed is True
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX can address a process group after its leader exits")
 def test_outer_cleanup_kills_descendants_after_leader_exit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -726,9 +1072,10 @@ def test_outer_cleanup_kills_descendants_after_leader_exit(
 def test_outer_timeout_kills_probe_opencode_and_real_descendant(tmp_path: Path) -> None:
     harness = _load_module()
     process_record = tmp_path / "processes.json"
-    fake_opencode = tmp_path / "fake-opencode"
+    # OpenCode's first argument is the `run` subcommand. Pointing --opencode at
+    # Python therefore executes this script portably as `python run ...`.
+    fake_opencode = tmp_path / "run"
     fake_opencode.write_text(
-        f"#!{sys.executable}\n"
         "import json, os, pathlib, subprocess, sys, time\n"
         "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
         f"path = pathlib.Path({str(process_record)!r})\n"
@@ -736,7 +1083,6 @@ def test_outer_timeout_kills_probe_opencode_and_real_descendant(tmp_path: Path) 
         "time.sleep(60)\n",
         encoding="utf-8",
     )
-    fake_opencode.chmod(0o755)
     output = tmp_path / "probe.jsonl"
     command = [
         sys.executable,
@@ -745,7 +1091,7 @@ def test_outer_timeout_kills_probe_opencode_and_real_descendant(tmp_path: Path) 
         "--cwd",
         str(tmp_path),
         "--opencode",
-        str(fake_opencode),
+        sys.executable,
         "--timeout",
         "30",
         "--inherit-process-group",
@@ -772,18 +1118,100 @@ def test_outer_timeout_kills_probe_opencode_and_real_descendant(tmp_path: Path) 
         assert all(not _pid_exists(pid) for pid in pids)
     finally:
         for pid in pids:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            _kill_pid(pid)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows Job Objects")
+def test_windows_cleanup_kills_child_after_leader_has_exited(tmp_path: Path) -> None:
+    harness = _load_module()
+    child_record = tmp_path / "child.txt"
+    leader = tmp_path / "leader.py"
+    leader.write_text(
+        "import pathlib, subprocess, sys\n"
+        "flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], "
+        "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, "
+        "creationflags=flags)\n"
+        f"pathlib.Path({str(child_record)!r}).write_text(str(child.pid))\n",
+        encoding="utf-8",
+    )
+    child_pid: int | None = None
+
+    try:
+        completed = harness.run_command(
+            [sys.executable, str(leader)],
+            cwd=tmp_path,
+            env=os.environ.copy(),
+            timeout=10.0,
+        )
+        assert completed.returncode == 0
+        child_pid = int(child_record.read_text(encoding="utf-8"))
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and _pid_exists(child_pid):
+            time.sleep(0.02)
+        assert not _pid_exists(child_pid)
+    finally:
+        if child_pid is not None:
+            _kill_pid(child_pid)
 
 
 def _pid_exists(pid: int) -> bool:
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        synchronize = 0x00100000
+        wait_timeout = 0x00000102
+        kernel32 = ctypes.windll.kernel32
+        open_process = kernel32.OpenProcess
+        open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        open_process.restype = wintypes.HANDLE
+        wait_for_single_object = kernel32.WaitForSingleObject
+        wait_for_single_object.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        wait_for_single_object.restype = wintypes.DWORD
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [wintypes.HANDLE]
+        close_handle.restype = wintypes.BOOL
+        handle = open_process(synchronize, False, pid)
+        if not handle:
+            return False
+        try:
+            return wait_for_single_object(handle, 0) == wait_timeout
+        finally:
+            close_handle(handle)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     return True
+
+
+def _kill_pid(pid: int) -> None:
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        open_process = kernel32.OpenProcess
+        open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        open_process.restype = wintypes.HANDLE
+        terminate_process = kernel32.TerminateProcess
+        terminate_process.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        terminate_process.restype = wintypes.BOOL
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [wintypes.HANDLE]
+        close_handle.restype = wintypes.BOOL
+        handle = open_process(0x0001, False, pid)
+        if handle:
+            try:
+                terminate_process(handle, 1)
+            finally:
+                close_handle(handle)
+        return
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
 
 
 def test_run_validates_export_and_retains_only_redacted_artifacts(
@@ -852,6 +1280,65 @@ def test_run_validates_export_and_retains_only_redacted_artifacts(
         assert secret not in artifact
         assert "OPENROUTER_API_KEY" not in artifact
     assert list(artifacts.glob("*.unredacted*")) == []
+
+
+def test_windows_spawn_failure_reaches_main_and_writes_sanitized_fail_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    harness = _load_module()
+    workspace, manifest = _workspace(tmp_path)
+    artifacts = tmp_path / "artifacts"
+    leaked_spawn_detail = "target-with-secret-argument"
+    close_calls: list[str] = []
+
+    class FakeJob:
+        def close(self):
+            close_calls.append("close")
+
+    monkeypatch.setattr(harness, "_IS_WINDOWS", True)
+    monkeypatch.setattr(harness, "_new_windows_job", lambda: FakeJob())
+    monkeypatch.setattr(
+        harness.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError(f"spawn failed for {leaked_spawn_detail}")
+        ),
+    )
+
+    exit_code = harness.main(
+        [
+            "--workspace",
+            str(workspace),
+            "--manifest",
+            str(manifest),
+            "--artifact-dir",
+            str(artifacts),
+            "--target-name",
+            "TSynLogInfo",
+            "--target-path",
+            "mormot2/src/core/mormot.core.base.pas",
+            "--target-line",
+            "3",
+            "--opencode",
+            "/opt/release/opencode",
+        ]
+    )
+
+    output = capsys.readouterr()
+    failure = json.loads((artifacts / "summary.json").read_text(encoding="utf-8"))
+    assert exit_code == 1
+    assert close_calls == ["close"]
+    assert failure["status"] == "fail"
+    assert failure["error"] == (
+        "could not run OpenCode version check: "
+        "could not start Windows process bootstrap"
+    )
+    assert output.out == f"OpenRouter E2E failed; see {(artifacts / 'summary.json').resolve()}\n"
+    assert output.err == ""
+    assert leaked_spawn_detail not in json.dumps(failure)
+    assert leaked_spawn_detail not in output.out
 
 
 def test_failed_probe_still_redacts_partial_jsonl_and_removes_temp_file(

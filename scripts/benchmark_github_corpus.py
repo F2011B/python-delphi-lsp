@@ -8,7 +8,6 @@ import hashlib
 import json
 from pathlib import Path
 import platform
-import resource
 import sys
 import time
 from typing import Any, Callable
@@ -38,9 +37,58 @@ def _measure(operation: Callable[[], Any]) -> tuple[Any, float]:
     return result, time.perf_counter() - started
 
 
-def _peak_rss_bytes() -> int:
+def _posix_peak_rss_bytes() -> int:
+    import resource
+
     value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return int(value if sys.platform == "darwin" else value * 1024)
+
+
+def _windows_peak_rss_bytes() -> int:
+    import ctypes
+    from ctypes import wintypes
+
+    class ProcessMemoryCounters(ctypes.Structure):
+        _fields_ = [
+            ("cb", wintypes.DWORD),
+            ("PageFaultCount", wintypes.DWORD),
+            ("PeakWorkingSetSize", ctypes.c_size_t),
+            ("WorkingSetSize", ctypes.c_size_t),
+            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+            ("PagefileUsage", ctypes.c_size_t),
+            ("PeakPagefileUsage", ctypes.c_size_t),
+        ]
+
+    counters = ProcessMemoryCounters()
+    counters.cb = ctypes.sizeof(counters)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    get_current_process = kernel32.GetCurrentProcess
+    get_current_process.argtypes = []
+    get_current_process.restype = wintypes.HANDLE
+    get_process_memory_info = psapi.GetProcessMemoryInfo
+    get_process_memory_info.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(ProcessMemoryCounters),
+        wintypes.DWORD,
+    ]
+    get_process_memory_info.restype = wintypes.BOOL
+    if not get_process_memory_info(
+        get_current_process(),
+        ctypes.byref(counters),
+        counters.cb,
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return int(counters.PeakWorkingSetSize)
+
+
+def _peak_rss_bytes() -> int:
+    if sys.platform == "win32":
+        return _windows_peak_rss_bytes()
+    return _posix_peak_rss_bytes()
 
 
 def _number(value: object) -> float:
