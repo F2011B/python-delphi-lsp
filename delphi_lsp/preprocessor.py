@@ -136,11 +136,13 @@ class Preprocessor:
         include_paths: Iterable[str] = (),
         include_loader: Optional[IncludeLoader] = None,
         options: Optional[PreprocessorOptions] = None,
+        preserve_active_directives: bool = False,
     ) -> None:
         self.defines: set[str] = {self._normalize_define(d) for d in defines if d}
         self.include_paths = [Path(p) for p in include_paths]
         self.include_loader = include_loader or self._default_include_loader
         self.options = options or PreprocessorOptions()
+        self.preserve_active_directives = preserve_active_directives
         self._apply_default_compiler_defines()
         self.scoped_enums = self.options.scoped_enums
         self._option_values: dict[str, str] = {}
@@ -191,7 +193,9 @@ class Preprocessor:
             if ch == "'":
                 start_line = ctx.line
                 active = self._is_active()
-                literal = self._consume_string(ctx)
+                literal = self._consume_multiline_string(ctx)
+                if literal is None:
+                    literal = self._consume_string(ctx)
                 self._emit_text(output, literal, ctx.file_name, start_line, active=active)
                 continue
 
@@ -273,6 +277,19 @@ class Preprocessor:
             version_define = int(round(self.options.compiler_version * 10))
             self.defines.add(f'VER{version_define}')
 
+    def _consume_multiline_string(self, ctx: _FileContext) -> str | None:
+        for quote_count in (5, 3):
+            delimiter = "'" * quote_count
+            if not ctx.text.startswith(delimiter, ctx.index):
+                continue
+            content_start = ctx.index + quote_count
+            if content_start >= len(ctx.text) or ctx.text[content_start] != '\n':
+                continue
+            close = ctx.text.find(delimiter, content_start + 1)
+            end = len(ctx.text) if close < 0 else close + quote_count
+            return ctx.advance(end - ctx.index)
+        return None
+
     def _emit_text(
         self,
         output: _OutputBuffer,
@@ -310,9 +327,14 @@ class Preprocessor:
     ) -> None:
         name, param = self._parse_directive(directive_content)
         replacement = self._replace_with_spaces(directive_raw)
+        active_replacement = (
+            directive_raw
+            if self.preserve_active_directives and self._is_active()
+            else replacement
+        )
 
         if not name:
-            self._emit_text(output, replacement, ctx.file_name, start_line, active=True)
+            self._emit_text(output, active_replacement, ctx.file_name, start_line, active=True)
             return
 
         if name in {'IFDEF', 'IFNDEF', 'IF', 'IFOPT'}:
@@ -378,14 +400,14 @@ class Preprocessor:
                         self.defines.add(define_name)
                     else:
                         self.defines.discard(define_name)
-            self._emit_text(output, replacement, ctx.file_name, start_line, active=True)
+            self._emit_text(output, active_replacement, ctx.file_name, start_line, active=True)
             return
 
         if name in {'SCOPEDENUMS'}:
             if self._is_active():
                 self.scoped_enums = self._parse_on_off(param)
                 self._set_option('SCOPEDENUMS', 'ON' if self.scoped_enums else 'OFF')
-            self._emit_text(output, replacement, ctx.file_name, start_line, active=True)
+            self._emit_text(output, active_replacement, ctx.file_name, start_line, active=True)
             return
 
         if name in {'PUSHOPT', 'POPOPT'}:
@@ -405,13 +427,13 @@ class Preprocessor:
                                 col=ctx.col,
                             )
                         )
-            self._emit_text(output, replacement, ctx.file_name, start_line, active=True)
+            self._emit_text(output, active_replacement, ctx.file_name, start_line, active=True)
             return
 
         if name == 'OPT':
             if self._is_active():
                 self._apply_opt_directive(param)
-            self._emit_text(output, replacement, ctx.file_name, start_line, active=True)
+            self._emit_text(output, active_replacement, ctx.file_name, start_line, active=True)
             return
 
         if name in {'I', 'INCLUDE'}:
@@ -443,21 +465,21 @@ class Preprocessor:
                             )
                         else:
                             include_stack.append(resolved_path)
-                            ctx.pending_output = replacement
+                            ctx.pending_output = active_replacement
                             ctx.pending_line = start_line
                             normalized = self._normalize_newlines(content)
                             if not normalized.endswith('\n'):
                                 normalized += '\n'
                             contexts.append(_FileContext(text=normalized, file_name=resolved_path))
                             return
-            self._emit_text(output, replacement, ctx.file_name, start_line, active=True)
+            self._emit_text(output, active_replacement, ctx.file_name, start_line, active=True)
             return
 
         if self._is_active() and self._apply_named_option(name, param):
-            self._emit_text(output, replacement, ctx.file_name, start_line, active=True)
+            self._emit_text(output, active_replacement, ctx.file_name, start_line, active=True)
             return
 
-        self._emit_text(output, replacement, ctx.file_name, start_line, active=True)
+        self._emit_text(output, active_replacement, ctx.file_name, start_line, active=True)
 
     def _parse_directive(self, directive_text: str) -> tuple[str, str]:
         text = directive_text.strip()

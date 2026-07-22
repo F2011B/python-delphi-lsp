@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Iterable
 import json
 
-from .lsp_server import build_outline_semantic_model, outline_source
+from .lsp_server import build_outline_semantic_model
 from .metrics import analyze_project
 from .project_discovery import DelphiProjectDiscovery, discover_delphi_project
 from .project_indexer import ProjectIndexResult, ProjectIndexer
@@ -44,7 +44,11 @@ def build_codebase_index(
             text = read_source_text(path)
         except (OSError, UnicodeError):
             continue
-        model = build_outline_semantic_model(outline_source(text), source)
+        model = build_outline_semantic_model(
+            text,
+            source,
+            defines=discovery.defines,
+        )
         models[source] = model
         lines_processed += text.count("\n") + (0 if not text or text.endswith("\n") else 1)
         symbols_discovered += sum(len(items) for items in model.index.name_index.values())

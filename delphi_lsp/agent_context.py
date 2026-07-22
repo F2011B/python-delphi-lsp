@@ -695,7 +695,14 @@ def _build_registry(workspace: AgentWorkspace, project_id: str, revision: str) -
             include_paths=workspace.include_paths,
         )
         sources[source_path] = document
-        model = build_outline_semantic_model(text, str(source_path))
+        if workspace.defines:
+            model = build_outline_semantic_model(
+                text,
+                str(source_path),
+                defines=workspace.defines,
+            )
+        else:
+            model = build_outline_semantic_model(text, str(source_path))
         unit_symbols = _collect_raw_symbols(model.unit_scope, unit, source_path, document)
         raw_symbols.extend(_exclude_routine_locals(unit_symbols, document))
 

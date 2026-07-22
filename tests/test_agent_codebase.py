@@ -141,6 +141,85 @@ def test_implementation_layer_slices_single_method_from_100k_line_file(tmp_path:
     assert item["fragments"][0]["range"]["start_line"] > 100_000
 
 
+def test_symbol_range_ends_at_outer_end_after_conditional_statement_blocks(
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "ConditionalRoutine.pas"
+    write_text(
+        source_path,
+        """
+        unit ConditionalRoutine;
+        interface
+        implementation
+        procedure ConditionalRun;
+        begin
+        {$IFDEF WINDOWS}
+          try
+        {$ELSE}
+          begin
+        {$ENDIF}
+            if Ready then
+            begin
+              NestedWork;
+            end;
+        {$IFDEF WINDOWS}
+          finally
+        {$ENDIF}
+          end;
+          WorkAfterNestedBlock;
+        end;
+        end.
+        """,
+    )
+    expected_end_line = len(source_path.read_text(encoding="utf-8").splitlines()) - 1
+
+    index = build_codebase_index(tmp_path)
+    payload = json.loads(
+        render_layer(index, "symbols", query="ConditionalRun", output_format="json")
+    )
+
+    [item] = payload["items"]
+    assert item["name"] == "ConditionalRun"
+    assert item["range"]["end_line"] == expected_end_line
+
+
+def test_symbol_range_correlates_split_conditional_block_boundaries(
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "SplitConditionalBlock.pas"
+    write_text(
+        source_path,
+        """
+        unit SplitConditionalBlock;
+        interface
+        implementation
+        procedure SplitConditionalRun;
+        begin
+        {$IFDEF X}
+          if Ready then
+          begin
+        {$ENDIF}
+          ConditionalWork;
+        {$IFDEF X}
+          end;
+        {$ENDIF}
+          WorkAfterConditional;
+        end;
+        end.
+        """,
+    )
+    expected_end_line = len(source_path.read_text(encoding="utf-8").splitlines()) - 1
+
+    index = build_codebase_index(tmp_path)
+    payload = json.loads(
+        render_layer(index, "symbols", query="SplitConditionalRun", output_format="json")
+    )
+
+    [item] = payload["items"]
+    assert item["name"] == "SplitConditionalRun"
+    assert item["range"]["end_line"] == expected_end_line
+
+
 def test_default_layer_index_does_not_deep_parse_project_dependencies(tmp_path: Path, monkeypatch) -> None:
     make_project(tmp_path)
 

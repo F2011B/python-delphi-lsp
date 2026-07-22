@@ -112,10 +112,10 @@ def _generated_mega_unit_source(
     return '\n'.join(lines) + '\n'
 
 
-def _outline_source(text: str) -> str:
+def _outline_source(text: str, *, defines: tuple[str, ...] | None = None) -> str:
     transform = getattr(lsp_server, 'outline_source', None)
     assert transform is not None, 'lsp_server.outline_source must be public'
-    return transform(text)
+    return transform(text) if defines is None else transform(text, defines=defines)
 
 
 class LspSupportTests(unittest.TestCase):
@@ -233,7 +233,7 @@ end.
         self.assertEqual(transformed.count('\n'), source.count('\n'))
         parse(transformed, 'protected_keywords.dpr')
 
-    def test_outline_source_returns_original_for_ifdef_else_body_reproducer(self) -> None:
+    def test_outline_source_isolates_ifdef_that_closes_a_preexisting_block(self) -> None:
         source = '''program ConditionalOutline;
 var Value: Integer;
 procedure Earlier;
@@ -256,13 +256,205 @@ end.
 
         transformed = _outline_source(source)
 
-        self.assertEqual(transformed, source)
-        self.assertIn('Value := -1', transformed)
+        self.assertNotEqual(transformed, source)
+        self.assertNotIn('Value := -1', transformed)
+        self.assertIn('Value := 1', transformed)
+        self.assertIn('Value := 2', transformed)
+        self.assertIn('Value := 3', transformed)
+        self.assertEqual(len(transformed), len(source))
+        self.assertEqual(transformed.count('\n'), source.count('\n'))
         for defines in ((), ('X',)):
             with self.subTest(defines=defines):
-                DelphiParser(defines=defines).parse(source, 'conditional_outline.dpr')
+                DelphiParser(defines=defines).parse(
+                    transformed,
+                    'conditional_outline.dpr',
+                )
 
-    def test_outline_source_returns_original_for_paren_star_body_directive(self) -> None:
+    def test_ambiguous_conditional_does_not_disable_later_routine_outlining(self) -> None:
+        source = '''unit IsolatedConditionalFallback;
+interface
+implementation
+procedure AmbiguousRoutine;
+begin
+  if Ready then
+  begin
+{$IFDEF X}
+    AmbiguousTrueWork;
+  end;
+{$ELSE}
+    AmbiguousFalseWork;
+  end;
+{$ENDIF}
+  WorkAfterAmbiguousConditional;
+end;
+procedure SafeRoutine;
+begin
+  if Ready then
+  begin
+    SafeNestedWork;
+  end;
+  SafeWorkAfterNestedBlock;
+end;
+end.
+'''
+
+        transformed = _outline_source(source)
+
+        self.assertIn('AmbiguousTrueWork', transformed)
+        self.assertIn('AmbiguousFalseWork', transformed)
+        self.assertIn('WorkAfterAmbiguousConditional', transformed)
+        self.assertNotIn('SafeNestedWork', transformed)
+        self.assertNotIn('SafeWorkAfterNestedBlock', transformed)
+        self.assertEqual(len(transformed), len(source))
+        self.assertEqual(transformed.count('\n'), source.count('\n'))
+        for defines in ((), ('X',)):
+            with self.subTest(defines=defines):
+                DelphiParser(defines=defines).parse(
+                    transformed,
+                    'isolated_conditional_fallback.pas',
+                )
+
+    def test_conditional_frame_closes_after_a_branch_empties_the_block_stack(self) -> None:
+        source = '''unit SplitConditionalBlock;
+interface
+implementation
+procedure AmbiguousRoutine;
+begin
+{$IFDEF X}
+  if Ready then
+  begin
+{$ENDIF}
+  AmbiguousWork;
+{$IFDEF X}
+  end;
+{$ENDIF}
+end;
+procedure SafeRoutine;
+begin
+  if Ready then
+  begin
+    SafeNestedWork;
+  end;
+  SafeWorkAfterNestedBlock;
+end;
+end.
+'''
+
+        transformed = _outline_source(source)
+
+        self.assertIn('AmbiguousWork', transformed)
+        self.assertNotIn('SafeNestedWork', transformed)
+        self.assertNotIn('SafeWorkAfterNestedBlock', transformed)
+        self.assertEqual(len(transformed), len(source))
+        self.assertEqual(transformed.count('\n'), source.count('\n'))
+        for defines in ((), ('X',)):
+            with self.subTest(defines=defines):
+                DelphiParser(defines=defines).parse(
+                    transformed,
+                    'split_conditional_block.pas',
+                )
+
+    def test_outline_source_merges_balanced_conditional_statement_blocks(self) -> None:
+        source = '''unit ConditionalRoutine;
+interface
+implementation
+procedure ConditionalRun;
+begin
+{$IFDEF WINDOWS}
+  try
+{$ELSE}
+  begin
+{$ENDIF}
+    if Ready then
+    begin
+      NestedWork;
+    end;
+{$IFDEF WINDOWS}
+  finally
+{$ENDIF}
+  end;
+  WorkAfterNestedBlock;
+end;
+end.
+'''
+
+        transformed = _outline_source(source)
+
+        self.assertNotEqual(transformed, source)
+        self.assertNotIn('NestedWork', transformed)
+        self.assertNotIn('WorkAfterNestedBlock', transformed)
+        self.assertEqual(len(transformed), len(source))
+        self.assertEqual(transformed.count('\n'), source.count('\n'))
+        parse(transformed, 'conditional_routine.pas')
+
+    def test_outline_model_applies_conditional_transform_to_routine_ranges(self) -> None:
+        source = '''unit ConditionalModel;
+interface
+implementation
+procedure ConditionalRun;
+begin
+{$IFDEF X}
+  if Ready then
+  begin
+{$ENDIF}
+  ConditionalWork;
+{$IFDEF X}
+  end;
+{$ENDIF}
+  WorkAfterConditional;
+end;
+end.
+'''
+        expected_end_line = len(source.splitlines()) - 1
+
+        model = lsp_server.build_outline_semantic_model(
+            source,
+            'conditional_model.pas',
+        )
+
+        [symbol] = [
+            item
+            for item in iter_symbols(model.unit_scope)
+            if item.name == 'ConditionalRun'
+        ]
+        self.assertEqual(symbol.decl_range.end_line, expected_end_line)
+
+    def test_outline_model_indexes_only_the_configured_conditional_branch(self) -> None:
+        source = '''unit ConditionalDeclarations;
+interface
+implementation
+{$IFDEF X}
+procedure EnabledForX;
+begin
+  XWork;
+end;
+{$ELSE}
+procedure EnabledWithoutX;
+begin
+  DefaultWork;
+end;
+{$ENDIF}
+end.
+'''
+
+        default_model = lsp_server.build_outline_semantic_model(
+            source,
+            'conditional_declarations.pas',
+        )
+        x_model = lsp_server.build_outline_semantic_model(
+            source,
+            'conditional_declarations.pas',
+            defines=('X',),
+        )
+
+        default_names = {item.name for item in iter_symbols(default_model.unit_scope)}
+        x_names = {item.name for item in iter_symbols(x_model.unit_scope)}
+        self.assertIn('EnabledWithoutX', default_names)
+        self.assertNotIn('EnabledForX', default_names)
+        self.assertIn('EnabledForX', x_names)
+        self.assertNotIn('EnabledWithoutX', x_names)
+
+    def test_outline_source_merges_paren_star_conditional_without_stack_changes(self) -> None:
         source = '''program ParenDirective;
 var Value: Integer;
 begin
@@ -274,10 +466,14 @@ begin
 end.
 '''
 
-        self.assertEqual(_outline_source(source), source)
-        for defines in ((), ('X',)):
-            with self.subTest(defines=defines):
-                DelphiParser(defines=defines).parse(source, 'paren_directive.dpr')
+        transformed = _outline_source(source)
+
+        self.assertNotEqual(transformed, source)
+        self.assertNotIn('Value := 1', transformed)
+        self.assertNotIn('Value := 2', transformed)
+        self.assertEqual(len(transformed), len(source))
+        self.assertEqual(transformed.count('\n'), source.count('\n'))
+        parse(transformed, 'paren_directive.dpr')
 
     def test_outline_source_ignores_dollar_text_in_ordinary_comments(self) -> None:
         source = '''program DollarComments;
@@ -318,6 +514,26 @@ end.
         for defines in ((), ('X',)):
             with self.subTest(defines=defines):
                 DelphiParser(defines=defines).parse(transformed, 'outside_directive.dpr')
+
+    def test_define_aware_outline_preserves_only_the_active_include(self) -> None:
+        source = '''program ConditionalInclude;
+{$IFDEF KEEP_API}
+{$I 'api.inc'}
+{$ELSE}
+{$I 'fallback.inc'}
+{$ENDIF}
+begin
+  DoWork;
+end.
+'''
+
+        transformed = _outline_source(source, defines=('KEEP_API',))
+
+        self.assertIn("{$I 'api.inc'}", transformed)
+        self.assertNotIn("{$I 'fallback.inc'}", transformed)
+        self.assertNotIn('DoWork', transformed)
+        self.assertEqual(len(transformed), len(source))
+        self.assertEqual(transformed.count('\n'), source.count('\n'))
 
     def test_outline_source_tracks_inline_structured_types_and_variant_case(self) -> None:
         source = '''program InlineTypes;
@@ -547,14 +763,23 @@ end.
         for defines in ((), ('X',)):
             with self.subTest(defines=defines, source='original'):
                 DelphiParser(defines=defines).parse(source, 'multiline_blocks.dpr')
-        transformed = _outline_source(source)
+        for outline_defines in (None, (), ('X',)):
+            transformed = (
+                _outline_source(source)
+                if outline_defines is None
+                else _outline_source(source, defines=outline_defines)
+            )
 
-        self.assertIn(triple_block, transformed)
-        self.assertIn(five_block, transformed)
-        self.assertNotIn('DoWork', transformed)
-        for defines in ((), ('X',)):
-            with self.subTest(defines=defines, source='transformed'):
-                DelphiParser(defines=defines).parse(transformed, 'multiline_blocks.dpr')
+            with self.subTest(outline_defines=outline_defines):
+                self.assertIn(triple_block, transformed)
+                self.assertIn(five_block, transformed)
+                self.assertNotIn('DoWork', transformed)
+                self.assertEqual(len(transformed), len(source))
+                for parser_defines in ((), ('X',)):
+                    DelphiParser(defines=parser_defines).parse(
+                        transformed,
+                        'multiline_blocks.dpr',
+                    )
 
     def test_reference_lookup_at_position(self) -> None:
         text = (FIXTURE_DIR / 'unit_inheritance.pas').read_text(encoding='utf-8')
