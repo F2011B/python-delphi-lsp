@@ -76,7 +76,7 @@ def discover_delphi_project(
     root_path = Path(root).expanduser().resolve()
     project_path = Path(project_file).expanduser().resolve() if project_file is not None else None
     discovery = DelphiProjectDiscovery(root=str(root_path))
-    _emit_progress(on_progress, "discovery", str(root_path), 0, 0, 0, "project discovery started")
+    _emit_progress(on_progress, "discovery", str(root_path), 0, 0, None, "project discovery started")
 
     seen_search: set[str] = set()
     seen_include: set[str] = set()
@@ -193,10 +193,10 @@ def discover_delphi_project(
 
     _emit_progress(
         on_progress,
-        "complete",
+        "inventory",
         str(root_path),
         len(discovery.source_files),
-        len(discovery.source_files),
+        0,
         len(discovery.source_files),
         "project discovery complete",
     )
@@ -214,10 +214,17 @@ def populate_workspace_sources(
     seen_search = {path.casefold() for path in discovery.search_paths}
     seen_include = {path.casefold() for path in discovery.include_paths}
 
-    _scan_sources(root_path, discovery, seen_sources)
+    _scan_sources(root_path, discovery, seen_sources, on_progress=on_progress)
     total_sources = len(discovery.source_files)
-    for completed, source in enumerate(discovery.source_files, start=1):
-        _emit_progress(on_progress, "inventory", source, completed, completed, total_sources, "workspace source inventoried")
+    _emit_progress(
+        on_progress,
+        "inventory",
+        str(root_path),
+        total_sources,
+        0,
+        total_sources,
+        "workspace source inventory complete",
+    )
     for source in discovery.source_files:
         path = Path(source)
         unit_key = path.stem.casefold()
@@ -255,7 +262,7 @@ def discover_workspace_sources(
 ) -> DelphiProjectDiscovery:
     root_path = Path(root).expanduser().resolve()
     discovery = DelphiProjectDiscovery(root=str(root_path))
-    _emit_progress(on_progress, "discovery", str(root_path), 0, 0, 0, "workspace discovery started")
+    _emit_progress(on_progress, "discovery", str(root_path), 0, 0, None, "workspace discovery started")
     populate_workspace_sources(discovery, on_progress=on_progress)
     _emit_progress(
         on_progress,
@@ -275,7 +282,7 @@ def _emit_progress(
     path: str,
     files_discovered: int,
     files_completed: int,
-    files_total: int,
+    files_total: int | None,
     detail: str,
 ) -> None:
     if callback is not None:
@@ -471,7 +478,13 @@ def _main_source_from_dproj(path: Path) -> str | None:
     return None
 
 
-def _scan_sources(root: Path, discovery: DelphiProjectDiscovery, seen_sources: set[str]) -> None:
+def _scan_sources(
+    root: Path,
+    discovery: DelphiProjectDiscovery,
+    seen_sources: set[str],
+    *,
+    on_progress: ProgressCallback | None = None,
+) -> None:
     for path in root.rglob("*"):
         if path.suffix.casefold() not in SOURCE_EXTENSIONS:
             continue
@@ -485,6 +498,15 @@ def _scan_sources(root: Path, discovery: DelphiProjectDiscovery, seen_sources: s
             continue
         seen_sources.add(key)
         discovery.source_files.append(str(resolved))
+        _emit_progress(
+            on_progress,
+            "discovery",
+            str(resolved),
+            len(discovery.source_files),
+            0,
+            None,
+            "source file discovered",
+        )
     discovery.source_files.sort(key=lambda item: (item.casefold(), item))
 
 

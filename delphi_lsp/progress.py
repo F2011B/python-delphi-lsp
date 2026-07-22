@@ -13,7 +13,7 @@ class ProgressEvent:
     path: str
     files_discovered: int
     files_completed: int
-    files_total: int
+    files_total: int | None
     lines_processed: int
     symbols_discovered: int
     cached_files: int

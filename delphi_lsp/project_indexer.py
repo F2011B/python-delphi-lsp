@@ -149,9 +149,11 @@ class ProjectIndexer:
             source = self._read_file(file_path)
             if source is None:
                 self._files_completed += 1
-                self._emit_progress("parsing", str(file_path), "unit unavailable")
+                self._emit_progress("detail", str(file_path), "unit unavailable")
                 return
-            self._lines_processed += source.count("\n") + (1 if source else 0)
+            self._lines_processed += source.count("\n") + (
+                0 if not source or source.endswith("\n") else 1
+            )
             parser = DelphiParser(
                 include_paths=[str(path) for path in self.include_paths],
                 defines=self.defines,
@@ -179,12 +181,12 @@ class ProjectIndexer:
                     error_info=UnitErrorInfo(error=str(exc)),
                 )
                 self._files_completed += 1
-                self._emit_progress("parsing", str(file_path), "unit parse failed")
+                self._emit_progress("detail", str(file_path), "unit parse failed")
                 return
 
         if syntax_tree is None:
             self._files_completed += 1
-            self._emit_progress("parsing", str(file_path), "unit skipped")
+            self._emit_progress("detail", str(file_path), "unit skipped")
             return
 
         actual_name = syntax_tree.get_attribute(AttributeName.anName) or unit_name
@@ -192,7 +194,7 @@ class ProjectIndexer:
         unit_info = UnitInfo(name=actual_name, path=str(file_path), syntax_tree=syntax_tree)
         self._parsed_units[normalized_name] = unit_info
         self._files_completed += 1
-        self._emit_progress("parsing", str(file_path), "unit parsed")
+        self._emit_progress("detail", str(file_path), "unit parsed")
 
         if self.on_unit_parsed is not None:
             do_abort = self.on_unit_parsed(actual_name, str(file_path), syntax_tree, from_parser)
