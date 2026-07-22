@@ -43,6 +43,19 @@ project = ProjectIndexer(
 print(project.parsed_units)
 ```
 
+Long-running discovery and indexing accept a keyword-only `on_progress`
+callback. It receives an immutable `ProgressEvent` with package-controlled
+phase, path, and monotonic counters; callback exceptions are not suppressed.
+
+```python
+from delphi_lsp import ProjectIndexer, ProgressEvent
+
+def report(event: ProgressEvent) -> None:
+    print(event.phase, event.files_completed, event.path)
+
+ProjectIndexer(on_progress=report).index("Main.dpr")
+```
+
 ## Architecture metrics
 
 The public metrics API analyzes a single unit or aggregates a complete project:

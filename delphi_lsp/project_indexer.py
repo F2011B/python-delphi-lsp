@@ -9,6 +9,7 @@ from .consts import AttributeName, SyntaxNodeType
 from .nodes import SyntaxNode
 from .parser import DelphiParser
 from .preprocessor import IncludeLoader
+from .progress import ProgressCallback, ProgressEvent
 from .source_reader import read_source_text
 
 
@@ -71,6 +72,7 @@ class ProjectIndexer:
         on_get_unit_syntax: GetUnitSyntaxHook | None = None,
         on_unit_parsed: UnitParsedHook | None = None,
         source_transform: SourceTransform | None = None,
+        on_progress: ProgressCallback | None = None,
     ) -> None:
         self.search_paths = [Path(path) for path in search_paths]
         self.include_paths = [Path(path) for path in include_paths]
@@ -79,6 +81,7 @@ class ProjectIndexer:
         self.on_get_unit_syntax = on_get_unit_syntax
         self.on_unit_parsed = on_unit_parsed
         self.source_transform = source_transform
+        self.on_progress = on_progress
 
         self._parsed_units: dict[str, UnitInfo] = {}
         self._problems: list[ProjectProblem] = []
@@ -86,6 +89,9 @@ class ProjectIndexer:
         self._include_files: dict[str, IncludeFileInfo] = {}
         self._project_folder: Path = Path('.')
         self._aborting: bool = False
+        self._files_discovered = 0
+        self._files_completed = 0
+        self._lines_processed = 0
 
     def index(self, file_name: str) -> ProjectIndexResult:
         self._parsed_units = {}
@@ -93,9 +99,13 @@ class ProjectIndexer:
         self._not_found_units = set()
         self._include_files = {}
         self._aborting = False
+        self._files_discovered = 0
+        self._files_completed = 0
+        self._lines_processed = 0
 
         entry = Path(file_name).expanduser().resolve()
         self._project_folder = entry.parent
+        self._emit_progress("discovery", str(entry), "project index started")
 
         is_project = entry.suffix.casefold() in {'.dpr', '.dpk'}
         self._parse_unit(entry.stem, entry, is_project=is_project)
@@ -105,12 +115,14 @@ class ProjectIndexer:
         problems = list(self._problems)
         not_found = sorted(self._not_found_units, key=str.casefold)
 
-        return ProjectIndexResult(
+        result = ProjectIndexResult(
             parsed_units=parsed_units,
             include_files=include_files,
             problems=problems,
             not_found_units=not_found,
         )
+        self._emit_progress("complete", str(entry), "project index complete")
+        return result
 
     def _parse_unit(self, unit_name: str, file_path: Path, *, is_project: bool) -> None:
         if self._aborting:
@@ -119,6 +131,8 @@ class ProjectIndexer:
         normalized_name = unit_name.casefold()
         if normalized_name in self._parsed_units:
             return
+        self._files_discovered += 1
+        self._emit_progress("inventory", str(file_path), "unit discovered")
 
         hook_tree: Optional[SyntaxNode] = None
         do_parse_unit = True
@@ -134,7 +148,10 @@ class ProjectIndexer:
         if syntax_tree is None and do_parse_unit:
             source = self._read_file(file_path)
             if source is None:
+                self._files_completed += 1
+                self._emit_progress("parsing", str(file_path), "unit unavailable")
                 return
+            self._lines_processed += source.count("\n") + (1 if source else 0)
             parser = DelphiParser(
                 include_paths=[str(path) for path in self.include_paths],
                 defines=self.defines,
@@ -161,15 +178,21 @@ class ProjectIndexer:
                     has_error=True,
                     error_info=UnitErrorInfo(error=str(exc)),
                 )
+                self._files_completed += 1
+                self._emit_progress("parsing", str(file_path), "unit parse failed")
                 return
 
         if syntax_tree is None:
+            self._files_completed += 1
+            self._emit_progress("parsing", str(file_path), "unit skipped")
             return
 
         actual_name = syntax_tree.get_attribute(AttributeName.anName) or unit_name
         normalized_name = actual_name.casefold()
         unit_info = UnitInfo(name=actual_name, path=str(file_path), syntax_tree=syntax_tree)
         self._parsed_units[normalized_name] = unit_info
+        self._files_completed += 1
+        self._emit_progress("parsing", str(file_path), "unit parsed")
 
         if self.on_unit_parsed is not None:
             do_abort = self.on_unit_parsed(actual_name, str(file_path), syntax_tree, from_parser)
@@ -289,6 +312,23 @@ class ProjectIndexer:
             return content, resolved_path
 
         return wrapped
+
+    def _emit_progress(self, phase: str, path: str, detail: str) -> None:
+        if self.on_progress is not None:
+            self.on_progress(
+                ProgressEvent(
+                    phase=phase,
+                    language="delphi",
+                    path=path,
+                    files_discovered=self._files_discovered,
+                    files_completed=self._files_completed,
+                    files_total=self._files_discovered,
+                    lines_processed=self._lines_processed,
+                    symbols_discovered=0,
+                    cached_files=0,
+                    detail=detail,
+                )
+            )
 
     def _default_include_loader(self, parent_file: str, include_name: str) -> Optional[tuple[str, str]]:
         parent = Path(parent_file).resolve().parent
