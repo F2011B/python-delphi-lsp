@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import errno
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Iterator
 import os
 import re
 import xml.etree.ElementTree as ET
@@ -485,12 +486,8 @@ def _scan_sources(
     *,
     on_progress: ProgressCallback | None = None,
 ) -> None:
-    for path in root.rglob("*"):
+    for path in _walk_files(root):
         if path.suffix.casefold() not in SOURCE_EXTENSIONS:
-            continue
-        if any(part in SKIP_DIRS for part in path.parts):
-            continue
-        if not path.is_file():
             continue
         resolved = path.resolve()
         key = str(resolved).casefold()
@@ -512,12 +509,40 @@ def _scan_sources(
 
 def _walk_sources(root: Path, pattern: str) -> list[Path]:
     results: list[Path] = []
-    for path in root.rglob(pattern):
-        if any(part in SKIP_DIRS for part in path.parts):
-            continue
-        if path.is_file():
+    for path in _walk_files(root):
+        if path.match(pattern):
             results.append(path.resolve())
     return results
+
+
+def _walk_files(root: Path) -> Iterator[Path]:
+    def handle_error(error: OSError) -> None:
+        if _is_path_too_long(error):
+            return
+        raise error
+
+    for directory, directory_names, file_names in os.walk(
+        root,
+        followlinks=False,
+        onerror=handle_error,
+    ):
+        directory_names[:] = sorted(
+            name for name in directory_names if name not in SKIP_DIRS
+        )
+        current = Path(directory)
+        for name in sorted(file_names):
+            path = current / name
+            try:
+                if path.is_file():
+                    yield path
+            except OSError as error:
+                if _is_path_too_long(error):
+                    continue
+                raise
+
+
+def _is_path_too_long(error: OSError) -> bool:
+    return getattr(error, "winerror", None) == 206 or error.errno == errno.ENAMETOOLONG
 
 
 def _add_resolved_path(
