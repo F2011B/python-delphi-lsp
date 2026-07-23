@@ -26,27 +26,38 @@ def estimate_deep_size(value: object) -> int:
         seen.add(identifier)
         try:
             total += sys.getsizeof(current)
-        except (TypeError, ValueError):
+        except Exception:
             pass
 
-        pending.extend(_children(current))
+        try:
+            pending.extend(_children(current))
+        except Exception:
+            continue
     return total
 
 
 def _children(value: object) -> tuple[object, ...]:
     children: list[object] = []
     if isinstance(value, Mapping):
-        for key, item in value.items():
-            children.extend((key, item))
+        try:
+            for key, item in value.items():
+                children.extend((key, item))
+        except Exception:
+            pass
     elif isinstance(value, Collection) and not isinstance(value, (str, bytes, bytearray)):
-        children.extend(value)
+        try:
+            children.extend(value)
+        except Exception:
+            pass
 
     is_dataclass_instance = is_dataclass(value) and not isinstance(value, type)
+    dataclass_field_names: frozenset[str] = frozenset()
     if is_dataclass_instance:
         try:
             dataclass_fields = fields(value)
         except Exception:
             dataclass_fields = ()
+        dataclass_field_names = frozenset(field.name for field in dataclass_fields)
         for field in dataclass_fields:
             try:
                 children.append(getattr(value, field.name))
@@ -61,6 +72,8 @@ def _children(value: object) -> tuple[object, ...]:
             children.extend(instance_values.values())
 
     for slot in _slot_names(type(value)):
+        if slot in dataclass_field_names:
+            continue
         try:
             children.append(getattr(value, slot))
         except Exception:
