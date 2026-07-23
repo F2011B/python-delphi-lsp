@@ -1,9 +1,15 @@
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping
-from dataclasses import fields, is_dataclass
+from collections.abc import Callable, Collection, Mapping
+from dataclasses import dataclass, fields, is_dataclass
 import sys
+import re
 from types import ModuleType
+
+
+DEFAULT_MAX_MEMORY_BYTES = 512 * 1024**2
+WARNING_THRESHOLD_PERCENT = 80
+_MEMORY_SIZE = re.compile(r"^(?P<count>[1-9][0-9]*)(?P<suffix>[KMG]?)$", re.IGNORECASE)
 
 
 def estimate_deep_size(value: object) -> int:
@@ -34,6 +40,87 @@ def estimate_deep_size(value: object) -> int:
         except Exception:
             continue
     return total
+
+
+@dataclass
+class CacheStats:
+    requests: int = 0
+    warm_hits: int = 0
+    rebuilds: int = 0
+    invalidations: int = 0
+    evictions: int = 0
+
+
+@dataclass(frozen=True)
+class BudgetResult:
+    retained_bytes: int
+    utilization_percent: float
+    peak_utilization_percent: float
+    warning_active: bool
+    warning_triggered: bool
+    compacted: bool
+
+
+@dataclass(frozen=True)
+class CacheBudget:
+    max_bytes: int = DEFAULT_MAX_MEMORY_BYTES
+    warning_percent: int = WARNING_THRESHOLD_PERCENT
+
+    def enforce(
+        self,
+        *,
+        measure: Callable[[], int],
+        evict_auxiliary: Callable[[], None],
+        evict_navigation: Callable[[], None],
+    ) -> BudgetResult:
+        initial_retained = measure()
+        initial_utilization_percent = initial_retained * 100.0 / self.max_bytes
+        compacted = False
+        retained = initial_retained
+
+        if initial_retained > self.max_bytes:
+            evict_auxiliary()
+            compacted = True
+            retained = measure()
+            if retained > self.max_bytes:
+                evict_navigation()
+                retained = measure()
+
+        current_utilization_percent = retained * 100.0 / self.max_bytes
+        return BudgetResult(
+            retained_bytes=retained,
+            utilization_percent=current_utilization_percent,
+            peak_utilization_percent=initial_utilization_percent,
+            warning_active=current_utilization_percent >= self.warning_percent,
+            warning_triggered=initial_utilization_percent >= self.warning_percent,
+            compacted=compacted,
+        )
+
+
+def parse_memory_size(value: str) -> int:
+    match = _MEMORY_SIZE.fullmatch(value.strip())
+    if match is None:
+        raise ValueError("Memory size must be a positive integer with optional K, M, or G suffix.")
+
+    multiplier = {
+        "": 1,
+        "K": 1024,
+        "M": 1024**2,
+        "G": 1024**3,
+    }
+    return int(match.group("count")) * multiplier[match.group("suffix").upper()]
+
+
+def cache_warning(result: BudgetResult, max_bytes: int) -> str:
+    if not result.warning_triggered:
+        return ""
+
+    compacted = " Cache compacted." if result.compacted else ""
+    return (
+        "Warning: Delphi cache reached "
+        f"{result.peak_utilization_percent:.1f}% of {max_bytes} bytes.{compacted} "
+        "Increase --max-memory, stop unused daemons, or allow compact mode."
+    )
 
 
 def _children(value: object) -> tuple[object, ...]:
