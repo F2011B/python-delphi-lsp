@@ -142,7 +142,7 @@ delphi-lsp-agent view --root PATH [--project-file FILE] --layer LAYER
 delphi-lsp-agent index --root PATH [--project-file FILE] [--out FILE]
 delphi-lsp-agent query --root PATH ACTION [VALUE]
                       [--project-id FILE] [--detail summary|declaration|members|context|body|implementations]
-                      [--relation references|callers|callees|uses|used_by|inherits|implements|sound_partial]
+                      [--relation references|callers|callees|uses|used_by|inherits|implements]
                       [--cursor TEXT] [--max-items INT] [--max-chars INT]
 delphi-lsp-agent skill install [--target PATH] [--force]
 delphi-lsp-agent opencode install [--target PATH] [--python PYTHON]
@@ -158,28 +158,31 @@ delphi-lsp-agent cache status --root PATH
 delphi-lsp-agent cache stop --root PATH
 ```
 
-`cache start` emits clean Protocol v2 JSON on stdout and prints runtime warnings on stderr.
-stdout clean Protocol v2 JSON payloads are expected for every cache/query response.
-warnings are emitted on stderr for all cache commands.
-`cache status --format json` prints JSON status to stdout and the same warning stream on stderr.
+`cache start` outputs cache lifecycle JSON; runtime warnings are still on stderr.
+`cache status --format json` outputs status JSON to stdout and the same warning stream on stderr.
+`cache stop` outputs stop status JSON and may include warnings on stderr.
+`query` outputs Protocol v2 JSON responses and writes warnings to stderr.
 
 ```bash
 delphi-lsp-agent query --root PATH find TCustomer
-delphi-lsp-agent query --root PATH focus <target_id>
+delphi-lsp-agent query --root PATH focus TARGET_ID
 delphi-lsp-agent query --root PATH inspect
-delphi-lsp-agent query --root PATH trace TCustomer
+delphi-lsp-agent query --root PATH trace TARGET_ID --relation callers
 delphi-lsp-agent query --root PATH metrics
+delphi-lsp-agent query --root PATH metrics UNIT_QUERY
 delphi-lsp-agent cache status --root PATH --format json
 ```
 
-The cache daemon prewarmed navigation cache at startup so first `find` requests are
-fast. The cache retained-cache budget is `512 MiB` by default and tracks retained
-cache usage only, not a hard RSS/parse peak. warning at or above 80 percent
-is emitted on stderr.
+`inspect` uses the currently focused target, so call `focus TARGET_ID` before
+`inspect` unless a previous request already selected it.
 
-Eviction is ordered: auxiliary caches evicted first, navigation caches next.
-The eviction flow is: evict auxiliary caches, then navigation caches.
-If compaction removes navigable data, the daemon compact rebuilds navigation state
+The cache daemon prewarms the navigation cache at startup so first `find` requests are
+fast. The cache retained-cache budget is `512 MiB` by default and tracks retained
+cache usage only, not a hard RSS/parse peak. Warnings are emitted on stderr at or
+above 80 percent.
+
+Eviction is ordered: auxiliary caches are evicted first, navigation caches second.
+If compaction removes navigable data, the daemon rebuilds the navigation state on demand
 while preserving focus state for the next request.
 
 The daemon tracks a 30-minute idle timeout; idle state shows in JSON status (`cache status`).
@@ -190,8 +193,6 @@ Workspace state appears in status as `requests`, `warm_hits`, `rebuilds`, `inval
 Metadata is stored in `.delphi-lsp/agent-cache/daemon.json` with owner-only token and
 permissions (`daemon.json` mode 600 and parent 700). Do not copy or share this token
 outside the root workspace.
-do not copy or share this token outside process boundaries.
-do not share the token anywhere.
 
 `view --layer` accepts `overview`, `projects`, `units`, `unit`,
 `symbols`, `symbol`, `implementation`, `references`, `problems`, and
@@ -226,7 +227,7 @@ Focus preserves the selected project, unit, or target. Cursors bind a workspace
 revision and request fingerprint, so source changes and cross-target or
 cross-detail reuse invalidate them. `max_items` and `max_chars` bound each
 response. A `sound_partial` relation is sound but incomplete: unresolved and
-ambiguous relations are never fabricated.
+ambiguous relations are never fabricated. Unsupported relations are rejected.
 
 For every source size the navigator builds an outline first, loads source detail
 lazily for a selected target, and returns only selected fragments. Typed source

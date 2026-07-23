@@ -237,31 +237,39 @@ def test_cache_daemon_rejects_invalid_auth_without_dying(tmp_path: Path) -> None
 def test_readme_documents_bounded_cache_daemon_commands_and_retention_contract() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
-    assert "delphi-lsp-agent cache start --root PATH" in readme
-    assert "delphi-lsp-agent cache status --root PATH --format json" in readme
-    assert "delphi-lsp-agent cache stop --root PATH" in readme
-    assert "delphi-lsp-agent query --root PATH find TCustomer" in readme
-    assert "delphi-lsp-agent query --root PATH focus <target_id>" in readme
-    assert "delphi-lsp-agent query --root PATH inspect" in readme
-    assert "delphi-lsp-agent query --root PATH trace TCustomer" in readme
-    assert "delphi-lsp-agent query --root PATH metrics" in readme
-    assert "delphi-lsp-agent cache status --root PATH --format json" in readme
-    assert "one daemon per canonical root" in readme
-    assert "prewarmed navigation cache" in readme
+    cli_contracts = [
+        "delphi-lsp-agent cache start --root PATH",
+        "delphi-lsp-agent cache status --root PATH",
+        "delphi-lsp-agent cache stop --root PATH",
+        "delphi-lsp-agent query --root PATH find TCustomer",
+        "delphi-lsp-agent query --root PATH focus TARGET_ID",
+        "delphi-lsp-agent query --root PATH inspect",
+        "delphi-lsp-agent query --root PATH trace TARGET_ID --relation callers",
+        "delphi-lsp-agent query --root PATH metrics UNIT_QUERY",
+    ]
+    for contract in cli_contracts:
+        assert contract in readme
+
     assert "512 MiB" in readme
     assert "retained-cache budget" in readme
+    assert "one daemon per canonical root" in readme
+    assert "prewarms the navigation cache" in readme
     assert "not a hard RSS/parse peak" in readme
-    assert "warning at or above 80 percent" in readme
-    assert "stdout clean Protocol v2 JSON" in readme
-    assert "warnings are emitted on stderr" in readme
-    assert "evict auxiliary caches, then navigation caches" in readme
-    assert "compact rebuilds navigation state" in readme
-    assert "30-minute idle" in readme
     assert "source revision" in readme
+    assert "Warnings are emitted on stderr" in readme
+    assert "80 percent" in readme
+    assert "cache lifecycle JSON" in readme
+    assert "stop status JSON" in readme
+    assert "status JSON" in readme
+    assert "Protocol v2 JSON" in readme
+    assert "writes warnings to stderr" in readme
+    assert "Eviction is ordered" in readme
+    assert "auxiliary caches are evicted first" in readme
+    assert "rebuilds the navigation state on demand" in readme
+    assert "30-minute idle" in readme
     assert ".delphi-lsp/agent-cache/daemon.json" in readme
     assert "owner-only token" in readme
-    assert "do not copy" in readme
-    assert "do not share" in readme
+    assert "Do not copy or share this token" in readme
 
 def write_source(path: Path, source: str) -> None:
     path.write_text(textwrap.dedent(source).strip() + "\n", encoding="utf-8")
