@@ -116,6 +116,33 @@ def test_cache_daemon_rejects_symlinked_metadata_directory(tmp_path: Path) -> No
         start_cache(tmp_path)
 
 
+def test_live_unreachable_metadata_is_preserved_without_spawning(tmp_path: Path) -> None:
+    from delphi_lsp.agent_cache import CacheClientError, cache_metadata_path, start_cache
+
+    write_source(tmp_path / "Demo.dpr", "program Demo; begin end.")
+    path = cache_metadata_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    raw = {"schema": 1, "root": str(tmp_path.resolve()), "pid": os.getpid(), "port": 1, "token": "x" * 32, "version": "x", "project_file": "", "max_memory_bytes": 1024, "idle_timeout": 10, "started_at": 1.0}
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(CacheClientError, match="Live cache daemon is unavailable"):
+        start_cache(tmp_path, max_memory_bytes=1024)
+    assert json.loads(path.read_text(encoding="utf-8")) == raw
+
+
+def test_partial_client_disconnect_does_not_stop_daemon(tmp_path: Path) -> None:
+    from delphi_lsp.agent_cache import cache_status, query_cache, start_cache, stop_cache
+
+    write_source(tmp_path / "Demo.dpr", "program Demo; begin end.")
+    try:
+        metadata = start_cache(tmp_path)
+        with socket.create_connection(("127.0.0.1", metadata.port)) as connection:
+            connection.sendall(b'{"token":"partial"')
+        assert query_cache(tmp_path, {"action": "open"}).payload["schema"] == 2
+        assert cache_status(tmp_path)["pid"] == metadata.pid
+    finally:
+        stop_cache(tmp_path)
+
+
 def test_cache_daemon_rejects_invalid_auth_without_dying(tmp_path: Path) -> None:
     from delphi_lsp.agent_cache import CacheClientError, cache_metadata_path, query_cache, start_cache, stop_cache
     import json

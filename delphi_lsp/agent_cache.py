@@ -501,13 +501,13 @@ def start_cache(root: str | Path, *, project_file: str | Path | None = None, max
     project = str((Path(canonical) / project_file).resolve()) if project_file and not Path(project_file).is_absolute() else (str(Path(project_file).resolve()) if project_file else "")
     existing = _read_metadata(canonical)
     if existing and _pid_alive(existing.pid):
-        if (existing.project_file, existing.max_memory_bytes, existing.idle_timeout) != (project, max_memory_bytes, idle_timeout):
-            raise CacheClientError("configuration_conflict", "A live cache daemon has conflicting configuration.")
         try:
             _client_exchange(existing, {"action": "status"})
-            return existing
         except CacheClientError as error:
             raise CacheClientError("unavailable", "Live cache daemon is unavailable.") from error
+        if (existing.project_file, existing.max_memory_bytes, existing.idle_timeout) != (project, max_memory_bytes, idle_timeout):
+            raise CacheClientError("configuration_conflict", "A live cache daemon has conflicting configuration.")
+        return existing
     if existing:
         _remove_metadata_if_owned(existing)
     command = [sys.executable, "-m", "delphi_lsp.agent_cache", "serve", "--root", canonical, "--max-memory", str(max_memory_bytes), "--idle-timeout", str(idle_timeout)]
