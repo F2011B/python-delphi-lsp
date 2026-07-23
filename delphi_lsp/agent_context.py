@@ -455,11 +455,13 @@ class AgentContext:
             0.0,
             revision_check_interval_seconds,
         )
-        self._last_revision_check_at = 0.0
+        self._last_revision_check_at = (
+            time.monotonic() if self._revision_check_interval_seconds > 0.0 else 0.0
+        )
         self._parallel_stats = ParallelBuildStats(0, 0, 0, 0.0, 0)
         project_id = workspace.active_project_id
         self._focus = Focus(project_id=project_id) if project_id else Focus()
-        self._last_revision = workspace.workspace_revision
+        self._last_revision = workspace.current_revision
         self._registry: _Registry | None = None
         self._relation_index: ProjectRelationIndex | None = None
         self._metrics: ProjectMetrics | None = None

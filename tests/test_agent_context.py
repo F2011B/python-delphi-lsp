@@ -276,7 +276,6 @@ def test_cached_context_coalesces_revision_scans_until_explicit_invalidation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     write_source(tmp_path / "Main.dpr", "program Main; begin end.")
-    context = AgentContext.open(tmp_path, revision_check_interval_seconds=10.0)
     calls = 0
     real_fingerprint = agent_workspace_module._selection_fingerprint
 
@@ -291,6 +290,9 @@ def test_cached_context_coalesces_revision_scans_until_explicit_invalidation(
         counted_fingerprint,
     )
 
+    context = AgentContext.open(tmp_path, revision_check_interval_seconds=10.0)
+    assert calls == 1
+
     context.handle({"action": "open"})
     context.handle({"action": "find", "query": "Main"})
     assert calls == 1
@@ -298,6 +300,34 @@ def test_cached_context_coalesces_revision_scans_until_explicit_invalidation(
     context.invalidate_revision_cache()
     context.handle({"action": "open"})
     assert calls == 2
+
+
+def test_context_reuses_selected_workspace_revision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_source(tmp_path / "Main.dpr", "program Main; begin end.")
+    calls = 0
+    real_fingerprint = agent_workspace_module._selection_fingerprint
+
+    def counted_fingerprint(*args: object, **kwargs: object):
+        nonlocal calls
+        calls += 1
+        return real_fingerprint(*args, **kwargs)
+
+    monkeypatch.setattr(
+        agent_workspace_module,
+        "_selection_fingerprint",
+        counted_fingerprint,
+    )
+
+    context = AgentContext.open(tmp_path, revision_check_interval_seconds=3600.0)
+    assert context.workspace.current_revision.startswith("workspace_v2_")
+    assert calls == 1
+
+    context.handle({"action": "open"})
+    context.handle({"action": "find", "query": "Main"})
+    assert calls == 1
 
 
 def test_declaration_section_queries_scan_each_token_at_most_once_in_source_order(

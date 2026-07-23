@@ -90,6 +90,7 @@ class AgentWorkspace:
         self._units: tuple[AgentUnit, ...] = ()
         self._include_files: tuple[dict[str, str], ...] = ()
         self._project_cache: dict[str, _ProjectCache] = {}
+        self._current_revision = ""
 
     @classmethod
     def open(
@@ -269,6 +270,15 @@ class AgentWorkspace:
 
     @property
     def workspace_revision(self) -> str:
+        return self.refresh_revision()
+
+    @property
+    def current_revision(self) -> str:
+        if not self._current_revision:
+            return self.refresh_revision()
+        return self._current_revision
+
+    def refresh_revision(self) -> str:
         discovery = self._active_discovery or self._discovery
         result = self._active_result
         if self._active_project_id:
@@ -283,7 +293,8 @@ class AgentWorkspace:
                     scan_workspace_sources=False,
                 )
         fingerprint = _selection_fingerprint(discovery, result, root=self._root)
-        return f"workspace_v2_{fingerprint}"
+        self._current_revision = f"workspace_v2_{fingerprint}"
+        return self._current_revision
 
     def select_project(self, project_id: str) -> None:
         self._select_project_with_revision(project_id)
@@ -305,7 +316,8 @@ class AgentWorkspace:
             fingerprint = _selection_fingerprint(discovery, cached.result, root=self._root)
             if fingerprint == cached.fingerprint:
                 self._activate_project(project_id, discovery, cached.result)
-                return f"workspace_v2_{fingerprint}"
+                self._current_revision = f"workspace_v2_{fingerprint}"
+                return self._current_revision
 
         if project_path is None:
             result = _catalog_workspace_sources(discovery)
@@ -323,7 +335,8 @@ class AgentWorkspace:
             fingerprint=fingerprint,
         )
         self._activate_project(project_id, discovery, result)
-        return f"workspace_v2_{fingerprint}"
+        self._current_revision = f"workspace_v2_{fingerprint}"
+        return self._current_revision
 
     def _activate_project(
         self,

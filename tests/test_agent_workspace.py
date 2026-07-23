@@ -926,6 +926,41 @@ def test_ids_and_workspace_revision_are_deterministic_and_revision_tracks_source
     assert first.workspace_revision != original_revision
 
 
+def test_selected_workspace_exposes_current_revision_without_rescanning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_text(tmp_path / "One.pas", "unit One; interface implementation end.")
+    calls = 0
+    original_fingerprint = agent_workspace_module._selection_fingerprint
+
+    def counted_fingerprint(*args: object, **kwargs: object) -> str:
+        nonlocal calls
+        calls += 1
+        return original_fingerprint(*args, **kwargs)
+
+    monkeypatch.setattr(agent_workspace_module, "_selection_fingerprint", counted_fingerprint)
+    workspace = AgentWorkspace.open(tmp_path)
+
+    assert workspace.current_revision.startswith("workspace_v2_")
+    assert calls == 1
+
+
+def test_refresh_revision_changes_when_workspace_sources_change(
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "One.pas"
+    write_text(source_path, "unit One; interface implementation end.")
+    workspace = AgentWorkspace.open(tmp_path)
+
+    initial_revision = workspace.current_revision
+    source_path.write_text(
+        source_path.read_text(encoding="utf-8") + " // revision change\n",
+        encoding="utf-8",
+    )
+    assert workspace.refresh_revision() != initial_revision
+
+
 def test_workspace_exposes_project_path_and_define_provenance_as_json(tmp_path: Path) -> None:
     write_text(
         tmp_path / "Main.dpr",
