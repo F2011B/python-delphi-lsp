@@ -27,7 +27,7 @@ from .nodes import CompoundSyntaxNode, SyntaxNode
 from .parser import DelphiParser
 from .semantic import Scope, ScopeKind, Symbol, SymbolKind
 from .metrics import ProjectMetrics
-from .parallel_outline import OutlineTask, ParallelBuildStats, run_outline_tasks
+from .parallel_outline import OutlineResult, OutlineTask, ParallelBuildStats, run_outline_tasks
 
 
 _ROUTINE_KINDS = frozenset(
@@ -733,20 +733,8 @@ def _build_registry(
     raw_symbols: list[_RawSymbol] = []
     sources: dict[Path, _SourceDocument] = {}
     units = tuple(workspace.units)
-    outline_batch = run_outline_tasks(
-        (
-            OutlineTask(
-                ordinal,
-                str(unit_source_path(workspace.root, unit)),
-                workspace.defines,
-                True,
-            )
-            for ordinal, unit in enumerate(units)
-        ),
-        configured_workers=workers,
-        memory_budget_bytes=worker_memory_budget_bytes,
-    )
-    for result in outline_batch.results:
+
+    def consume_result(result: OutlineResult) -> None:
         unit = units[result.ordinal]
         source_path = unit_source_path(workspace.root, unit)
         display_path = unit_display_path(workspace.root, unit)
@@ -765,6 +753,22 @@ def _build_registry(
         sources[source_path] = document
         unit_symbols = _collect_raw_symbols(result.model.unit_scope, unit, source_path, document)
         raw_symbols.extend(_exclude_routine_locals(unit_symbols, document))
+
+    outline_batch = run_outline_tasks(
+        (
+            OutlineTask(
+                ordinal,
+                str(unit_source_path(workspace.root, unit)),
+                workspace.defines,
+                True,
+            )
+            for ordinal, unit in enumerate(units)
+        ),
+        configured_workers=workers,
+        memory_budget_bytes=worker_memory_budget_bytes,
+        on_complete=consume_result,
+        retain_results=False,
+    )
 
     ordered = sorted(raw_symbols, key=_raw_sort_key)
     overload_groups: dict[tuple[str, str, str, str], list[_RawSymbol]] = {}

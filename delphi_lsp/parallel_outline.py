@@ -124,6 +124,7 @@ def run_outline_tasks(
     memory_budget_bytes: int | None = None,
     cpu_count: int | None = None,
     on_complete: Callable[[OutlineResult], None] | None = None,
+    retain_results: bool = True,
 ) -> OutlineBatch:
     task_list = tuple(tasks)
     started = perf_counter()
@@ -134,10 +135,18 @@ def run_outline_tasks(
         memory_budget_bytes=memory_budget_bytes,
     )
     if effective_workers <= 1:
-        results = _run_serial(task_list, on_complete)
-        return _batch(configured_workers, effective_workers, results, started, fallbacks=0)
+        results, completed = _run_serial(task_list, on_complete, retain_results)
+        return _batch(
+            configured_workers,
+            effective_workers,
+            results,
+            started,
+            files_completed=completed,
+            fallbacks=0,
+        )
 
     accepted: list[OutlineResult] = []
+    completed = 0
     futures: dict[object, OutlineTask] = {}
     executor: ProcessPoolExecutor | None = None
     try:
@@ -145,16 +154,50 @@ def run_outline_tasks(
         executor = ProcessPoolExecutor(max_workers=effective_workers, mp_context=context)
         futures = {executor.submit(_parse_outline_task, task): task for task in task_list}
         for future in as_completed(futures):
-            result = future.result()
-            accepted.append(result)
+            task = futures.pop(future)
+            try:
+                result = future.result()
+            except ParallelOutlineError:
+                raise
+            except Exception as error:
+                wrapped = ParallelOutlineError(
+                    f"parallel outline execution failed for {task.source_path}: {error}"
+                )
+                if configured_workers == 0 and completed == 0:
+                    _cancel_futures(futures)
+                    _shutdown_failed_executor(executor)
+                    results, serial_completed = _run_serial(task_list, on_complete, retain_results)
+                    return _batch(
+                        configured_workers,
+                        1,
+                        results,
+                        started,
+                        files_completed=serial_completed,
+                        fallbacks=1,
+                    )
+                raise wrapped from error
+            completed += 1
             if on_complete is not None:
                 on_complete(result)
+            if retain_results:
+                accepted.append(result)
+    except ParallelOutlineError:
+        _cancel_futures(futures)
+        _shutdown_failed_executor(executor)
+        raise
     except (OSError, BrokenProcessPool) as error:
         _cancel_futures(futures)
         _shutdown_failed_executor(executor)
-        if configured_workers == 0 and not accepted:
-            results = _run_serial(task_list, on_complete)
-            return _batch(configured_workers, 1, results, started, fallbacks=1)
+        if configured_workers == 0 and completed == 0:
+            results, serial_completed = _run_serial(task_list, on_complete, retain_results)
+            return _batch(
+                configured_workers,
+                1,
+                results,
+                started,
+                files_completed=serial_completed,
+                fallbacks=1,
+            )
         raise ParallelOutlineError(f"parallel outline execution failed: {error}") from error
     except BaseException:
         _cancel_futures(futures)
@@ -164,19 +207,29 @@ def run_outline_tasks(
     assert executor is not None
     executor.shutdown(wait=True, cancel_futures=False)
 
-    return _batch(configured_workers, effective_workers, accepted, started, fallbacks=0)
+    return _batch(
+        configured_workers,
+        effective_workers,
+        accepted,
+        started,
+        files_completed=completed,
+        fallbacks=0,
+    )
 
 
 def _run_serial(
-    tasks: tuple[OutlineTask, ...], on_complete: Callable[[OutlineResult], None] | None
-) -> list[OutlineResult]:
+    tasks: tuple[OutlineTask, ...],
+    on_complete: Callable[[OutlineResult], None] | None,
+    retain_results: bool,
+) -> tuple[list[OutlineResult], int]:
     results = []
     for task in tasks:
         result = _parse_outline_task(task)
-        results.append(result)
         if on_complete is not None:
             on_complete(result)
-    return results
+        if retain_results:
+            results.append(result)
+    return results, len(tasks)
 
 
 def _cancel_futures(futures: dict[object, OutlineTask]) -> None:
@@ -199,6 +252,7 @@ def _batch(
     results: list[OutlineResult],
     started: float,
     *,
+    files_completed: int,
     fallbacks: int,
 ) -> OutlineBatch:
     ordered_results = tuple(sorted(results, key=lambda result: result.ordinal))
@@ -207,7 +261,7 @@ def _batch(
         stats=ParallelBuildStats(
             configured_workers=configured_workers,
             effective_workers=effective_workers,
-            files_completed=len(ordered_results),
+            files_completed=files_completed,
             elapsed_seconds=perf_counter() - started,
             fallbacks=fallbacks,
         ),

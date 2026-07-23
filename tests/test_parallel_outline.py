@@ -136,6 +136,90 @@ def test_parallel_spawn_results_are_ordinal_sorted(tmp_path: Path) -> None:
     assert [result.model.unit_scope.name for result in batch.results if result.model] == ["Three", "One", "Two"]
 
 
+def test_retain_results_false_delivers_callbacks_without_retaining_models(tmp_path: Path) -> None:
+    tasks = []
+    for ordinal, name in enumerate(("Three", "One", "Two")):
+        path = tmp_path / f"{name}.pas"
+        _write_source(path, name)
+        tasks.append(OutlineTask(ordinal, str(path), (), True))
+    received: list[OutlineResult] = []
+
+    batch = run_outline_tasks(
+        tasks,
+        configured_workers=1,
+        retain_results=False,
+        on_complete=received.append,
+    )
+
+    assert [result.ordinal for result in received] == [0, 1, 2]
+    assert all(result.model is not None and result.text for result in received)
+    assert batch.results == ()
+    assert batch.stats.files_completed == 3
+
+
+class _FutureResultTypeError:
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+        self.cancelled = False
+
+    def result(self) -> OutlineResult:
+        raise self.error
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+
+class _SerializationFailureExecutor:
+    futures: list[_FutureResultTypeError] = []
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        del args, kwargs
+
+    def submit(self, *_: object) -> _FutureResultTypeError:
+        future = _FutureResultTypeError(TypeError("cannot pickle semantic model"))
+        self.futures.append(future)
+        return future
+
+    def shutdown(self, *, wait: bool, cancel_futures: bool) -> None:
+        del wait, cancel_futures
+
+
+def test_auto_mode_falls_back_once_after_future_serialization_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "One.pas"
+    _write_source(source, "One")
+    _SerializationFailureExecutor.futures = []
+    monkeypatch.setattr(parallel_outline, "ProcessPoolExecutor", _SerializationFailureExecutor)
+    monkeypatch.setattr(parallel_outline, "as_completed", lambda submitted: list(submitted))
+
+    batch = run_outline_tasks(
+        [OutlineTask(0, str(source), (), False), OutlineTask(1, str(source), (), False)],
+        configured_workers=0,
+        cpu_count=3,
+    )
+
+    assert batch.stats.effective_workers == 1
+    assert batch.stats.fallbacks == 1
+    assert batch.stats.files_completed == 2
+
+
+def test_explicit_mode_wraps_future_serialization_failure_with_source_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "One.pas"
+    _write_source(source, "One")
+    _SerializationFailureExecutor.futures = []
+    monkeypatch.setattr(parallel_outline, "ProcessPoolExecutor", _SerializationFailureExecutor)
+    monkeypatch.setattr(parallel_outline, "as_completed", lambda submitted: list(submitted))
+
+    with pytest.raises(ParallelOutlineError, match=str(source)):
+        run_outline_tasks(
+            [OutlineTask(0, str(source), (), False), OutlineTask(1, str(source), (), False)],
+            configured_workers=2,
+        )
+
+
 class _PoolStartupFailure:
     def __init__(self, *args: object, **kwargs: object) -> None:
         del args, kwargs
@@ -235,10 +319,11 @@ def test_parallel_callback_failure_cancels_pending_futures_and_propagates(
             [OutlineTask(0, str(source), (), False), OutlineTask(1, str(source), (), False)],
             configured_workers=2,
             on_complete=fail_callback,
-        )
+    )
 
     assert len(futures) == 2
-    assert all(future.cancelled for future in futures)
+    assert futures[0].cancelled is False
+    assert futures[1].cancelled is True
     assert shutdown_calls == [(False, True)]
 
 
