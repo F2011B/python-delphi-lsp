@@ -3,13 +3,14 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 import json
-from pathlib import Path
 import os
-import pytest
+from pathlib import Path
+import re
 import socket
 import textwrap
 import threading
 import time
+import pytest
 
 from delphi_lsp.agent_cache import (
     BudgetResult,
@@ -162,6 +163,36 @@ def test_live_unreachable_metadata_is_preserved_without_spawning(tmp_path: Path)
     with pytest.raises(CacheClientError, match="Live cache daemon is unavailable"):
         start_cache(tmp_path, max_memory_bytes=1024)
     assert json.loads(path.read_text(encoding="utf-8")) == raw
+
+
+def test_cache_startup_reports_child_diagnostics_on_failure(tmp_path: Path) -> None:
+    from delphi_lsp.agent_cache import CacheClientError, cache_metadata_path, _read_metadata, start_cache, stop_cache
+
+    write_source(tmp_path / "Demo.dpr", "program Demo; begin end.")
+    with pytest.raises(CacheClientError) as error:
+        start_cache(tmp_path, max_memory_bytes=0)
+    assert error.value.code == "startup_failed"
+    message = str(error.value)
+    assert "Cache daemon did not become ready." in message
+    assert "max_bytes must be greater than zero." in message
+    assert not re.search(r"[A-Za-z0-9_-]{32,}", message)
+    assert cache_metadata_path(tmp_path).exists() is False
+    assert _read_metadata(tmp_path) is None
+    stop_cache(tmp_path)
+
+
+def test_startup_diagnostic_truncates_normalizes_and_redacts_tokens() -> None:
+    from delphi_lsp.agent_cache import _truncate_and_sanitize_startup_diagnostics
+
+    raw = b"line1\x00line2\r\nline3\x1b[token=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCD]"
+    cleaned = _truncate_and_sanitize_startup_diagnostics(raw, max_bytes=16000)
+    assert "\x00" not in cleaned
+    assert "<redacted>" in cleaned
+    assert "line1 line2 line3" in cleaned
+
+    repeated = b"x" * (20000)
+    truncated = _truncate_and_sanitize_startup_diagnostics(repeated, max_bytes=16000)
+    assert len(truncated) <= 16000
 
 
 def test_partial_client_disconnect_does_not_stop_daemon(tmp_path: Path) -> None:

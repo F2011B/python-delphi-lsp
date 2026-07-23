@@ -31,6 +31,8 @@ DEFAULT_IDLE_TIMEOUT = 1800
 _MAX_MESSAGE_BYTES = 1024 * 1024
 _CONNECTION_TIMEOUT = 2.0
 _MEMORY_SIZE = re.compile(r"^(?P<count>[1-9][0-9]*)(?P<suffix>[KMG]?)$", re.IGNORECASE)
+_STARTUP_DIAGNOSTIC_BYTES = 16 * 1024
+_STARTUP_TOKEN_RE = re.compile(r"(?i)(token\b[^\n\r]*?:?\s*['\"]?[A-Za-z0-9_-]+['\"]?|\b[a-zA-Z0-9_-]{32,})")
 
 
 def estimate_deep_size(value: object) -> int:
@@ -423,6 +425,28 @@ def _read_line(connection: socket.socket) -> bytes:
     raise CacheClientError("invalid_response", "Cache daemon returned an invalid response.")
 
 
+def _truncate_and_sanitize_startup_diagnostics(raw: bytes, *, max_bytes: int = _STARTUP_DIAGNOSTIC_BYTES) -> str:
+    if not raw:
+        return ""
+    text = raw.decode("utf-8", "replace")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    if max_bytes > 0 and len(text) > max_bytes:
+        text = text[-max_bytes:]
+    text = re.sub(r"[\x00-\x09\x0b-\x1f\x7f-\x9f]", " ", text)
+    text = _STARTUP_TOKEN_RE.sub("<redacted>", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _read_startup_tail(diagnostics: object, *, max_bytes: int = _STARTUP_DIAGNOSTIC_BYTES) -> bytes:
+    with contextlib.suppress(Exception):
+        diagnostics.seek(0, os.SEEK_END)
+        end = diagnostics.tell()
+        diagnostics.seek(max(0, end - max_bytes), os.SEEK_SET)
+        return diagnostics.read()
+    return b""
+
+
 class _CacheService:
     def __init__(self, metadata: CacheMetadata) -> None:
         self.metadata = metadata
@@ -580,30 +604,49 @@ def _start_cache_unlocked(root: str | Path, *, project_file: str | Path | None =
     command = [sys.executable, "-m", "delphi_lsp.agent_cache", "serve", "--root", canonical, "--max-memory", str(max_memory_bytes), "--idle-timeout", str(idle_timeout)]
     if project:
         command.extend(("--project-file", project))
-    options: dict[str, object] = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    options: dict[str, object] = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL}
     if os.name == "nt":
         options["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         options["start_new_session"] = True
-    process = subprocess.Popen(command, **options)
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline:
-        metadata = _read_metadata(canonical)
-        if metadata:
-            try:
-                _client_exchange(metadata, {"action": "status", "_startup_probe": True})
-                return metadata
-            except CacheClientError:
-                pass
-        if process.poll() is not None:
-            break
-        time.sleep(0.05)
-    with contextlib.suppress(OSError):
-        process.kill()
-    metadata = _read_metadata(canonical)
-    if metadata and metadata.pid == process.pid:
-        _remove_metadata_if_owned(metadata)
-    raise CacheClientError("startup_failed", "Cache daemon did not become ready.")
+    with tempfile.TemporaryFile() as diagnostics:
+        options["stderr"] = diagnostics
+        process = subprocess.Popen(command, **options)
+        deadline = time.monotonic() + 10
+        startup_ready = False
+        try:
+            while time.monotonic() < deadline:
+                metadata = _read_metadata(canonical)
+                if metadata:
+                    try:
+                        _client_exchange(metadata, {"action": "status", "_startup_probe": True})
+                        startup_ready = True
+                        return metadata
+                    except CacheClientError:
+                        pass
+                if process.poll() is not None:
+                    break
+                time.sleep(0.05)
+            if process.poll() is None:
+                process.kill()
+            with contextlib.suppress(Exception):
+                process.wait()
+            metadata = _read_metadata(canonical)
+            if metadata and metadata.pid == process.pid:
+                _remove_metadata_if_owned(metadata)
+            diagnostics.seek(0)
+            raw = _read_startup_tail(diagnostics)
+            message = _truncate_and_sanitize_startup_diagnostics(raw)
+            base = "Cache daemon did not become ready."
+            if message:
+                raise CacheClientError("startup_failed", f"{base} {message}")
+            raise CacheClientError("startup_failed", base)
+        finally:
+            if not startup_ready:
+                if process.poll() is None:
+                    process.kill()
+                with contextlib.suppress(Exception):
+                    process.wait()
 
 
 def start_cache(root: str | Path, *, project_file: str | Path | None = None, max_memory_bytes: int = DEFAULT_MAX_MEMORY_BYTES, idle_timeout: int = DEFAULT_IDLE_TIMEOUT) -> CacheMetadata:
