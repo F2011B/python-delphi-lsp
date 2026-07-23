@@ -28,12 +28,12 @@ def test_lsp_console_script_dependencies_are_installed_by_default() -> None:
     assert '"lsprotocol>=2023.0.1"' in project
 
 
-def test_release_metadata_declares_2_0_1_sole_namespace_author_and_windows_support() -> None:
+def test_release_metadata_declares_2_0_5_sole_namespace_author_and_windows_support() -> None:
     pyproject = (ROOT / 'pyproject.toml').read_text(encoding='utf-8')
     project = _section('project', pyproject)
     scripts = _section('project.scripts', pyproject)
 
-    assert 'version = "2.0.4"' in project
+    assert 'version = "2.0.5"' in project
     assert '"Operating System :: OS Independent"' in project
     assert '"Operating System :: Microsoft :: Windows"' in project
     assert '"Operating System :: MacOS"' in project
@@ -83,7 +83,7 @@ def test_readme_documents_v2_release_plugin_protocol_discovery_and_vllm_proof() 
     assert 'Auto-discovery reads `.dpr`, `.dpk`, `.dproj`, `.cfg`, and `.dof` files' in readme
     assert 'no file-size threshold' in readme
     assert 'final answer' in readme
-    assert 'Version 2.0.4' in readme
+    assert 'Version 2.0.5' in readme
     assert 'view --layer metrics' in readme
     assert '`metrics`' in readme
     assert 'total_loc_with_includes' in readme
