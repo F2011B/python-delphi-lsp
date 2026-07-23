@@ -35,6 +35,7 @@ _CONNECTION_TIMEOUT = 2.0
 _MEMORY_SIZE = re.compile(r"^(?P<count>[1-9][0-9]*)(?P<suffix>[KMG]?)$", re.IGNORECASE)
 _STARTUP_DIAGNOSTIC_BYTES = 16 * 1024
 _STARTUP_TOKEN_RE = re.compile(r"(?i)(token\b[^\n\r]*?:?\s*['\"]?[A-Za-z0-9_-]+['\"]?|\b[a-zA-Z0-9_-]{32,})")
+_START_LOCK_INCOMPLETE_GRACE_SECONDS = 1.0
 
 
 def estimate_deep_size(value: object) -> int:
@@ -422,6 +423,21 @@ def _start_lock_path(root: str | Path) -> Path:
     return _safe_metadata_path(root, create=True).with_name("start.lock")
 
 
+def _start_lock_is_stale(path: Path) -> bool:
+    try:
+        age = max(0.0, time.time() - path.stat().st_mtime)
+    except OSError:
+        return True
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError):
+        return age >= _START_LOCK_INCOMPLETE_GRACE_SECONDS
+    owner = record.get("pid") if isinstance(record, dict) else None
+    if type(owner) is int and owner > 0:
+        return not _pid_alive(owner)
+    return age >= _START_LOCK_INCOMPLETE_GRACE_SECONDS
+
+
 @contextlib.contextmanager
 def _start_lock(root: str | Path, timeout: float):
     path = _start_lock_path(root)
@@ -438,14 +454,7 @@ def _start_lock(root: str | Path, timeout: float):
                 os.close(descriptor)
             break
         except FileExistsError:
-            try:
-                record = json.loads(path.read_text(encoding="utf-8"))
-                owner = record.get("pid") if isinstance(record, dict) else None
-                started = record.get("started_at") if isinstance(record, dict) else None
-                stale = type(owner) is not int or not _pid_alive(owner) or type(started) not in (int, float)
-            except (OSError, ValueError, UnicodeError):
-                stale = True
-            if stale:
+            if _start_lock_is_stale(path):
                 with contextlib.suppress(FileNotFoundError):
                     path.unlink()
                 continue

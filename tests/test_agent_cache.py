@@ -358,6 +358,18 @@ def test_prewarm_only_tolerates_project_selection_error(monkeypatch, tmp_path: P
         service.prewarm()
 
 
+def test_fresh_incomplete_start_lock_is_not_stale(tmp_path: Path) -> None:
+    from delphi_lsp.agent_cache import _start_lock_is_stale
+
+    path = tmp_path / "start.lock"
+    path.write_bytes(b"")
+
+    assert _start_lock_is_stale(path) is False
+    old = time.time() - 5
+    os.utime(path, (old, old))
+    assert _start_lock_is_stale(path) is True
+
+
 def test_concurrent_starts_reuse_one_daemon(tmp_path: Path) -> None:
     from delphi_lsp.agent_cache import start_cache, stop_cache
 
@@ -386,8 +398,8 @@ def test_child_reaping_is_portable_without_posix_waitpid(
 ) -> None:
     from delphi_lsp import agent_cache
 
-    monkeypatch.delattr(agent_cache.os, "waitpid")
-    monkeypatch.delattr(agent_cache.os, "WNOHANG")
+    monkeypatch.delattr(agent_cache.os, "waitpid", raising=False)
+    monkeypatch.delattr(agent_cache.os, "WNOHANG", raising=False)
 
     assert agent_cache._reap_child_if_exited(424242) is False
 

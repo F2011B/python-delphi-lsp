@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -96,7 +97,7 @@ def test_parser_failure_is_a_parallel_outline_error_with_source_path(
 
     monkeypatch.setattr(parallel_outline, "build_outline_semantic_model", fail_parser)
 
-    with pytest.raises(ParallelOutlineError, match=str(source)):
+    with pytest.raises(ParallelOutlineError, match=re.escape(str(source))):
         run_outline_tasks([OutlineTask(0, str(source), (), False)], configured_workers=1)
 
 
@@ -270,7 +271,7 @@ def test_explicit_mode_wraps_future_serialization_failure_with_source_path(
     monkeypatch.setattr(parallel_outline, "ProcessPoolExecutor", _SerializationFailureExecutor)
     monkeypatch.setattr(parallel_outline, "as_completed", lambda submitted: list(submitted))
 
-    with pytest.raises(ParallelOutlineError, match=str(source)):
+    with pytest.raises(ParallelOutlineError, match=re.escape(str(source))):
         run_outline_tasks(
             [OutlineTask(0, str(source), (), False), OutlineTask(1, str(source), (), False)],
             configured_workers=2,
