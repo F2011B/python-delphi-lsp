@@ -457,6 +457,20 @@ def test_readme_documents_bounded_cache_daemon_commands_and_retention_contract()
     assert ".delphi-lsp/agent-cache/daemon.json" in readme
     assert "owner-only token" in readme
     assert "Do not copy or share this token" in readme
+    assert "--workers auto|N" in readme
+    assert "--startup-timeout 120" in readme
+    assert "four worker processes" in readme
+    assert "128 MiB" in readme
+    assert "spawn" in readme
+    assert "short-lived" in readme
+    assert "transient worker memory" in readme
+    assert "automatic serial fallback" in readme
+    assert "workers_configured" in readme
+    assert "workers_effective" in readme
+    assert "parallel_files_completed" in readme
+    assert "prewarm_seconds" in readme
+    assert "parallel_seconds" in readme
+    assert "parallel_fallbacks" in readme
 
 def write_source(path: Path, source: str) -> None:
     path.write_text(textwrap.dedent(source).strip() + "\n", encoding="utf-8")

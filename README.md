@@ -147,12 +147,15 @@ problems; paths are not guessed.
 
 ```text
 delphi-lsp-agent cache start --root PATH [--project-file FILE] [--max-memory 512M]
+                                  [--workers auto|N] [--startup-timeout 120]
                                   [--idle-timeout 1800]
 delphi-lsp-agent cache status --root PATH [--format text|json]
 delphi-lsp-agent cache stop --root PATH
 delphi-lsp-agent view --root PATH [--project-file FILE] --layer LAYER
                       [--query TEXT] [--format markdown|json] [--deep-projects]
+                      [--workers auto|N]
 delphi-lsp-agent index --root PATH [--project-file FILE] [--out FILE]
+                       [--workers auto|N]
 delphi-lsp-agent query --root PATH ACTION [VALUE]
                       [--project-id FILE] [--detail summary|declaration|members|context|body|implementations]
                       [--relation references|callers|callees|uses|used_by|inherits|implements]
@@ -160,7 +163,7 @@ delphi-lsp-agent query --root PATH ACTION [VALUE]
 delphi-lsp-agent skill install [--target PATH] [--force]
 delphi-lsp-agent opencode install [--target PATH] [--python PYTHON]
                                   [--force] [--write-agent|--write-config]
-delphi-lsp-agent worker --root PATH [--project-file FILE]
+delphi-lsp-agent worker --root PATH [--project-file FILE] [--workers auto|N]
 ```
 
 The `cache` commands manage one daemon per canonical root. Use these:
@@ -194,6 +197,27 @@ fast. The cache retained-cache budget is `512 MiB` by default and tracks retaine
 cache usage only, not a hard RSS/parse peak. Warnings are emitted on stderr at or
 above 80 percent.
 
+Cold builds parse independent source units in short-lived processes created with
+the cross-platform `spawn` method. `--workers auto|N` defaults to `auto`.
+Automatic selection uses at most four worker processes, leaves one detected CPU
+free, never exceeds the source task count, and—for the cache daemon—allows one
+worker per `128 MiB` of retained-cache budget. `view` and `index` use the same
+task, CPU, and four-worker caps without the cache-budget term. An explicit value
+from 1 through 32 overrides the automatic CPU and memory caps but is still
+limited by the number of tasks.
+
+Worker processes exit before retained-cache accounting. Their models and source
+text are streamed into the parent, so transient worker memory is separate from
+the retained navigation structures and the existing 80-percent warning. If an
+automatic pool fails before accepting a result, one automatic serial fallback
+is attempted; explicit worker counts fail instead of silently changing the
+requested configuration.
+
+`cache start` waits up to `--startup-timeout 120` seconds by default for a large
+workspace to prewarm. The timeout belongs to the starting client and does not
+change daemon compatibility or idle shutdown. Starting a live root with a
+different worker configuration reports a configuration conflict.
+
 Eviction is ordered: auxiliary caches are evicted first, navigation caches second.
 If compaction removes navigable data, the daemon rebuilds the navigation state on demand
 while preserving focus state for the next request.
@@ -201,7 +225,9 @@ while preserving focus state for the next request.
 The daemon tracks a 30-minute idle timeout; idle state shows in JSON status (`cache status`).
 `source revision` changes on source edits and invalidate reused request caches.
 Workspace state appears in status as `requests`, `warm_hits`, `rebuilds`, `invalidations`,
-`evictions`, and `cache_state`.
+`evictions`, and `cache_state`. Parallel prewarm status adds
+`workers_configured`, `workers_effective`, `parallel_files_completed`,
+`prewarm_seconds`, `parallel_seconds`, and `parallel_fallbacks`.
 
 Metadata is stored in `.delphi-lsp/agent-cache/daemon.json` with owner-only token and
 permissions (`daemon.json` mode 600 and parent 700). Do not copy or share this token
