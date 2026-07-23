@@ -176,6 +176,13 @@ class AgentWorkspace:
     def active_project_id(self) -> str:
         return self._active_project_id
 
+    def cache_roots(self) -> tuple[object, ...]:
+        return (self._project_cache, self._active_result)
+
+    def evict_recomputable_caches(self) -> None:
+        self._project_cache.clear()
+        self._active_result = None
+
     @property
     def focus(self) -> Focus:
         return self._focus

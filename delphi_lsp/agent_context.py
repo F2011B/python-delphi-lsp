@@ -255,6 +255,28 @@ class AgentContext:
     def workspace(self) -> AgentWorkspace:
         return self._workspace
 
+    @property
+    def navigation_cache_is_warm(self) -> bool:
+        return self._registry is not None
+
+    def cache_roots(self) -> tuple[object, ...]:
+        return (
+            *self._workspace.cache_roots(),
+            self._registry,
+            self._relation_index,
+            self._metrics,
+        )
+
+    def evict_auxiliary_caches(self) -> None:
+        self._relation_index = None
+        self._metrics = None
+        self._metrics_revision = ""
+
+    def evict_navigation_caches(self) -> None:
+        self.evict_auxiliary_caches()
+        self._registry = None
+        self._workspace.evict_recomputable_caches()
+
     def handle(self, request: AgentRequest | Mapping[str, object]) -> AgentResponse:
         parsed = _validated_request(request)
         revision = self._refresh_workspace(parsed.project_id)
