@@ -70,10 +70,13 @@ def test_parser_adds_cache_lifecycle_and_ergonomic_query_commands() -> None:
     start = parser.parse_args(["cache", "start"])
     status = parser.parse_args(["cache", "status", "--root", "workspace", "--format", "json"])
     stop = parser.parse_args(["cache", "stop", "--root", "workspace"])
-    serve = parser.parse_args(["cache", "serve", "--root", "workspace", "--max-memory", "2M"])
-    query = parser.parse_args(
-        ["query", "--root", "workspace", "find", "TCustomer", "--project", "Main.dpr", "--max-items", "4"]
+    serve = parser.parse_args(
+        ["cache", "serve", "--root", "workspace", "--max-memory", "2M", "--idle-timeout", "90"]
     )
+    query = parser.parse_args(
+        ["query", "--root", "workspace", "find", "TCustomer", "--project-id", "Main.dpr", "--max-items", "4"]
+    )
+    defaults = parser.parse_args(["query", "open"])
 
     assert start.cache_command == "start"
     assert start.root == Path(".")
@@ -82,10 +85,49 @@ def test_parser_adds_cache_lifecycle_and_ergonomic_query_commands() -> None:
     assert status.format == "json"
     assert stop.root == Path("workspace")
     assert serve.max_memory == 2 * 1024**2
+    assert serve.idle_timeout == 90
     assert query.action == "find"
     assert query.value == "TCustomer"
-    assert query.project == "Main.dpr"
+    assert query.project_id == "Main.dpr"
     assert query.max_items == 4
+    assert defaults.value == ""
+    assert defaults.project_id == ""
+    assert defaults.detail == "summary"
+    assert defaults.relation is None
+    assert defaults.cursor == ""
+    assert defaults.max_items == 12
+    assert defaults.max_chars == 12000
+    with pytest.raises(SystemExit):
+        parser.parse_args(["cache", "serve", "--root", "workspace"])
+
+
+def test_query_maps_project_id_value_and_protocol_defaults(monkeypatch, capsys) -> None:
+    args = agent_cli.build_parser().parse_args(
+        ["query", "--root", "workspace", "find", "TCustomer", "--project-id", "Main.dpr"]
+    )
+    captured: dict[str, object] = {}
+
+    def query(root: Path, request: dict[str, object]) -> SimpleNamespace:
+        captured["root"] = root
+        captured["request"] = request
+        return SimpleNamespace(payload={"schema": 2}, warning="")
+
+    monkeypatch.setattr(agent_cli, "query_cache", query)
+
+    assert agent_cli._query(args) == 0
+    assert captured == {
+        "root": Path("workspace"),
+        "request": {
+            "action": "find",
+            "query": "TCustomer",
+            "project_id": "Main.dpr",
+            "detail": "summary",
+            "cursor": "",
+            "max_items": 12,
+            "max_chars": 12000,
+        },
+    }
+    assert capsys.readouterr().out == '{"schema":2}\n'
 
 
 def test_cache_cli_lifecycle_query_and_warning_streams(tmp_path: Path) -> None:
@@ -153,6 +195,8 @@ end.
         )
     assert stop.returncode == 0
     assert json.loads(stop.stdout) == {"stopped": True}
+    assert "bytes" in stop.stderr
+    assert "Increase --max-memory" in stop.stderr
 
 
 def test_query_does_not_start_a_missing_cache_and_sanitizes_errors(tmp_path: Path) -> None:

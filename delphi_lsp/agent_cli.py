@@ -19,7 +19,7 @@ from .agent_cache import (
     stop_cache,
 )
 from .agent_layers import build_codebase_index, layer_payload, render_layer
-from .agent_protocol import AgentProtocolError, SUPPORTED_ACTIONS
+from .agent_protocol import AgentProtocolError, SUPPORTED_ACTIONS, SUPPORTED_DETAILS, SUPPORTED_RELATIONS
 from .agent_templates import install_opencode_support, install_skill
 
 
@@ -110,19 +110,22 @@ def build_parser() -> argparse.ArgumentParser:
     cache_stop.add_argument("--root", type=Path, default=Path("."))
     cache_stop.set_defaults(func=_cache_stop)
     cache_serve = cache_commands.add_parser("serve", help=argparse.SUPPRESS)
-    _add_cache_start_arguments(cache_serve)
+    cache_serve.add_argument("--root", type=Path, required=True)
+    cache_serve.add_argument("--project-file", type=Path)
+    cache_serve.add_argument("--max-memory", type=parse_memory_size, required=True)
+    cache_serve.add_argument("--idle-timeout", type=int, required=True)
     cache_serve.set_defaults(func=_cache_serve)
 
     query = subcommands.add_parser("query", help="Send an ergonomic request to a running cache daemon.")
     query.add_argument("--root", type=Path, default=Path("."))
     query.add_argument("action", choices=SUPPORTED_ACTIONS)
-    query.add_argument("value", nargs="?")
-    query.add_argument("--project")
-    query.add_argument("--detail")
-    query.add_argument("--relation")
-    query.add_argument("--cursor")
-    query.add_argument("--max-items", type=int)
-    query.add_argument("--max-chars", type=int)
+    query.add_argument("value", nargs="?", default="")
+    query.add_argument("--project-id", default="")
+    query.add_argument("--detail", choices=SUPPORTED_DETAILS, default="summary")
+    query.add_argument("--relation", choices=SUPPORTED_RELATIONS)
+    query.add_argument("--cursor", default="")
+    query.add_argument("--max-items", type=int, default=12)
+    query.add_argument("--max-chars", type=int, default=12000)
     query.set_defaults(func=_query)
 
     return parser
@@ -266,10 +269,7 @@ def _cache_stop(args: argparse.Namespace) -> int:
             _write_json({"stopped": False})
             return 0
         return _cache_error(error)
-    if float(response.payload.get("current_utilization_percent", 0.0)) >= 80:
-        _write_warning(
-            f"Warning: Delphi cache currently at {float(response.payload['current_utilization_percent']):.1f}% before stopping."
-        )
+    _write_warning(response.warning)
     try:
         stop_cache(args.root)
     except CacheClientError as error:
@@ -285,7 +285,7 @@ def _cache_serve(args: argparse.Namespace) -> int:
 
 def _query(args: argparse.Namespace) -> int:
     request: dict[str, object] = {"action": args.action}
-    if args.value is not None:
+    if args.value:
         if args.action in {"find", "metrics"}:
             request["query"] = args.value
         elif args.action in {"focus", "inspect", "trace"}:
@@ -294,7 +294,7 @@ def _query(args: argparse.Namespace) -> int:
             sys.stderr.write(f"cache_error:invalid_request: {args.action} does not accept a value.\n")
             sys.stderr.flush()
             return 1
-    for argument, field in (("project", "project_id"), ("detail", "detail"), ("relation", "relation"), ("cursor", "cursor"), ("max_items", "max_items"), ("max_chars", "max_chars")):
+    for argument, field in (("project_id", "project_id"), ("detail", "detail"), ("relation", "relation"), ("cursor", "cursor"), ("max_items", "max_items"), ("max_chars", "max_chars")):
         value = getattr(args, argument)
         if value is not None:
             request[field] = value
