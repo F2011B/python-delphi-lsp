@@ -157,6 +157,63 @@ def test_retain_results_false_delivers_callbacks_without_retaining_models(tmp_pa
     assert batch.stats.files_completed == 3
 
 
+class _WindowFuture:
+    def __init__(
+        self,
+        task: OutlineTask,
+        executor: "_WindowExecutor",
+    ) -> None:
+        self.task = task
+        self.executor = executor
+
+    def result(self) -> OutlineResult:
+        self.executor.active -= 1
+        return OutlineResult(
+            self.task.ordinal,
+            self.task.source_path,
+            "",
+            SimpleNamespace(index=SimpleNamespace(name_index={}), unit_scope=object()),
+            1,
+            0,
+        )
+
+    def cancel(self) -> None:
+        self.executor.active -= 1
+
+
+class _WindowExecutor:
+    instance: "_WindowExecutor | None" = None
+
+    def __init__(self, *, max_workers: int, mp_context: object) -> None:
+        del mp_context
+        self.max_workers = max_workers
+        self.active = 0
+        self.peak_active = 0
+        _WindowExecutor.instance = self
+
+    def submit(self, _operation: object, task: OutlineTask) -> _WindowFuture:
+        self.active += 1
+        self.peak_active = max(self.peak_active, self.active)
+        return _WindowFuture(task, self)
+
+    def shutdown(self, *, wait: bool, cancel_futures: bool) -> None:
+        del wait, cancel_futures
+
+
+def test_parallel_submission_window_never_exceeds_effective_workers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tasks = [OutlineTask(ordinal, f"Unit{ordinal}.pas", (), False) for ordinal in range(7)]
+    monkeypatch.setattr(parallel_outline, "ProcessPoolExecutor", _WindowExecutor)
+    monkeypatch.setattr(parallel_outline, "as_completed", lambda submitted: iter(tuple(submitted)))
+
+    batch = run_outline_tasks(tasks, configured_workers=2)
+
+    assert batch.stats.files_completed == len(tasks)
+    assert _WindowExecutor.instance is not None
+    assert _WindowExecutor.instance.peak_active == 2
+
+
 class _FutureResultTypeError:
     def __init__(self, error: BaseException) -> None:
         self.error = error

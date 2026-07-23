@@ -152,8 +152,13 @@ def run_outline_tasks(
     try:
         context = multiprocessing.get_context("spawn")
         executor = ProcessPoolExecutor(max_workers=effective_workers, mp_context=context)
-        futures = {executor.submit(_parse_outline_task, task): task for task in task_list}
-        for future in as_completed(futures):
+        task_iterator = iter(task_list)
+        for task in task_iterator:
+            futures[executor.submit(_parse_outline_task, task)] = task
+            if len(futures) == effective_workers:
+                break
+        while futures:
+            future = next(iter(as_completed(tuple(futures))))
             task = futures.pop(future)
             try:
                 result = future.result()
@@ -181,6 +186,11 @@ def run_outline_tasks(
                 on_complete(result)
             if retain_results:
                 accepted.append(result)
+            try:
+                next_task = next(task_iterator)
+            except StopIteration:
+                continue
+            futures[executor.submit(_parse_outline_task, next_task)] = next_task
     except ParallelOutlineError:
         _cancel_futures(futures)
         _shutdown_failed_executor(executor)
