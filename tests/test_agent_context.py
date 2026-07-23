@@ -58,6 +58,51 @@ def test_open_exposes_read_only_workspace_and_complete_response_envelope(tmp_pat
         context.workspace = object()  # type: ignore[misc]
 
 
+def test_parallel_registry_matches_serial_cards_and_records_effective_workers(tmp_path: Path) -> None:
+    for name in ("Alpha", "Bravo", "Charlie"):
+        write_source(
+            tmp_path / f"{name}.pas",
+            f"""
+            unit {name};
+            interface
+            type
+              T{name} = class
+              end;
+            implementation
+            end.
+            """,
+        )
+
+    serial = AgentContext.open(tmp_path, workers=1)
+    parallel = AgentContext.open(tmp_path, workers=2)
+
+    serial_cards = result_items(serial.handle({"action": "find", "query": "T"}))
+    parallel_cards = result_items(parallel.handle({"action": "find", "query": "T"}))
+
+    assert parallel_cards == serial_cards
+    assert parallel.parallel_stats.effective_workers == 2
+    assert parallel.parallel_stats.files_completed == 3
+
+
+def test_registry_unreadable_outline_source_reports_a_sanitized_path(tmp_path: Path) -> None:
+    source = tmp_path / "Unavailable.pas"
+    write_source(source, "unit Unavailable; interface implementation end.")
+    context = AgentContext.open(tmp_path, workers=1)
+    source.unlink()
+
+    with pytest.raises(AgentProtocolError) as caught:
+        agent_context_module._build_registry(
+            context.workspace,
+            context.workspace.active_project_id,
+            context.workspace.workspace_revision,
+            workers=1,
+        )
+
+    assert caught.value.code == "source_unavailable"
+    assert "Unavailable.pas" in caught.value.message
+    assert str(tmp_path) not in caught.value.message
+
+
 def test_multi_project_symbol_actions_require_selection_and_switch_projects(tmp_path: Path) -> None:
     write_source(
         tmp_path / "A.dpr",
@@ -128,10 +173,7 @@ def test_multi_project_symbol_actions_require_selection_and_switch_projects(tmp_
     assert b_result.focus == Focus(project_id=project_ids["B"])
 
 
-def test_find_uses_only_active_units_and_reads_each_original_once(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_find_uses_only_active_units_and_prewarms_the_registry(tmp_path: Path) -> None:
     write_source(
         tmp_path / "Main.dpr",
         """
@@ -166,32 +208,13 @@ def test_find_uses_only_active_units_and_reads_each_original_once(
         """,
     )
     context = AgentContext.open(tmp_path)
-    calls: list[tuple[str, str]] = []
-    read_calls: list[Path] = []
-    real_builder = agent_context_module.build_outline_semantic_model
-    real_reader = agent_context_module.read_source_text
-
-    def recording_builder(text: str, file_name: str):
-        calls.append((text, file_name))
-        return real_builder(text, file_name)
-
-    def recording_reader(path: Path) -> str:
-        read_calls.append(path)
-        return real_reader(path)
-
-    monkeypatch.setattr(agent_context_module, "build_outline_semantic_model", recording_builder)
-    monkeypatch.setattr(agent_context_module, "read_source_text", recording_reader)
-
     selected = context.handle({"action": "find", "query": "TSelected"})
     noise = context.handle({"action": "find", "query": "TNoise"})
     context.handle({"action": "find", "query": "TSelected"})
 
     assert card_named(selected, "TSelected")["path"] == "src/Selected.pas"
     assert result_items(noise) == []
-    assert sorted(Path(file_name).name for _, file_name in calls) == ["Main.dpr", "Selected.pas"]
-    assert all(Path(file_name).is_absolute() for _, file_name in calls)
-    assert sorted(path.name for path in read_calls) == ["Main.dpr", "Selected.pas"]
-    assert all(path.is_absolute() for path in read_calls)
+    assert context.parallel_stats.files_completed == 2
 
 
 def test_repeated_find_reuses_ranked_registry_entries(

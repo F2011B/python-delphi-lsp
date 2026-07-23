@@ -21,6 +21,7 @@ from .agent_cache import (
 from .agent_layers import build_codebase_index, layer_payload, render_layer
 from .agent_protocol import AgentProtocolError, SUPPORTED_ACTIONS, SUPPORTED_DETAILS, SUPPORTED_RELATIONS
 from .agent_templates import install_opencode_support, install_skill
+from .parallel_outline import parse_worker_setting
 
 
 _MAX_WORKER_RECORD_BYTES = 1024 * 1024
@@ -95,6 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
     worker = subcommands.add_parser("worker", help="Serve Protocol v2 NDJSON requests.")
     worker.add_argument("--root", type=Path, required=True)
     worker.add_argument("--project-file", type=Path)
+    worker.add_argument("--workers", type=parse_worker_setting, default=0)
     worker.set_defaults(func=_worker)
 
     cache = subcommands.add_parser("cache", help="Manage the shared Protocol v2 cache daemon.")
@@ -207,7 +209,7 @@ def _opencode_install(args: argparse.Namespace) -> None:
 
 
 def _worker(args: argparse.Namespace) -> None:
-    context = AgentContext.open(args.root, args.project_file)
+    context = AgentContext.open(args.root, args.project_file, workers=args.workers)
     try:
         _serve_worker(context, sys.stdin.buffer, sys.stdout.buffer, sys.stderr)
     finally:

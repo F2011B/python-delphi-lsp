@@ -26,6 +26,7 @@ def _worker(
     payload: bytes,
     *,
     project_file: Path | None = None,
+    workers: str | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     command = [
         sys.executable,
@@ -37,6 +38,8 @@ def _worker(
     ]
     if project_file is not None:
         command.extend(["--project-file", str(project_file)])
+    if workers is not None:
+        command.extend(["--workers", workers])
     return subprocess.run(
         command,
         input=payload,
@@ -52,16 +55,35 @@ def _lines(completed: subprocess.CompletedProcess[bytes]) -> list[dict[str, obje
 def test_parser_adds_worker_without_changing_legacy_commands() -> None:
     parser = agent_cli.build_parser()
 
-    worker = parser.parse_args(["worker", "--root", "workspace", "--project-file", "Main.dpr"])
+    worker = parser.parse_args(["worker", "--root", "workspace", "--project-file", "Main.dpr", "--workers", "2"])
+    auto_worker = parser.parse_args(["worker", "--root", "workspace", "--workers", "auto"])
     view = parser.parse_args(["view", "--layer", "overview"])
     metrics = parser.parse_args(["view", "--layer", "metrics"])
 
     assert worker.command == "worker"
     assert worker.root == Path("workspace")
     assert worker.project_file == Path("Main.dpr")
+    assert worker.workers == 2
+    assert auto_worker.workers == 0
     assert view.command == "view"
     assert view.layer == "overview"
     assert metrics.layer == "metrics"
+
+
+def test_worker_parallel_output_is_deterministic(tmp_path: Path) -> None:
+    for name in ("Alpha", "Bravo", "Charlie"):
+        _write_source(
+            tmp_path / f"{name}.pas",
+            f"unit {name}; interface type T{name} = class end; implementation end.\n",
+        )
+
+    payload = b'{"action":"find","query":"T","max_items":20}\n'
+    serial = _worker(tmp_path, payload, workers="1")
+    parallel = _worker(tmp_path, payload, workers="2")
+
+    assert serial.returncode == parallel.returncode == 0
+    assert _lines(parallel) == _lines(serial)
+    assert parallel.stderr == b""
 
 
 def test_parser_adds_cache_lifecycle_and_ergonomic_query_commands() -> None:

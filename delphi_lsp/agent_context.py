@@ -22,12 +22,12 @@ from .agent_metrics import build_workspace_metrics, project_metric_item, unit_me
 from .agent_relations import ProjectRelationIndex, RelationTarget
 from .agent_workspace import AgentUnit, AgentWorkspace, unit_display_path, unit_source_path, unit_target_id
 from .consts import AttributeName, SyntaxNodeType
-from .lsp_server import build_outline_semantic_model, multiline_string_block_end
+from .lsp_server import multiline_string_block_end
 from .nodes import CompoundSyntaxNode, SyntaxNode
 from .parser import DelphiParser
 from .semantic import Scope, ScopeKind, Symbol, SymbolKind
-from .source_reader import read_source_text
 from .metrics import ProjectMetrics
+from .parallel_outline import OutlineTask, ParallelBuildStats, run_outline_tasks
 
 
 _ROUTINE_KINDS = frozenset(
@@ -239,8 +239,17 @@ class _Registry:
 
 
 class AgentContext:
-    def __init__(self, workspace: AgentWorkspace) -> None:
+    def __init__(
+        self,
+        workspace: AgentWorkspace,
+        *,
+        workers: int = 0,
+        worker_memory_budget_bytes: int | None = None,
+    ) -> None:
         self._workspace = workspace
+        self._workers = workers
+        self._worker_memory_budget_bytes = worker_memory_budget_bytes
+        self._parallel_stats = ParallelBuildStats(0, 0, 0, 0.0, 0)
         project_id = workspace.active_project_id
         self._focus = Focus(project_id=project_id) if project_id else Focus()
         self._last_revision = workspace.workspace_revision
@@ -254,8 +263,15 @@ class AgentContext:
         cls,
         root: str | Path,
         project_file: str | Path | None = None,
+        *,
+        workers: int = 0,
+        worker_memory_budget_bytes: int | None = None,
     ) -> AgentContext:
-        return cls(AgentWorkspace.open(root, project_file=project_file))
+        return cls(
+            AgentWorkspace.open(root, project_file=project_file),
+            workers=workers,
+            worker_memory_budget_bytes=worker_memory_budget_bytes,
+        )
 
     @property
     def workspace(self) -> AgentWorkspace:
@@ -264,6 +280,10 @@ class AgentContext:
     @property
     def navigation_cache_is_warm(self) -> bool:
         return self._registry is not None
+
+    @property
+    def parallel_stats(self) -> ParallelBuildStats:
+        return self._parallel_stats
 
     def cache_roots(self) -> tuple[object, ...]:
         return (
@@ -507,7 +527,13 @@ class AgentContext:
             and self._registry.revision == revision
         ):
             return self._registry
-        self._registry = _build_registry(self._workspace, project_id, revision)
+        self._registry, self._parallel_stats = _build_registry(
+            self._workspace,
+            project_id,
+            revision,
+            workers=self._workers,
+            worker_memory_budget_bytes=self._worker_memory_budget_bytes,
+        )
         if self._focus.target_id:
             focused_entry = self._registry.by_target.get(self._focus.target_id)
             if focused_entry is None:
@@ -696,36 +722,48 @@ def _validated_request(request: AgentRequest | Mapping[str, object]) -> AgentReq
     return AgentRequest.from_mapping(request)
 
 
-def _build_registry(workspace: AgentWorkspace, project_id: str, revision: str) -> _Registry:
+def _build_registry(
+    workspace: AgentWorkspace,
+    project_id: str,
+    revision: str,
+    *,
+    workers: int = 0,
+    worker_memory_budget_bytes: int | None = None,
+) -> tuple[_Registry, ParallelBuildStats]:
     raw_symbols: list[_RawSymbol] = []
     sources: dict[Path, _SourceDocument] = {}
-    for unit in workspace.units:
+    units = tuple(workspace.units)
+    outline_batch = run_outline_tasks(
+        (
+            OutlineTask(
+                ordinal,
+                str(unit_source_path(workspace.root, unit)),
+                workspace.defines,
+                True,
+            )
+            for ordinal, unit in enumerate(units)
+        ),
+        configured_workers=workers,
+        memory_budget_bytes=worker_memory_budget_bytes,
+    )
+    for result in outline_batch.results:
+        unit = units[result.ordinal]
         source_path = unit_source_path(workspace.root, unit)
         display_path = unit_display_path(workspace.root, unit)
-        try:
-            text = read_source_text(source_path)
-        except OSError as exc:
+        if result.read_error or result.model is None:
             raise AgentProtocolError(
                 "source_unavailable",
-                f"Could not read selected source {unit.path}: {exc}.",
-            ) from None
+                f"Could not read selected source {display_path}.",
+            )
         document = _SourceDocument(
             source_path,
             display_path,
-            text,
+            result.text,
             defines=workspace.defines,
             include_paths=workspace.include_paths,
         )
         sources[source_path] = document
-        if workspace.defines:
-            model = build_outline_semantic_model(
-                text,
-                str(source_path),
-                defines=workspace.defines,
-            )
-        else:
-            model = build_outline_semantic_model(text, str(source_path))
-        unit_symbols = _collect_raw_symbols(model.unit_scope, unit, source_path, document)
+        unit_symbols = _collect_raw_symbols(result.model.unit_scope, unit, source_path, document)
         raw_symbols.extend(_exclude_routine_locals(unit_symbols, document))
 
     ordered = sorted(raw_symbols, key=_raw_sort_key)
@@ -817,13 +855,16 @@ def _build_registry(workspace: AgentWorkspace, project_id: str, revision: str) -
         )
 
     entries_tuple = tuple(sorted(with_parents, key=_entry_sort_key))
-    return _Registry(
-        project_id=project_id,
-        revision=revision,
-        entries=entries_tuple,
-        by_target={entry.target_id: entry for entry in entries_tuple},
-        sources=sources,
-        ranked_queries={},
+    return (
+        _Registry(
+            project_id=project_id,
+            revision=revision,
+            entries=entries_tuple,
+            by_target={entry.target_id: entry for entry in entries_tuple},
+            sources=sources,
+            ranked_queries={},
+        ),
+        outline_batch.stats,
     )
 
 
