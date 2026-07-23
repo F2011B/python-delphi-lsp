@@ -18,8 +18,6 @@ from .semantic import (
     SymbolKind,
     SymbolReference,
     TypeRef,
-    NamedTypeRef,
-    GenericInstanceTypeRef,
     UnknownTypeRef,
     Visibility,
 )

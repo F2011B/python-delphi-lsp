@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 
-import delphi_lsp
 from delphi_lsp.agent_layers import build_codebase_index
 from delphi_lsp.project_indexer import ProjectIndexer
 
@@ -18,7 +17,6 @@ def _write(path: Path, text: str) -> None:
 def test_codebase_index_reports_frozen_per_file_progress_and_completion(tmp_path: Path) -> None:
     _write(tmp_path / "One.pas", "unit One; interface implementation end.\n")
     _write(tmp_path / "Two.pas", "unit Two; interface implementation end.\n")
-    progress_event_type = delphi_lsp.ProgressEvent
     events: list[object] = []
 
     build_codebase_index(tmp_path, on_progress=events.append)
