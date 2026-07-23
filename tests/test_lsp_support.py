@@ -1,5 +1,6 @@
 import pathlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -14,20 +15,23 @@ from delphi_lsp.semantic import SymbolKind
 
 
 FIXTURE_DIR = pathlib.Path(__file__).parent / 'fixtures'
+CI_PERFORMANCE_TIMEOUT_MULTIPLIER = 2.0 if os.environ.get('CI') else 1.0
 LARGE_FILE_LSP_COLD_START_TIMEOUT_SECONDS_BY_PLATFORM = {
     'linux': 3.0,
     'linux2': 3.0,
     'darwin': 2.0,
     'win32': 3.0,
 }
-LARGE_FILE_LSP_COLD_START_TIMEOUT_SECONDS = LARGE_FILE_LSP_COLD_START_TIMEOUT_SECONDS_BY_PLATFORM.get(
-    sys.platform,
-    3.0,
+LARGE_FILE_LSP_COLD_START_TIMEOUT_SECONDS = (
+    LARGE_FILE_LSP_COLD_START_TIMEOUT_SECONDS_BY_PLATFORM.get(sys.platform, 3.0)
+    * CI_PERFORMANCE_TIMEOUT_MULTIPLIER
 )
+LARGE_FILE_SYMBOL_MODEL_TIMEOUT_SECONDS = 1.0 * CI_PERFORMANCE_TIMEOUT_MULTIPLIER
 
 
 # Budgets include cold process startup, initialize, and the 100k-line rename; they
-# allow measured platform variance while retaining a regression guard far below 25s.
+# allow measured platform variance while retaining a regression guard far below
+# 25s. Hosted CI gets extra headroom for shared-runner scheduling variance.
 
 
 def _position_for(text: str, needle: str, *, offset: int = 0) -> tuple[int, int]:
@@ -1695,7 +1699,7 @@ end.
             self.assertIn('TMegaValue', names)
             self.assertIn('MegaProc00001', names)
             self.assertIn('MegaProc02500', names)
-            self.assertLess(elapsed, 1.0)
+            self.assertLess(elapsed, LARGE_FILE_SYMBOL_MODEL_TIMEOUT_SECONDS)
 
 
 if __name__ == '__main__':

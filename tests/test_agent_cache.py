@@ -583,7 +583,7 @@ def test_estimate_deep_size_reads_slotted_dataclass_fields_once() -> None:
             nonlocal reads
             if name == "value":
                 reads += 1
-            return super().__getattribute__(name)
+            return object.__getattribute__(self, name)
 
     assert estimate_deep_size(SlottedPayload("payload")) > 0
     assert reads == 1
