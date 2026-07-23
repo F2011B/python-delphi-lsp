@@ -8,6 +8,7 @@ import os
 import pytest
 import socket
 import textwrap
+import threading
 import time
 
 from delphi_lsp.agent_cache import (
@@ -93,6 +94,8 @@ def test_cache_daemon_stale_metadata_restarts_and_tracks_source_revision(tmp_pat
     metadata_path = cache_metadata_path(tmp_path)
     metadata_path.parent.mkdir(parents=True)
     metadata_path.write_text(json.dumps({"schema": 1, "root": str(tmp_path.resolve()), "pid": 999999, "port": 1, "token": "x" * 32, "version": "x", "project_file": "", "max_memory_bytes": 1024, "idle_timeout": 10, "started_at": 1.0}), encoding="utf-8")
+    if os.name != "nt":
+        metadata_path.chmod(0o600)
     try:
         start_cache(tmp_path, max_memory_bytes=1024)
         before = query_cache(tmp_path, {"action": "open"}).payload["workspace_revision"]
@@ -124,6 +127,8 @@ def test_live_unreachable_metadata_is_preserved_without_spawning(tmp_path: Path)
     path.parent.mkdir(parents=True)
     raw = {"schema": 1, "root": str(tmp_path.resolve()), "pid": os.getpid(), "port": 1, "token": "x" * 32, "version": "x", "project_file": "", "max_memory_bytes": 1024, "idle_timeout": 10, "started_at": 1.0}
     path.write_text(json.dumps(raw), encoding="utf-8")
+    if os.name != "nt":
+        path.chmod(0o600)
     with pytest.raises(CacheClientError, match="Live cache daemon is unavailable"):
         start_cache(tmp_path, max_memory_bytes=1024)
     assert json.loads(path.read_text(encoding="utf-8")) == raw
@@ -139,6 +144,69 @@ def test_partial_client_disconnect_does_not_stop_daemon(tmp_path: Path) -> None:
             connection.sendall(b'{"token":"partial"')
         assert query_cache(tmp_path, {"action": "open"}).payload["schema"] == 2
         assert cache_status(tmp_path)["pid"] == metadata.pid
+    finally:
+        stop_cache(tmp_path)
+
+
+def test_idle_client_times_out_without_blocking_daemon_or_idle_shutdown(tmp_path: Path) -> None:
+    from delphi_lsp.agent_cache import cache_metadata_path, cache_status, start_cache, stop_cache
+
+    write_source(tmp_path / "Demo.dpr", "program Demo; begin end.")
+    try:
+        metadata = start_cache(tmp_path, idle_timeout=3)
+        connection = socket.create_connection(("127.0.0.1", metadata.port))
+        time.sleep(2.2)
+        assert cache_status(tmp_path)["pid"] == metadata.pid
+        connection.close()
+        deadline = time.monotonic() + 4
+        while cache_metadata_path(tmp_path).exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not cache_metadata_path(tmp_path).exists()
+    finally:
+        stop_cache(tmp_path)
+
+
+def test_concurrent_starts_reuse_one_daemon(tmp_path: Path) -> None:
+    from delphi_lsp.agent_cache import start_cache, stop_cache
+
+    write_source(tmp_path / "Demo.dpr", "program Demo; begin end.")
+    results: list[int] = []
+    errors: list[Exception] = []
+    def start() -> None:
+        try:
+            results.append(start_cache(tmp_path).pid)
+        except Exception as error:
+            errors.append(error)
+    workers = [threading.Thread(target=start) for _ in range(8)]
+    for worker in workers: worker.start()
+    for worker in workers: worker.join()
+    try:
+        assert not errors
+        assert len(set(results)) == 1
+    finally:
+        stop_cache(tmp_path)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX metadata permissions")
+def test_metadata_reader_rejects_symlink_and_unsafe_permissions(tmp_path: Path) -> None:
+    from delphi_lsp.agent_cache import CacheClientError, cache_metadata_path, query_cache, start_cache, stop_cache
+
+    write_source(tmp_path / "Demo.dpr", "program Demo; begin end.")
+    try:
+        metadata = start_cache(tmp_path)
+        path = cache_metadata_path(tmp_path)
+        path.chmod(0o644)
+        with pytest.raises(CacheClientError, match="unsafe"):
+            query_cache(tmp_path, {"action": "open"})
+        path.chmod(0o600)
+        target = path.with_name("target.json")
+        path.replace(target)
+        path.symlink_to(target)
+        with pytest.raises(CacheClientError, match="unsafe"):
+            query_cache(tmp_path, {"action": "open"})
+        path.unlink()
+        target.replace(path)
+        assert query_cache(tmp_path, {"action": "open"}).payload["schema"] == 2
     finally:
         stop_cache(tmp_path)
 

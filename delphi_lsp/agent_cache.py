@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import secrets
 import socket
+import stat
 import subprocess
 import sys
 import re
@@ -28,6 +29,7 @@ WARNING_THRESHOLD_PERCENT = 80
 DAEMON_SCHEMA = 1
 DEFAULT_IDLE_TIMEOUT = 1800
 _MAX_MESSAGE_BYTES = 1024 * 1024
+_CONNECTION_TIMEOUT = 2.0
 _MEMORY_SIZE = re.compile(r"^(?P<count>[1-9][0-9]*)(?P<suffix>[KMG]?)$", re.IGNORECASE)
 
 
@@ -292,7 +294,17 @@ def _read_metadata(root: str | Path) -> CacheMetadata | None:
     if not path.exists():
         return None
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        try:
+            info = os.fstat(descriptor)
+            if os.name != "nt" and (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077):
+                raise CacheClientError("unsafe_metadata", "Cache metadata path is unsafe.")
+            raw = json.loads(os.read(descriptor, _MAX_MESSAGE_BYTES).decode("utf-8"))
+        finally:
+            os.close(descriptor)
+    except CacheClientError:
+        raise
     except (OSError, ValueError, UnicodeError):
         return None
     required = {field.name for field in fields(CacheMetadata)}
@@ -325,6 +337,51 @@ def _pid_alive(pid: int) -> bool:
     except OSError:
         return False
     return True
+
+
+def _start_lock_path(root: str | Path) -> Path:
+    return _safe_metadata_path(root, create=True).with_name("start.lock")
+
+
+@contextlib.contextmanager
+def _start_lock(root: str | Path):
+    path = _start_lock_path(root)
+    token = secrets.token_urlsafe(24)
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                payload = json.dumps({"pid": os.getpid(), "token": token, "started_at": time.time()}).encode("utf-8")
+                os.write(descriptor, payload)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            break
+        except FileExistsError:
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+                owner = record.get("pid") if isinstance(record, dict) else None
+                started = record.get("started_at") if isinstance(record, dict) else None
+                stale = type(owner) is not int or not _pid_alive(owner) or type(started) not in (int, float) or time.time() - started > 30
+            except (OSError, ValueError, UnicodeError):
+                stale = True
+            if stale:
+                with contextlib.suppress(FileNotFoundError):
+                    path.unlink()
+                continue
+            if time.monotonic() >= deadline:
+                raise CacheClientError("startup_locked", "Cache startup is busy.")
+            time.sleep(0.05)
+    try:
+        yield
+    finally:
+        try:
+            current = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(current, dict) and hmac.compare_digest(str(current.get("token", "")), token):
+                path.unlink()
+        except (OSError, ValueError, UnicodeError):
+            pass
 
 
 def _client_exchange(metadata: CacheMetadata, request: dict[str, object]) -> CacheClientResponse:
@@ -490,13 +547,14 @@ def run_cache_daemon(root: str | Path, *, project_file: str = "", max_memory_byt
             except socket.timeout:
                 continue
             with connection:
+                connection.settimeout(_CONNECTION_TIMEOUT)
                 _serve_connection(connection, service)
     finally:
         listener.close()
         _remove_metadata_if_owned(metadata)
 
 
-def start_cache(root: str | Path, *, project_file: str | Path | None = None, max_memory_bytes: int = DEFAULT_MAX_MEMORY_BYTES, idle_timeout: int = DEFAULT_IDLE_TIMEOUT) -> CacheMetadata:
+def _start_cache_unlocked(root: str | Path, *, project_file: str | Path | None = None, max_memory_bytes: int = DEFAULT_MAX_MEMORY_BYTES, idle_timeout: int = DEFAULT_IDLE_TIMEOUT) -> CacheMetadata:
     canonical = str(Path(root).resolve())
     project = str((Path(canonical) / project_file).resolve()) if project_file and not Path(project_file).is_absolute() else (str(Path(project_file).resolve()) if project_file else "")
     existing = _read_metadata(canonical)
@@ -537,6 +595,11 @@ def start_cache(root: str | Path, *, project_file: str | Path | None = None, max
     if metadata and metadata.pid == process.pid:
         _remove_metadata_if_owned(metadata)
     raise CacheClientError("startup_failed", "Cache daemon did not become ready.")
+
+
+def start_cache(root: str | Path, *, project_file: str | Path | None = None, max_memory_bytes: int = DEFAULT_MAX_MEMORY_BYTES, idle_timeout: int = DEFAULT_IDLE_TIMEOUT) -> CacheMetadata:
+    with _start_lock(root):
+        return _start_cache_unlocked(root, project_file=project_file, max_memory_bytes=max_memory_bytes, idle_timeout=idle_timeout)
 
 
 def query_cache(root: str | Path, request: dict[str, object]) -> CacheClientResponse:
