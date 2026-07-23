@@ -166,6 +166,85 @@ def test_implementation_layer_slices_single_method_from_100k_line_file(tmp_path:
     assert item["fragments"][0]["range"]["start_line"] > 100_000
 
 
+def test_symbol_range_ends_at_outer_end_after_conditional_statement_blocks(
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "ConditionalRoutine.pas"
+    write_text(
+        source_path,
+        """
+        unit ConditionalRoutine;
+        interface
+        implementation
+        procedure ConditionalRun;
+        begin
+        {$IFDEF WINDOWS}
+          try
+        {$ELSE}
+          begin
+        {$ENDIF}
+            if Ready then
+            begin
+              NestedWork;
+            end;
+        {$IFDEF WINDOWS}
+          finally
+        {$ENDIF}
+          end;
+          WorkAfterNestedBlock;
+        end;
+        end.
+        """,
+    )
+    expected_end_line = len(source_path.read_text(encoding="utf-8").splitlines()) - 1
+
+    index = build_codebase_index(tmp_path)
+    payload = json.loads(
+        render_layer(index, "symbols", query="ConditionalRun", output_format="json")
+    )
+
+    [item] = payload["items"]
+    assert item["name"] == "ConditionalRun"
+    assert item["range"]["end_line"] == expected_end_line
+
+
+def test_symbol_range_correlates_split_conditional_block_boundaries(
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "SplitConditionalBlock.pas"
+    write_text(
+        source_path,
+        """
+        unit SplitConditionalBlock;
+        interface
+        implementation
+        procedure SplitConditionalRun;
+        begin
+        {$IFDEF X}
+          if Ready then
+          begin
+        {$ENDIF}
+          ConditionalWork;
+        {$IFDEF X}
+          end;
+        {$ENDIF}
+          WorkAfterConditional;
+        end;
+        end.
+        """,
+    )
+    expected_end_line = len(source_path.read_text(encoding="utf-8").splitlines()) - 1
+
+    index = build_codebase_index(tmp_path)
+    payload = json.loads(
+        render_layer(index, "symbols", query="SplitConditionalRun", output_format="json")
+    )
+
+    [item] = payload["items"]
+    assert item["name"] == "SplitConditionalRun"
+    assert item["range"]["end_line"] == expected_end_line
+
+
 def test_default_layer_index_does_not_deep_parse_project_dependencies(tmp_path: Path, monkeypatch) -> None:
     make_project(tmp_path)
 
@@ -291,6 +370,34 @@ def test_opencode_install_writes_protocol_v2_skill_plugin_and_agent(tmp_path: Pa
     assert "sound_partial" in skill_text
     assert "Call `metrics`" in skill_text
     assert b"\r\n" not in skill_bytes
+
+    agent_text = agent.read_text(encoding="utf-8")
+    agent_frontmatter = agent_text.split("---", maxsplit=2)[1]
+    assert "mode: all" in agent_frontmatter
+    assert "\ntools:" not in agent_frontmatter
+    assert 'permission:\n  "*": deny' not in agent_frontmatter
+    assert "  delphi_codebase: allow" in agent_frontmatter
+    assert '  skill:\n    "*": deny\n    python-delphi-lsp: allow' in agent_frontmatter
+    for denied_tool in (
+        "lsp",
+        "bash",
+        "read",
+        "glob",
+        "grep",
+        "list",
+        "edit",
+        "write",
+        "patch",
+        "task",
+        "webfetch",
+        "websearch",
+        "question",
+        "todowrite",
+        "todoread",
+        "codebase_map",
+        "code_guidelines",
+    ):
+        assert f"  {denied_tool}: deny" in agent_frontmatter
 
     plugin_bytes = plugin.read_bytes()
     plugin_text = plugin_bytes.decode("utf-8")
@@ -1049,8 +1156,13 @@ def test_opencode_install_writes_package_named_skill_plugin_and_markdown_agent(
     skill, _, agent = installed
     assert "name: python-delphi-lsp" in skill.read_text(encoding="utf-8")
     agent_text = agent.read_text(encoding="utf-8")
-    assert "mode: subagent" in agent_text
+    assert "mode: all" in agent_text
     assert "temperature: 0" in agent_text
+    assert "\ntools:" not in agent_text
+    assert 'permission:\n  "*": deny' not in agent_text
+    assert "delphi_codebase: allow" in agent_text
+    assert "codebase_map: deny" in agent_text
+    assert "code_guidelines: deny" in agent_text
     assert "python-delphi-lsp: allow" in agent_text
     assert "Load `python-delphi-lsp`" in agent_text
     assert "vllm-delphi-codebase" not in agent_text

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import errno
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Iterator
 import os
 import re
 import xml.etree.ElementTree as ET
+
+from .progress import ProgressCallback, ProgressEvent
 
 
 SOURCE_EXTENSIONS = (".pas", ".dpr", ".dpk", ".inc")
@@ -69,10 +72,12 @@ def discover_delphi_project(
     search_paths: Iterable[str | os.PathLike[str]] = (),
     defines: Iterable[str] = (),
     scan_workspace_sources: bool = True,
+    on_progress: ProgressCallback | None = None,
 ) -> DelphiProjectDiscovery:
     root_path = Path(root).expanduser().resolve()
     project_path = Path(project_file).expanduser().resolve() if project_file is not None else None
     discovery = DelphiProjectDiscovery(root=str(root_path))
+    _emit_progress(on_progress, "discovery", str(root_path), 0, 0, None, "project discovery started")
 
     seen_search: set[str] = set()
     seen_include: set[str] = set()
@@ -185,18 +190,42 @@ def discover_delphi_project(
                     discovery.config_files.append(str(cfg))
 
     if scan_workspace_sources:
-        populate_workspace_sources(discovery)
+        populate_workspace_sources(discovery, on_progress=on_progress)
+
+    _emit_progress(
+        on_progress,
+        "inventory",
+        str(root_path),
+        len(discovery.source_files),
+        0,
+        len(discovery.source_files),
+        "project discovery complete",
+    )
 
     return discovery
 
 
-def populate_workspace_sources(discovery: DelphiProjectDiscovery) -> DelphiProjectDiscovery:
+def populate_workspace_sources(
+    discovery: DelphiProjectDiscovery,
+    *,
+    on_progress: ProgressCallback | None = None,
+) -> DelphiProjectDiscovery:
     root_path = Path(discovery.root).expanduser().resolve()
     seen_sources = {source.casefold() for source in discovery.source_files}
     seen_search = {path.casefold() for path in discovery.search_paths}
     seen_include = {path.casefold() for path in discovery.include_paths}
 
-    _scan_sources(root_path, discovery, seen_sources)
+    _scan_sources(root_path, discovery, seen_sources, on_progress=on_progress)
+    total_sources = len(discovery.source_files)
+    _emit_progress(
+        on_progress,
+        "inventory",
+        str(root_path),
+        total_sources,
+        0,
+        total_sources,
+        "workspace source inventory complete",
+    )
     for source in discovery.source_files:
         path = Path(source)
         unit_key = path.stem.casefold()
@@ -227,10 +256,51 @@ def populate_workspace_sources(discovery: DelphiProjectDiscovery) -> DelphiProje
     return discovery
 
 
-def discover_workspace_sources(root: str | os.PathLike[str]) -> DelphiProjectDiscovery:
+def discover_workspace_sources(
+    root: str | os.PathLike[str],
+    *,
+    on_progress: ProgressCallback | None = None,
+) -> DelphiProjectDiscovery:
     root_path = Path(root).expanduser().resolve()
     discovery = DelphiProjectDiscovery(root=str(root_path))
-    return populate_workspace_sources(discovery)
+    _emit_progress(on_progress, "discovery", str(root_path), 0, 0, None, "workspace discovery started")
+    populate_workspace_sources(discovery, on_progress=on_progress)
+    _emit_progress(
+        on_progress,
+        "complete",
+        str(root_path),
+        len(discovery.source_files),
+        len(discovery.source_files),
+        len(discovery.source_files),
+        "workspace discovery complete",
+    )
+    return discovery
+
+
+def _emit_progress(
+    callback: ProgressCallback | None,
+    phase: str,
+    path: str,
+    files_discovered: int,
+    files_completed: int,
+    files_total: int | None,
+    detail: str,
+) -> None:
+    if callback is not None:
+        callback(
+            ProgressEvent(
+                phase=phase,
+                language="delphi",
+                path=path,
+                files_discovered=files_discovered,
+                files_completed=files_completed,
+                files_total=files_total,
+                lines_processed=0,
+                symbols_discovered=0,
+                cached_files=0,
+                detail=detail,
+            )
+        )
 
 
 def _project_candidates(root: Path, explicit: Path | None) -> list[Path]:
@@ -409,13 +479,15 @@ def _main_source_from_dproj(path: Path) -> str | None:
     return None
 
 
-def _scan_sources(root: Path, discovery: DelphiProjectDiscovery, seen_sources: set[str]) -> None:
-    for path in root.rglob("*"):
+def _scan_sources(
+    root: Path,
+    discovery: DelphiProjectDiscovery,
+    seen_sources: set[str],
+    *,
+    on_progress: ProgressCallback | None = None,
+) -> None:
+    for path in _walk_files(root):
         if path.suffix.casefold() not in SOURCE_EXTENSIONS:
-            continue
-        if any(part in SKIP_DIRS for part in path.parts):
-            continue
-        if not path.is_file():
             continue
         resolved = path.resolve()
         key = str(resolved).casefold()
@@ -423,17 +495,54 @@ def _scan_sources(root: Path, discovery: DelphiProjectDiscovery, seen_sources: s
             continue
         seen_sources.add(key)
         discovery.source_files.append(str(resolved))
+        _emit_progress(
+            on_progress,
+            "discovery",
+            str(resolved),
+            len(discovery.source_files),
+            0,
+            None,
+            "source file discovered",
+        )
     discovery.source_files.sort(key=lambda item: (item.casefold(), item))
 
 
 def _walk_sources(root: Path, pattern: str) -> list[Path]:
     results: list[Path] = []
-    for path in root.rglob(pattern):
-        if any(part in SKIP_DIRS for part in path.parts):
-            continue
-        if path.is_file():
+    for path in _walk_files(root):
+        if path.match(pattern):
             results.append(path.resolve())
     return results
+
+
+def _walk_files(root: Path) -> Iterator[Path]:
+    def handle_error(error: OSError) -> None:
+        if _is_path_too_long(error):
+            return
+        raise error
+
+    for directory, directory_names, file_names in os.walk(
+        root,
+        followlinks=False,
+        onerror=handle_error,
+    ):
+        directory_names[:] = sorted(
+            name for name in directory_names if name not in SKIP_DIRS
+        )
+        current = Path(directory)
+        for name in sorted(file_names):
+            path = current / name
+            try:
+                if path.is_file():
+                    yield path
+            except OSError as error:
+                if _is_path_too_long(error):
+                    continue
+                raise
+
+
+def _is_path_too_long(error: OSError) -> bool:
+    return getattr(error, "winerror", None) == 206 or error.errno == errno.ENAMETOOLONG
 
 
 def _add_resolved_path(

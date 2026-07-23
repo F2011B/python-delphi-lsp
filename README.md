@@ -2,7 +2,7 @@
 
 `python-delphi-lsp` parses Delphi/Object Pascal, builds semantic and project
 indexes, serves LSP, and provides bounded codebase navigation for agents.
-Version 2.0.2 is authored by Dark Light and supports Windows, macOS, and Linux.
+Version 2.0.4 is authored by Dark Light and supports Windows, macOS, and Linux.
 
 ## Install and quick start
 
@@ -41,6 +41,19 @@ project = ProjectIndexer(
     search_paths=["src"], include_paths=["include"], defines=["DEBUG"]
 ).index("Main.dpr")
 print(project.parsed_units)
+```
+
+Long-running discovery and indexing accept a keyword-only `on_progress`
+callback. It receives an immutable `ProgressEvent` with package-controlled
+phase, path, and monotonic counters; callback exceptions are not suppressed.
+
+```python
+from delphi_lsp import ProjectIndexer, ProgressEvent
+
+def report(event: ProgressEvent) -> None:
+    print(event.phase, event.files_completed, event.path)
+
+ProjectIndexer(on_progress=report).index("Main.dpr")
 ```
 
 ## Architecture metrics
@@ -272,14 +285,30 @@ A generated OpenCode agent starts with this Markdown frontmatter:
 ```markdown
 ---
 description: Inspect Delphi and Object Pascal codebases through python-delphi-lsp.
-mode: subagent
+mode: all
 temperature: 0
 permission:
-  "*": deny
   delphi_codebase: allow
   skill:
     "*": deny
     python-delphi-lsp: allow
+  lsp: deny
+  bash: deny
+  read: deny
+  glob: deny
+  grep: deny
+  list: deny
+  edit: deny
+  write: deny
+  patch: deny
+  task: deny
+  webfetch: deny
+  websearch: deny
+  question: deny
+  todowrite: deny
+  todoread: deny
+  codebase_map: deny
+  code_guidelines: deny
 ---
 ```
 

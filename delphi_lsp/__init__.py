@@ -48,6 +48,7 @@ from .semantic_builder import SemanticBuilder, SemanticModel, SemanticProblem
 from .workspace import WorkspaceSemanticResult, build_workspace_semantics
 from .lsp_server import LspWorkspaceState, create_server
 from .project_discovery import DelphiProjectDiscovery, DiscoveryProblem, discover_delphi_project
+from .progress import ProgressCallback, ProgressEvent
 from .project_indexer import (
     GetUnitSyntaxHook,
     IncludeFileInfo,
@@ -136,6 +137,8 @@ __all__ = [
     'DelphiProjectDiscovery',
     'DiscoveryProblem',
     'discover_delphi_project',
+    'ProgressCallback',
+    'ProgressEvent',
     'ProjectIndexer',
     'ProjectIndexResult',
     'ProjectProblemType',

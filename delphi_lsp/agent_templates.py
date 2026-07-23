@@ -239,27 +239,30 @@ Prefer `summary` and `declaration`, narrow `max_items` and `max_chars`, and requ
 def _agent_markdown() -> str:
     return """---
 description: Inspect Delphi and Object Pascal codebases through python-delphi-lsp.
-mode: subagent
+mode: all
 temperature: 0
-tools:
-  delphi_codebase: true
-  skill: true
-  lsp: false
-  bash: false
-  read: false
-  glob: false
-  grep: false
-  edit: false
-  write: false
-  task: false
-  webfetch: false
-  todowrite: false
 permission:
-  "*": deny
   delphi_codebase: allow
   skill:
     "*": deny
     python-delphi-lsp: allow
+  lsp: deny
+  bash: deny
+  read: deny
+  glob: deny
+  grep: deny
+  list: deny
+  edit: deny
+  write: deny
+  patch: deny
+  task: deny
+  webfetch: deny
+  websearch: deny
+  question: deny
+  todowrite: deny
+  todoread: deny
+  codebase_map: deny
+  code_guidelines: deny
 ---
 
 Load `python-delphi-lsp` first, then use only `delphi_codebase` for Delphi and

@@ -7,6 +7,7 @@ from urllib.parse import unquote, urlparse
 import os
 import re
 
+from .preprocessor import Preprocessor
 from .semantic import (
     ReferenceKind,
     Scope,
@@ -249,7 +250,11 @@ class LspWorkspaceState:
             text = read_source_text(path)
         except (OSError, UnicodeError):
             return None
-        return build_outline_semantic_model(text, file_name)
+        return build_outline_semantic_model(
+            text,
+            file_name,
+            defines=self.config.defines,
+        )
 
     def full_semantic_for_uri(self, uri: str) -> Optional[SemanticModel]:
         file_name = uri_to_path(uri)
@@ -267,7 +272,11 @@ class LspWorkspaceState:
         text = self.text_for_uri(uri)
         if text is None:
             return None
-        return build_outline_semantic_model(text, uri_to_path(uri))
+        return build_outline_semantic_model(
+            text,
+            uri_to_path(uri),
+            defines=self.config.defines,
+        )
 
     def text_for_uri(self, uri: str) -> Optional[str]:
         doc = self.documents.get(uri)
@@ -293,7 +302,14 @@ class LspWorkspaceState:
     ) -> Optional[WorkspaceSemanticResult]:
         if not sources:
             return None
-        models = {file_name: build_outline_semantic_model(text, file_name) for file_name, text in sources.items()}
+        models = {
+            file_name: build_outline_semantic_model(
+                text,
+                file_name,
+                defines=self.config.defines,
+            )
+            for file_name, text in sources.items()
+        }
         index = SymbolIndex()
         for model in models.values():
             index.register_unit(model.unit_scope.name, model.unit_scope)
@@ -343,8 +359,51 @@ def uri_to_path(uri: str) -> str:
     return path or uri
 
 
-def outline_source(text: str) -> str:
-    return _blank_compound_statement_bodies(text)
+def outline_source(text: str, *, defines: Iterable[str] | None = None) -> str:
+    scan_text = (
+        text
+        if defines is None
+        else _conditional_outline_scan_text(text, defines=defines)
+    )
+    return _blank_compound_statement_bodies(
+        text,
+        scan_text=scan_text,
+    )
+
+
+def _conditional_outline_scan_text(
+    text: str,
+    *,
+    defines: Iterable[str],
+) -> str:
+    if '{$' not in text and '(*$' not in text:
+        return text
+    selected = Preprocessor(
+        defines=defines,
+        include_loader=lambda _name, _current: None,
+        preserve_active_directives=True,
+    ).process(text, '<outline>').text
+    original_lines = text.splitlines(keepends=True)
+    selected_lines = selected.splitlines(keepends=True)
+    if len(original_lines) != len(selected_lines):
+        return text
+    restored: list[str] = []
+    for original_line, selected_line in zip(original_lines, selected_lines, strict=True):
+        original_body, original_ending = _split_line_ending(original_line)
+        selected_body, _selected_ending = _split_line_ending(selected_line)
+        if len(original_body) != len(selected_body):
+            return text
+        restored.append(selected_body + original_ending)
+    result = ''.join(restored)
+    return result if len(result) == len(text) else text
+
+
+def _split_line_ending(line: str) -> tuple[str, str]:
+    if line.endswith('\r\n'):
+        return line[:-2], '\r\n'
+    if line.endswith(('\r', '\n')):
+        return line[:-1], line[-1]
+    return line, ''
 
 
 def multiline_string_block_end(text: str, start: int) -> int | None:
@@ -406,11 +465,29 @@ _CLASS_MEMBER_BOUNDARIES = frozenset(
 _GENERIC_ROUTINE_HEADINGS = frozenset(
     {'constructor', 'destructor', 'function', 'operator', 'procedure'}
 )
+_CONDITIONAL_DIRECTIVE_OPENERS = frozenset({'if', 'ifdef', 'ifndef', 'ifopt'})
+_CONDITIONAL_DIRECTIVE_ALTERNATIVES = frozenset({'else', 'elseif'})
+_CONDITIONAL_DIRECTIVE_CLOSERS = frozenset({'endif', 'ifend'})
 
 
-def _blank_compound_statement_bodies(text: str) -> str:
-    chars = list(text)
+@dataclass
+class _ConditionalOutlineFrame:
+    base_stack: tuple[str, ...]
+    branch_stacks: list[tuple[str, ...]] = field(default_factory=list)
+    has_alternative: bool = False
+
+
+def _blank_compound_statement_bodies(
+    text: str,
+    *,
+    scan_text: str | None = None,
+) -> str:
+    scanned = scan_text if scan_text is not None else text
+    if len(scanned) != len(text):
+        return text
+    chars = list(scanned)
     end_stack: list[str] = []
+    conditional_frames: list[_ConditionalOutlineFrame] = []
     body_start: int | None = None
     previous_token: str | None = None
     previous_token_is_identifier = False
@@ -421,26 +498,48 @@ def _blank_compound_statement_bodies(text: str) -> str:
     routine_heading_active = False
     type_constructors: dict[tuple[int, int], str] = {}
     i = 0
-    n = len(text)
+    n = len(scanned)
     while i < n:
-        ch = text[i]
-        nxt = text[i + 1] if i + 1 < n else ''
+        ch = scanned[i]
+        nxt = scanned[i + 1] if i + 1 < n else ''
 
-        if end_stack and (
-            (ch == '{' and nxt == '$')
-            or (ch == '(' and nxt == '*' and i + 2 < n and text[i + 2] == '$')
-        ):
-            # Raw conditional branches can disagree on END nesting, so keep the file all-or-safe.
-            return text
+        directive = _compiler_directive_at(scanned, i)
+        if directive is not None and (end_stack or conditional_frames):
+            directive_name, directive_end = directive
+            if directive_name in _CONDITIONAL_DIRECTIVE_OPENERS:
+                conditional_frames.append(
+                    _ConditionalOutlineFrame(base_stack=tuple(end_stack))
+                )
+            elif directive_name in _CONDITIONAL_DIRECTIVE_ALTERNATIVES:
+                if not conditional_frames:
+                    return scanned
+                frame = conditional_frames[-1]
+                frame.branch_stacks.append(tuple(end_stack))
+                frame.has_alternative = True
+                end_stack[:] = frame.base_stack
+            elif directive_name in _CONDITIONAL_DIRECTIVE_CLOSERS:
+                if not conditional_frames:
+                    return scanned
+                frame = conditional_frames.pop()
+                frame.branch_stacks.append(tuple(end_stack))
+                if not frame.has_alternative:
+                    frame.branch_stacks.append(frame.base_stack)
+                merged_stack = _merge_conditional_outline_stacks(frame)
+                if merged_stack is None:
+                    merged_stack = _common_conditional_outline_stack(frame)
+                    body_start = None
+                end_stack[:] = merged_stack
+            i = directive_end
+            continue
 
         if ch.isspace():
             i += 1
-            while i < n and text[i].isspace():
+            while i < n and scanned[i].isspace():
                 i += 1
             continue
 
         if ch == "'":
-            block_end = multiline_string_block_end(text, i)
+            block_end = multiline_string_block_end(scanned, i)
             if block_end is not None:
                 i = block_end
                 previous_token = 'literal'
@@ -449,8 +548,8 @@ def _blank_compound_statement_bodies(text: str) -> str:
                 continue
             i += 1
             while i < n:
-                if text[i] == "'":
-                    if i + 1 < n and text[i + 1] == "'":
+                if scanned[i] == "'":
+                    if i + 1 < n and scanned[i + 1] == "'":
                         i += 2
                         continue
                     i += 1
@@ -463,13 +562,13 @@ def _blank_compound_statement_bodies(text: str) -> str:
 
         if ch == '/' and nxt == '/':
             i += 2
-            while i < n and text[i] not in {'\n', '\r'}:
+            while i < n and scanned[i] not in {'\n', '\r'}:
                 i += 1
             continue
 
         if ch == '{':
             i += 1
-            while i < n and text[i] != '}':
+            while i < n and scanned[i] != '}':
                 i += 1
             if i < n:
                 i += 1
@@ -477,7 +576,7 @@ def _blank_compound_statement_bodies(text: str) -> str:
 
         if ch == '(' and nxt == '*':
             i += 2
-            while i + 1 < n and not (text[i] == '*' and text[i + 1] == ')'):
+            while i + 1 < n and not (scanned[i] == '*' and scanned[i + 1] == ')'):
                 i += 1
             if i + 1 < n:
                 i += 2
@@ -486,9 +585,9 @@ def _blank_compound_statement_bodies(text: str) -> str:
         if ch == '&' and (nxt.isalpha() or nxt == '_'):
             start = i
             i += 2
-            while i < n and (text[i].isalnum() or text[i] == '_'):
+            while i < n and (scanned[i].isalnum() or scanned[i] == '_'):
                 i += 1
-            previous_token = text[start:i].casefold()
+            previous_token = scanned[start:i].casefold()
             previous_token_is_identifier = True
             generic_owner_ready = False
             continue
@@ -496,9 +595,9 @@ def _blank_compound_statement_bodies(text: str) -> str:
         if ch.isalpha() or ch == '_':
             start = i
             i += 1
-            while i < n and (text[i].isalnum() or text[i] == '_'):
+            while i < n and (scanned[i].isalnum() or scanned[i] == '_'):
                 i += 1
-            word = text[start:i].casefold()
+            word = scanned[start:i].casefold()
             generic_owner_ready = False
             opens_construct: bool | None = False
             if not end_stack:
@@ -517,14 +616,14 @@ def _blank_compound_statement_bodies(text: str) -> str:
                 else:
                     opens_construct = _opens_end_terminated_construct(
                         word,
-                        text=text,
+                        text=scanned,
                         word_end=i,
                         previous_token=previous_token,
                         end_stack=end_stack,
                         type_constructor=type_constructors.get((paren_depth, bracket_depth)),
                     )
                 if opens_construct is None:
-                    return text
+                    return scanned
                 if opens_construct:
                     end_stack.append(word)
             if word == 'class' and opens_construct:
@@ -546,7 +645,7 @@ def _blank_compound_statement_bodies(text: str) -> str:
         if ch == '<' and nxt not in {'=', '>'}:
             if angle_depth > 0:
                 if not previous_token_is_identifier:
-                    return text
+                    return scanned
                 angle_depth += 1
             elif generic_owner_ready or (
                 routine_heading_active
@@ -582,7 +681,64 @@ def _blank_compound_statement_bodies(text: str) -> str:
         previous_token = ch
         previous_token_is_identifier = False
         i += 1
-    return text if angle_depth > 0 else ''.join(chars)
+    return scanned if angle_depth > 0 or conditional_frames else ''.join(chars)
+
+
+def _compiler_directive_at(text: str, start: int) -> tuple[str, int] | None:
+    if text.startswith('{$', start):
+        content_start = start + 2
+        close = text.find('}', content_start)
+        if close < 0:
+            return None
+        end = close + 1
+    elif text.startswith('(*$', start):
+        content_start = start + 3
+        close = text.find('*)', content_start)
+        if close < 0:
+            return None
+        end = close + 2
+    else:
+        return None
+    match = re.match(r'\s*([A-Za-z]+)', text[content_start:close])
+    return ((match.group(1).casefold() if match else ''), end)
+
+
+def _merge_conditional_outline_stacks(
+    frame: _ConditionalOutlineFrame,
+) -> list[str] | None:
+    base = frame.base_stack
+    branches = frame.branch_stacks
+    if not branches or any(
+        len(branch) < len(base) or branch[:len(base)] != base
+        for branch in branches
+    ):
+        return None
+    tails = [branch[len(base):] for branch in branches]
+    shapes = [tuple(_outline_block_shape(item) for item in tail) for tail in tails]
+    if any(shape != shapes[0] for shape in shapes[1:]):
+        return None
+    merged = list(base)
+    for values in zip(*tails, strict=True):
+        merged.append(values[0] if all(value == values[0] for value in values) else 'begin')
+    return merged
+
+
+def _outline_block_shape(value: str) -> str:
+    return 'statement' if value in _END_TERMINATED_STATEMENTS else value
+
+
+def _common_conditional_outline_stack(
+    frame: _ConditionalOutlineFrame,
+) -> list[str]:
+    common: list[str] = []
+    for values in zip(*frame.branch_stacks):
+        shapes = {_outline_block_shape(value) for value in values}
+        if len(shapes) != 1:
+            break
+        common.append(
+            values[0] if all(value == values[0] for value in values) else 'begin'
+        )
+    return common
 
 
 def _opens_end_terminated_construct(
@@ -684,7 +840,13 @@ _TYPE_REF_STOP_RE = re.compile(
 )
 
 
-def build_outline_semantic_model(text: str, file_name: str) -> SemanticModel:
+def build_outline_semantic_model(
+    text: str,
+    file_name: str,
+    *,
+    defines: Iterable[str] = (),
+) -> SemanticModel:
+    text = outline_source(text, defines=defines)
     unit_name = _outline_unit_name(text, file_name)
     unit_scope = Scope(kind=ScopeKind.UNIT, name=unit_name)
     unit_range = SourceRange(file_name, 1, 1, 1, max(2, len(unit_name) + 1))

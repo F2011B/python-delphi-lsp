@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable
 import json
 
-from .lsp_server import build_outline_semantic_model, outline_source
+from .lsp_server import build_outline_semantic_model
 from .metrics import analyze_project
 from .project_discovery import DelphiProjectDiscovery, discover_delphi_project
 from .project_indexer import ProjectIndexResult, ProjectIndexer
+from .progress import ProgressCallback, ProgressEvent
 from .semantic import Scope, SourceRange, Symbol, SymbolIndex, SymbolKind
 from .semantic_builder import SemanticModel
 from .source_reader import read_source_text
@@ -28,10 +29,14 @@ def build_codebase_index(
     *,
     project_file: str | Path | None = None,
     index_projects: bool = False,
+    on_progress: ProgressCallback | None = None,
 ) -> CodebaseIndex:
-    discovery = discover_delphi_project(root, project_file=project_file)
+    progress = _MonotonicProgress(on_progress)
+    discovery = discover_delphi_project(root, project_file=project_file, on_progress=progress)
     models: dict[str, SemanticModel] = {}
-    for source in discovery.source_files:
+    lines_processed = 0
+    symbols_discovered = 0
+    for completed, source in enumerate(discovery.source_files, start=1):
         path = Path(source)
         if path.suffix.casefold() not in {".pas", ".dpr", ".dpk", ".inc"}:
             continue
@@ -39,13 +44,43 @@ def build_codebase_index(
             text = read_source_text(path)
         except (OSError, UnicodeError):
             continue
-        models[source] = build_outline_semantic_model(outline_source(text), source)
+        model = build_outline_semantic_model(
+            text,
+            source,
+            defines=discovery.defines,
+        )
+        models[source] = model
+        lines_processed += text.count("\n") + (0 if not text or text.endswith("\n") else 1)
+        symbols_discovered += sum(len(items) for items in model.index.name_index.values())
+        _emit_progress(
+            progress,
+            "outline",
+            source,
+            len(discovery.source_files),
+            completed,
+            len(discovery.source_files),
+            "source outlined",
+            lines_processed=lines_processed,
+            symbols_discovered=symbols_discovered,
+        )
 
     symbol_index = SymbolIndex()
     for model in models.values():
         symbol_index.register_unit(model.unit_scope.name, model.unit_scope)
     for model in models.values():
         model.index = symbol_index
+
+    _emit_progress(
+        progress,
+        "relations",
+        str(Path(root).expanduser().resolve()),
+        len(discovery.source_files),
+        len(discovery.source_files),
+        len(discovery.source_files),
+        "semantic relations indexed",
+        lines_processed=lines_processed,
+        symbols_discovered=sum(len(items) for items in symbol_index.name_index.values()),
+    )
 
     project_results: dict[str, ProjectIndexResult] = {}
     if index_projects:
@@ -54,16 +89,90 @@ def build_codebase_index(
                 search_paths=discovery.search_paths,
                 include_paths=discovery.include_paths,
                 defines=discovery.defines,
+                on_progress=progress,
             )
             project_results[project] = indexer.index(project)
 
-    return CodebaseIndex(
+    index = CodebaseIndex(
         root=str(Path(root).expanduser().resolve()),
         discovery=discovery,
         models=models,
         symbol_index=symbol_index,
         project_results=project_results,
     )
+    _emit_progress(
+        progress,
+        "complete",
+        str(Path(root).expanduser().resolve()),
+        len(discovery.source_files),
+        len(discovery.source_files),
+        len(discovery.source_files),
+        "codebase index complete",
+        lines_processed=lines_processed,
+        symbols_discovered=sum(len(items) for items in symbol_index.name_index.values()),
+    )
+    return index
+
+
+def _emit_progress(
+    callback: ProgressCallback | None,
+    phase: str,
+    path: str,
+    files_discovered: int,
+    files_completed: int,
+    files_total: int | None,
+    detail: str,
+    *,
+    lines_processed: int = 0,
+    symbols_discovered: int = 0,
+) -> None:
+    if callback is not None:
+        callback(
+            ProgressEvent(
+                phase,
+                "delphi",
+                path,
+                files_discovered,
+                files_completed,
+                files_total,
+                lines_processed,
+                symbols_discovered,
+                0,
+                detail,
+            )
+        )
+
+
+class _MonotonicProgress:
+    def __init__(self, callback: ProgressCallback | None) -> None:
+        self._callback = callback
+        self._files_discovered = 0
+        self._files_completed = 0
+        self._files_total: int | None = None
+        self._lines_processed = 0
+        self._symbols_discovered = 0
+        self._cached_files = 0
+
+    def __call__(self, event: ProgressEvent) -> None:
+        self._files_discovered = max(self._files_discovered, event.files_discovered)
+        self._files_completed = max(self._files_completed, event.files_completed)
+        if event.files_total is not None:
+            self._files_total = max(self._files_total or 0, event.files_total)
+        self._lines_processed = max(self._lines_processed, event.lines_processed)
+        self._symbols_discovered = max(self._symbols_discovered, event.symbols_discovered)
+        self._cached_files = max(self._cached_files, event.cached_files)
+        if self._callback is not None:
+            self._callback(
+                replace(
+                    event,
+                    files_discovered=self._files_discovered,
+                    files_completed=self._files_completed,
+                    files_total=self._files_total,
+                    lines_processed=self._lines_processed,
+                    symbols_discovered=self._symbols_discovered,
+                    cached_files=self._cached_files,
+                )
+            )
 
 
 def render_layer(

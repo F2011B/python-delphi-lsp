@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import textwrap
+from types import SimpleNamespace
 import unicodedata
 
 import pytest
 
 import delphi_lsp.agent_context as agent_context_module
+import delphi_lsp.agent_workspace as agent_workspace_module
 from delphi_lsp.agent_context import AgentContext
 from delphi_lsp.agent_protocol import AgentProtocolError, AgentRequest, AgentResponse, Focus
 
@@ -190,6 +192,86 @@ def test_find_uses_only_active_units_and_reads_each_original_once(
     assert all(Path(file_name).is_absolute() for _, file_name in calls)
     assert sorted(path.name for path in read_calls) == ["Main.dpr", "Selected.pas"]
     assert all(path.is_absolute() for path in read_calls)
+
+
+def test_repeated_find_reuses_ranked_registry_entries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_source(
+        tmp_path / "RepeatedFind.pas",
+        """
+        unit RepeatedFind;
+        interface
+        procedure Target;
+        implementation
+        end.
+        """,
+    )
+    context = AgentContext.open(tmp_path)
+    calls = 0
+    real_ranked_entries = agent_context_module._ranked_entries
+
+    def counted_ranked_entries(entries: object, query: str):
+        nonlocal calls
+        calls += 1
+        return real_ranked_entries(entries, query)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(agent_context_module, "_ranked_entries", counted_ranked_entries)
+
+    first = context.handle({"action": "find", "query": "Target"})
+    second = context.handle({"action": "find", "query": "Target"})
+
+    assert result_items(second) == result_items(first)
+    assert calls == 1
+
+
+def test_request_refreshes_the_selected_workspace_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_source(tmp_path / "Main.dpr", "program Main; begin end.")
+    context = AgentContext.open(tmp_path)
+    assert context.workspace.select_project(context.workspace.active_project_id) is None
+    calls = 0
+    real_discover = agent_workspace_module.discover_delphi_project
+
+    def counted_discover(*args: object, **kwargs: object):
+        nonlocal calls
+        calls += 1
+        return real_discover(*args, **kwargs)
+
+    monkeypatch.setattr(agent_workspace_module, "discover_delphi_project", counted_discover)
+
+    context.handle({"action": "find", "query": "Main"})
+
+    assert calls == 1
+
+
+def test_declaration_section_queries_scan_each_token_at_most_once_in_source_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    declarations = "\n".join(
+        f"TSection{index:04d} = record Value: Integer; end;" for index in range(500)
+    )
+    source = f"unit Sections;\ninterface\ntype\n{declarations}\nimplementation\nend.\n"
+    document = agent_context_module._SourceDocument(tmp_path / "Sections.pas", "Sections.pas", source)
+    visits = 0
+    real_advance = agent_context_module._advance_declaration_section
+
+    def counted_advance(state: object, token: object):
+        nonlocal visits
+        visits += 1
+        return real_advance(state, token)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(agent_context_module, "_advance_declaration_section", counted_advance)
+
+    for index in range(500):
+        offset = source.index(f"TSection{index:04d}")
+        assert agent_context_module._declaration_section(document, offset) == "type"
+
+    assert visits <= len(document.tokens)
 
 
 def test_find_ranks_exact_then_prefix_then_substring_and_has_stable_overload_ids(tmp_path: Path) -> None:
@@ -1312,6 +1394,100 @@ def test_many_routines_reuse_cached_token_starts_without_rebuilding_full_token_l
     assert response.page.total == 151  # 150 routines plus the matching program name.
     assert bisect_sequences
     assert len({id(sequence) for sequence in bisect_sequences}) <= 2
+
+
+def test_bodyless_class_routine_suffix_is_scanned_linearly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    declaration_count = 1_200
+    source = (
+        "unit ForwardOnly;\n"
+        "interface\n"
+        "implementation\n"
+        + "".join(
+            f"class procedure TRegistry.Step{index:04d};\n"
+            for index in range(declaration_count)
+        )
+        + "end.\n"
+    )
+    source_path = tmp_path / "ForwardOnly.pas"
+    source_path.write_text(source, encoding="utf-8")
+    document = agent_context_module._SourceDocument(
+        source_path,
+        source_path.name,
+        source,
+    )
+    heading_scans = 0
+    real_heading_semicolon_index = agent_context_module._heading_semicolon_index
+
+    def counted_heading_semicolon_index(tokens: object, start: int) -> int | None:
+        nonlocal heading_scans
+        heading_scans += 1
+        return real_heading_semicolon_index(tokens, start)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        agent_context_module,
+        "_heading_semicolon_index",
+        counted_heading_semicolon_index,
+    )
+
+    assert agent_context_module._routine_span(
+        document,
+        source.index("class procedure"),
+    ) is None
+    assert heading_scans <= declaration_count * 4
+
+
+def test_routine_local_filter_uses_a_sorted_container_sweep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container_count = 200
+
+    class CountingStart(int):
+        comparisons = 0
+
+        def __lt__(self, other: object) -> bool:
+            type(self).comparisons += 1
+            return super().__lt__(other)
+
+    containers = [
+        SimpleNamespace(
+            parent_qualified_name="",
+            symbol=SimpleNamespace(
+                kind=agent_context_module.SymbolKind.PROCEDURE,
+                decl_range=SimpleNamespace(start_line=index * 10, start_col=1),
+            ),
+        )
+        for index in range(container_count)
+    ]
+    non_routines = [
+        SimpleNamespace(
+            parent_qualified_name="",
+            symbol=SimpleNamespace(
+                kind=agent_context_module.SymbolKind.VARIABLE,
+                decl_range=SimpleNamespace(
+                    start_line=100_000 + index,
+                    start_col=1,
+                ),
+            ),
+        )
+        for index in range(container_count)
+    ]
+    symbols = [*containers, *non_routines]
+    spans = {
+        id(raw): (CountingStart(index * 10), index * 10 + 5)
+        for index, raw in enumerate(containers)
+    }
+    monkeypatch.setattr(
+        agent_context_module,
+        "_raw_routine_span",
+        lambda raw, _document: spans[id(raw)],
+    )
+    document = SimpleNamespace(offset=lambda line, _column: line)
+
+    assert agent_context_module._exclude_routine_locals(symbols, document) == symbols
+    assert CountingStart.comparisons <= container_count * 20
 
 
 def test_cursor_continuation_mismatch_and_stale_revision_are_precise(tmp_path: Path) -> None:
