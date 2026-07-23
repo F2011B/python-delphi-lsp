@@ -295,7 +295,7 @@ def test_idle_client_times_out_without_blocking_daemon_or_idle_shutdown(tmp_path
 
 
 def test_status_polling_does_not_extend_cache_idle_lifetime(tmp_path: Path) -> None:
-    from delphi_lsp.agent_cache import cache_metadata_path, cache_status, start_cache, stop_cache
+    from delphi_lsp.agent_cache import CacheClientError, cache_metadata_path, cache_status, start_cache, stop_cache
 
     write_source(tmp_path / "Demo.dpr", "program Demo; begin end.")
     try:
@@ -304,7 +304,11 @@ def test_status_polling_does_not_extend_cache_idle_lifetime(tmp_path: Path) -> N
         while cache_metadata_path(tmp_path).exists() and time.monotonic() < deadline:
             time.sleep(0.2)
             if cache_metadata_path(tmp_path).exists():
-                cache_status(tmp_path)
+                try:
+                    cache_status(tmp_path)
+                except CacheClientError as error:
+                    assert error.code in {"cache_not_running", "unavailable"}
+                    break
         assert not cache_metadata_path(tmp_path).exists()
     finally:
         stop_cache(tmp_path)
@@ -388,7 +392,7 @@ def test_child_reaping_is_portable_without_posix_waitpid(
     assert agent_cache._reap_child_if_exited(424242) is False
 
 
-def test_stop_accepts_owned_metadata_removal_when_pid_probe_stays_alive(
+def test_stop_waits_for_process_exit_after_owned_metadata_removal(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -408,9 +412,15 @@ def test_stop_accepts_owned_metadata_removal_when_pid_probe_stays_alive(
         time.time(),
     )
     metadata_reads = iter((metadata, None, None))
-    monotonic_reads = iter((0.0, 1.0, 4.0))
+    pid_probes: list[int] = []
+    pid_states = iter((True, True, False))
+    monotonic_reads = iter((0.0, 1.0, 2.0))
     monkeypatch.setattr(agent_cache, "_read_metadata", lambda _root: next(metadata_reads, None))
-    monkeypatch.setattr(agent_cache, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(
+        agent_cache,
+        "_pid_alive",
+        lambda pid: pid_probes.append(pid) is None and next(pid_states),
+    )
     monkeypatch.setattr(agent_cache, "_reap_child_if_exited", lambda _pid: False)
     monkeypatch.setattr(
         agent_cache,
@@ -421,6 +431,20 @@ def test_stop_accepts_owned_metadata_removal_when_pid_probe_stays_alive(
     monkeypatch.setattr(agent_cache.time, "sleep", lambda _seconds: None)
 
     agent_cache.stop_cache(tmp_path)
+
+    assert pid_probes == [metadata.pid, metadata.pid, metadata.pid]
+
+
+def test_pid_probe_delegates_to_windows_process_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from delphi_lsp import agent_cache
+
+    monkeypatch.setattr(agent_cache.os, "name", "nt")
+    monkeypatch.setattr(agent_cache, "_windows_pid_alive", lambda pid: pid == 424242)
+
+    assert agent_cache._pid_alive(424242) is True
+    assert agent_cache._pid_alive(7) is False
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX metadata permissions")

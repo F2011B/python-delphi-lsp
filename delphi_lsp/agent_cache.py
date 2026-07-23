@@ -375,7 +375,31 @@ def _remove_metadata_if_owned(metadata: CacheMetadata) -> None:
             path.unlink()
 
 
+def _windows_pid_alive(pid: int) -> bool:
+    import ctypes
+    from ctypes import wintypes
+
+    synchronize = 0x00100000
+    wait_timeout = 0x00000102
+    kernel32 = ctypes.windll.kernel32
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.OpenProcess(synchronize, False, pid)
+    if not handle:
+        return False
+    try:
+        return kernel32.WaitForSingleObject(handle, 0) == wait_timeout
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _pid_alive(pid: int) -> bool:
+    if os.name == "nt":
+        return _windows_pid_alive(pid)
     try:
         os.kill(pid, 0)
     except OSError:
@@ -819,9 +843,6 @@ def stop_cache(root: str | Path) -> None:
     deadline = time.monotonic() + 3
     stopped = False
     while time.monotonic() < deadline:
-        if not _metadata_is_owned(metadata):
-            stopped = True
-            break
         if _reap_child_if_exited(metadata.pid):
             stopped = True
             break
@@ -829,7 +850,7 @@ def stop_cache(root: str | Path) -> None:
             stopped = True
             break
         time.sleep(0.05)
-    if not stopped and _metadata_is_owned(metadata) and _pid_alive(metadata.pid):
+    if not stopped and _pid_alive(metadata.pid):
         raise CacheClientError("stop_failed", "Cache daemon did not stop.")
     _remove_metadata_if_owned(metadata)
 

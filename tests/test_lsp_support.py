@@ -26,6 +26,7 @@ LARGE_FILE_LSP_COLD_START_TIMEOUT_SECONDS = (
     LARGE_FILE_LSP_COLD_START_TIMEOUT_SECONDS_BY_PLATFORM.get(sys.platform, 3.0)
     * CI_PERFORMANCE_TIMEOUT_MULTIPLIER
 )
+LARGE_FILE_LSP_REQUEST_TIMEOUT_SECONDS = 2.0 * CI_PERFORMANCE_TIMEOUT_MULTIPLIER
 LARGE_FILE_SYMBOL_MODEL_TIMEOUT_SECONDS = 1.0 * CI_PERFORMANCE_TIMEOUT_MULTIPLIER
 
 
@@ -1238,7 +1239,7 @@ end.
 
                 self.assertNotIn('error', response)
                 self.assertEqual([item['name'] for item in response['result']], ['MegaProc02500'])
-                self.assertLess(time.perf_counter() - started_at, 2.0)
+                self.assertLess(time.perf_counter() - started_at, LARGE_FILE_LSP_REQUEST_TIMEOUT_SECONDS)
             finally:
                 stderr = ''
                 if proc.poll() is None:
@@ -1303,7 +1304,7 @@ end.
 
                 self.assertNotIn('error', response)
                 self.assertEqual([item['name'] for item in response['result']], ['MegaProc02500'])
-                self.assertLess(time.perf_counter() - started_at, 2.0)
+                self.assertLess(time.perf_counter() - started_at, LARGE_FILE_LSP_REQUEST_TIMEOUT_SECONDS)
             finally:
                 stderr = ''
                 if proc.poll() is None:
@@ -1447,7 +1448,7 @@ end.
                 self.assertNotIn('error', response)
                 self.assertEqual(response['result']['uri'], source_path.as_uri())
                 self.assertEqual(response['result']['range']['start']['line'], decl_line)
-                self.assertLess(time.perf_counter() - started_at, 2.0)
+                self.assertLess(time.perf_counter() - started_at, LARGE_FILE_LSP_REQUEST_TIMEOUT_SECONDS)
             finally:
                 stderr = ''
                 if proc.poll() is None:
@@ -1515,7 +1516,7 @@ end.
 
                 self.assertNotIn('error', response)
                 self.assertIn('variable Value', response['result']['contents'])
-                self.assertLess(time.perf_counter() - started_at, 2.0)
+                self.assertLess(time.perf_counter() - started_at, LARGE_FILE_LSP_REQUEST_TIMEOUT_SECONDS)
             finally:
                 stderr = ''
                 if proc.poll() is None:
@@ -1588,7 +1589,7 @@ end.
                 self.assertTrue(
                     any(item['range']['start']['line'] == decl_line for item in response['result'])
                 )
-                self.assertLess(time.perf_counter() - started_at, 2.0)
+                self.assertLess(time.perf_counter() - started_at, LARGE_FILE_LSP_REQUEST_TIMEOUT_SECONDS)
             finally:
                 stderr = ''
                 if proc.poll() is None:
