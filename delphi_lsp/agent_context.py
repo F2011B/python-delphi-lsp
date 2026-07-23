@@ -14,13 +14,12 @@ from .agent_protocol import (
     AgentResponse,
     ContextBudget,
     Focus,
-    Page,
     make_target_id,
     paginate_items,
 )
 from .agent_metrics import build_workspace_metrics, project_metric_item, unit_metric_item
 from .agent_relations import ProjectRelationIndex, RelationTarget
-from .agent_workspace import AgentWorkspace, unit_display_path, unit_source_path, unit_target_id
+from .agent_workspace import AgentUnit, AgentWorkspace, unit_display_path, unit_source_path, unit_target_id
 from .consts import AttributeName, SyntaxNodeType
 from .lsp_server import build_outline_semantic_model, multiline_string_block_end
 from .nodes import CompoundSyntaxNode, SyntaxNode

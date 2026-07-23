@@ -287,8 +287,10 @@ def test_concurrent_starts_reuse_one_daemon(tmp_path: Path) -> None:
         except Exception as error:
             errors.append(error)
     workers = [threading.Thread(target=start) for _ in range(8)]
-    for worker in workers: worker.start()
-    for worker in workers: worker.join()
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
     try:
         assert not errors
         assert len(set(results)) == 1
@@ -302,7 +304,7 @@ def test_metadata_reader_rejects_symlink_and_unsafe_permissions(tmp_path: Path) 
 
     write_source(tmp_path / "Demo.dpr", "program Demo; begin end.")
     try:
-        metadata = start_cache(tmp_path)
+        start_cache(tmp_path)
         path = cache_metadata_path(tmp_path)
         path.chmod(0o644)
         with pytest.raises(CacheClientError, match="unsafe"):
