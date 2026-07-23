@@ -121,11 +121,19 @@ def cache_warning(result: BudgetResult, max_bytes: int) -> str:
     if not result.warning_triggered:
         return ""
 
-    compacted = " Cache compacted." if result.compacted else ""
+    if result.compacted:
+        state = (
+            f"Warning: Delphi cache peaked at {result.peak_utilization_percent:.1f}% of the {max_bytes} byte budget; "
+            f"{result.retained_bytes} bytes remain retained after compaction."
+            f"{' Cache compacted.' if result.compacted else ''}"
+        )
+    else:
+        state = (
+            f"Warning: Delphi cache currently at {result.utilization_percent:.1f}% of the {max_bytes} byte budget; "
+            f"{result.retained_bytes} bytes retained."
+        )
     return (
-        "Warning: Delphi cache reached "
-        f"{result.peak_utilization_percent:.1f}% peak at "
-        f"{result.retained_bytes} retained bytes of {max_bytes} byte budget.{compacted} "
+        f"{state} "
         "Increase --max-memory, stop unused daemons, or allow compact mode."
     )
 

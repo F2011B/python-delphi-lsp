@@ -212,7 +212,7 @@ def test_cache_budget_rejects_invalid_configuration(max_bytes: int, warning_perc
         CacheBudget(max_bytes=max_bytes, warning_percent=warning_percent)
 
 
-def test_cache_warning_includes_peak_and_actions_when_compacted() -> None:
+def test_cache_warning_reports_peak_and_compaction_action_when_compacted() -> None:
     result = BudgetResult(
         retained_bytes=20,
         utilization_percent=20.0,
@@ -223,7 +223,24 @@ def test_cache_warning_includes_peak_and_actions_when_compacted() -> None:
     )
 
     assert cache_warning(result, max_bytes=100) == (
-        "Warning: Delphi cache reached 126.3% peak at 20 retained bytes of 100 byte budget. Cache compacted. "
+        "Warning: Delphi cache peaked at 126.3% of the 100 byte budget; 20 bytes remain retained after compaction. "
+        "Cache compacted. "
+        "Increase --max-memory, stop unused daemons, or allow compact mode."
+    )
+
+
+def test_cache_warning_reports_current_retention_without_compaction() -> None:
+    result = BudgetResult(
+        retained_bytes=80,
+        utilization_percent=80.0,
+        peak_utilization_percent=130.0,
+        warning_active=True,
+        warning_triggered=True,
+        compacted=False,
+    )
+
+    assert cache_warning(result, max_bytes=100) == (
+        "Warning: Delphi cache currently at 80.0% of the 100 byte budget; 80 bytes retained. "
         "Increase --max-memory, stop unused daemons, or allow compact mode."
     )
 
