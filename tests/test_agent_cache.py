@@ -2,9 +2,13 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
+import json
 from pathlib import Path
+import os
 import pytest
+import socket
 import textwrap
+import time
 
 from delphi_lsp.agent_cache import (
     BudgetResult,
@@ -32,17 +36,84 @@ def test_cache_daemon_lifecycle_reuses_one_authenticated_process(tmp_path: Path)
     implementation
     end.""")
     try:
-        first = start_cache(tmp_path, max_memory_bytes=1024 * 1024)
+        metadata = start_cache(tmp_path, max_memory_bytes=1024 * 1024)
+        first = metadata
         second = start_cache(tmp_path, max_memory_bytes=1024 * 1024)
         assert first.pid == second.pid
         response = query_cache(tmp_path, {"action": "open"})
         assert response.payload["schema"] == 2
         status = cache_status(tmp_path)
         assert status["pid"] == first.pid
-        assert "token" not in status
-        assert "token" not in cache_metadata_path(tmp_path).read_text(encoding="utf-8")[:0]
+        rendered = json.dumps(status, sort_keys=True)
+        assert metadata.token not in rendered
+        metadata_file = cache_metadata_path(tmp_path)
+        assert metadata.token in metadata_file.read_text(encoding="utf-8")
+        if os.name != "nt":
+            assert metadata_file.stat().st_mode & 0o777 == 0o600
+            assert metadata_file.parent.stat().st_mode & 0o777 == 0o700
     finally:
         stop_cache(tmp_path)
+
+
+def test_cache_daemon_compacts_handles_bad_clients_and_idles(tmp_path: Path) -> None:
+    from delphi_lsp.agent_cache import cache_metadata_path, cache_status, query_cache, start_cache, stop_cache
+
+    write_source(tmp_path / "Demo.dpr", "program Demo; begin end.")
+    try:
+        metadata = start_cache(tmp_path, max_memory_bytes=1, idle_timeout=1)
+        with socket.create_connection(("127.0.0.1", metadata.port)) as connection:
+            connection.sendall(b"{not json}\n")
+            assert b"invalid_request" in connection.recv(4096)
+        with socket.create_connection(("127.0.0.1", metadata.port)) as connection:
+            connection.sendall(b"\xff\n")
+            assert b"invalid_request" in connection.recv(4096)
+        with socket.create_connection(("127.0.0.1", metadata.port)) as connection:
+            connection.sendall(b"x" * (1024 * 1024 + 1))
+            assert b"invalid_request" in connection.recv(4096)
+        response = query_cache(tmp_path, {"action": "open"})
+        assert response.warning
+        status = cache_status(tmp_path)
+        assert status["cache_state"] == "compact"
+        assert status["evictions"] >= 1
+        assert "idle_seconds" in status and "last_activity_at" in status
+        deadline = time.monotonic() + 3
+        while cache_metadata_path(tmp_path).exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not cache_metadata_path(tmp_path).exists()
+        stop_cache(tmp_path)
+    finally:
+        stop_cache(tmp_path)
+
+
+def test_cache_daemon_stale_metadata_restarts_and_tracks_source_revision(tmp_path: Path) -> None:
+    from delphi_lsp.agent_cache import cache_metadata_path, cache_status, query_cache, start_cache, stop_cache
+
+    source = tmp_path / "Demo.dpr"
+    write_source(source, "program Demo; begin end.")
+    metadata_path = cache_metadata_path(tmp_path)
+    metadata_path.parent.mkdir(parents=True)
+    metadata_path.write_text(json.dumps({"schema": 1, "root": str(tmp_path.resolve()), "pid": 999999, "port": 1, "token": "x" * 32, "version": "x", "project_file": "", "max_memory_bytes": 1024, "idle_timeout": 10, "started_at": 1.0}), encoding="utf-8")
+    try:
+        start_cache(tmp_path, max_memory_bytes=1024)
+        before = query_cache(tmp_path, {"action": "open"}).payload["workspace_revision"]
+        source.write_text("program Demo; { changed } begin end.\n", encoding="utf-8")
+        after = query_cache(tmp_path, {"action": "open"}).payload["workspace_revision"]
+        assert before != after
+        assert cache_status(tmp_path)["invalidations"] >= 1
+        stop_cache(tmp_path)
+        stop_cache(tmp_path)
+    finally:
+        stop_cache(tmp_path)
+
+
+def test_cache_daemon_rejects_symlinked_metadata_directory(tmp_path: Path) -> None:
+    from delphi_lsp.agent_cache import CacheClientError, start_cache
+
+    target = tmp_path / "target"
+    target.mkdir()
+    (tmp_path / ".delphi-lsp").symlink_to(target, target_is_directory=True)
+    with pytest.raises(CacheClientError, match="unsafe"):
+        start_cache(tmp_path)
 
 
 def test_cache_daemon_rejects_invalid_auth_without_dying(tmp_path: Path) -> None:

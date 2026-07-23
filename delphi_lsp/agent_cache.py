@@ -303,7 +303,7 @@ def _read_metadata(root: str | Path) -> CacheMetadata | None:
             or type(values[2]) is not int or values[2] <= 0 or type(values[3]) is not int or not 0 < values[3] < 65536
             or not isinstance(values[4], str) or len(values[4]) < 32 or not isinstance(values[5], str)
             or not isinstance(values[6], str) or type(values[7]) is not int or values[7] <= 0
-            or type(values[8]) is not int or values[8] <= 0 or not isinstance(values[9], (int, float))):
+            or type(values[8]) is not int or values[8] <= 0 or type(values[9]) not in (int, float)):
         return None
     canonical = str(Path(root).resolve())
     if values[1] != canonical:
@@ -331,7 +331,8 @@ def _client_exchange(metadata: CacheMetadata, request: dict[str, object]) -> Cac
     try:
         with socket.create_connection(("127.0.0.1", metadata.port), timeout=2) as connection:
             connection.settimeout(3)
-            connection.sendall(json.dumps({"token": metadata.token, **request}, separators=(",", ":")).encode("utf-8") + b"\n")
+            request_without_token = {key: value for key, value in request.items() if key != "token"}
+            connection.sendall(json.dumps({"token": metadata.token, **request_without_token}, separators=(",", ":")).encode("utf-8") + b"\n")
             response = _read_line(connection)
     except OSError as error:
         raise CacheClientError("unavailable", "Cache daemon is unavailable.") from error
@@ -386,13 +387,21 @@ class _CacheService:
             self.cache_state = "warm"
         except Exception:
             self.cache_state = "ready"
+        self.last_budget = self.budget.enforce(
+            measure=lambda: estimate_deep_size(self.context.cache_roots()),
+            evict_auxiliary=self.context.evict_auxiliary_caches,
+            evict_navigation=self.context.evict_navigation_caches,
+        )
+        if self.last_budget.compacted:
+            self.stats.evictions += 1
+            self.cache_state = "compact"
 
     def request(self, request: dict[str, object]) -> CacheClientResponse:
         with self.lock:
             self.last_activity = time.monotonic()
             action = request.get("action")
             if action == "status":
-                return CacheClientResponse(self.status())
+                return CacheClientResponse(self.status(), cache_warning(self.last_budget, self.budget.max_bytes))
             if action == "stop":
                 self.shutdown.set()
                 return CacheClientResponse({"stopping": True})
@@ -415,14 +424,13 @@ class _CacheService:
                 self.stats.rebuilds += 1
             if before != after:
                 self.stats.invalidations += 1
-            prior = self.last_budget.retained_bytes
             self.last_budget = self.budget.enforce(
                 measure=lambda: estimate_deep_size(self.context.cache_roots()),
                 evict_auxiliary=self.context.evict_auxiliary_caches,
                 evict_navigation=self.context.evict_navigation_caches,
             )
             if self.last_budget.compacted:
-                self.stats.evictions += 1 if self.last_budget.retained_bytes <= prior else 2
+                self.stats.evictions += 1
                 self.cache_state = "compact"
             else:
                 self.cache_state = "warm" if self.context.navigation_cache_is_warm else "ready"
@@ -433,12 +441,13 @@ class _CacheService:
         idle = max(0.0, now - self.last_activity)
         return {
             "pid": self.metadata.pid, "root": self.metadata.root, "project_file": self.metadata.project_file,
-            "version": self.metadata.version, "uptime": now - self.started, "last_activity": idle,
+            "version": self.metadata.version, "uptime": now - self.started, "idle_seconds": idle,
+            "last_activity_at": time.time() - idle,
             "max_memory_bytes": self.budget.max_bytes, "current_bytes": self.last_budget.retained_bytes,
             "current_utilization_percent": self.last_budget.utilization_percent,
             "peak_utilization_percent": self.last_budget.peak_utilization_percent,
             "warning_active": self.last_budget.warning_active, "warning_threshold_percent": WARNING_THRESHOLD_PERCENT,
-            "state": self.cache_state, "requests": self.stats.requests, "warm_hits": self.stats.warm_hits,
+            "cache_state": self.cache_state, "requests": self.stats.requests, "warm_hits": self.stats.warm_hits,
             "rebuilds": self.stats.rebuilds, "invalidations": self.stats.invalidations, "evictions": self.stats.evictions,
             "idle_timeout": self.metadata.idle_timeout, "idle_remaining": max(0.0, self.metadata.idle_timeout - idle),
             "workspace_revision": self.context.workspace.workspace_revision,
@@ -471,8 +480,8 @@ def run_cache_daemon(root: str | Path, *, project_file: str = "", max_memory_byt
     listener.listen(16)
     listener.settimeout(0.25)
     metadata = CacheMetadata(DAEMON_SCHEMA, canonical, os.getpid(), listener.getsockname()[1], secrets.token_urlsafe(32), __version__, project_file, max_memory_bytes, idle_timeout, time.time())
-    service = _CacheService(metadata)
     try:
+        service = _CacheService(metadata)
         service.prewarm()
         _write_metadata(metadata)
         while not service.shutdown.is_set() and time.monotonic() - service.last_activity < idle_timeout:
@@ -489,7 +498,7 @@ def run_cache_daemon(root: str | Path, *, project_file: str = "", max_memory_byt
 
 def start_cache(root: str | Path, *, project_file: str | Path | None = None, max_memory_bytes: int = DEFAULT_MAX_MEMORY_BYTES, idle_timeout: int = DEFAULT_IDLE_TIMEOUT) -> CacheMetadata:
     canonical = str(Path(root).resolve())
-    project = str(Path(project_file).resolve()) if project_file else ""
+    project = str((Path(canonical) / project_file).resolve()) if project_file and not Path(project_file).is_absolute() else (str(Path(project_file).resolve()) if project_file else "")
     existing = _read_metadata(canonical)
     if existing and _pid_alive(existing.pid):
         if (existing.project_file, existing.max_memory_bytes, existing.idle_timeout) != (project, max_memory_bytes, idle_timeout):
@@ -497,14 +506,19 @@ def start_cache(root: str | Path, *, project_file: str | Path | None = None, max
         try:
             _client_exchange(existing, {"action": "status"})
             return existing
-        except CacheClientError:
-            pass
+        except CacheClientError as error:
+            raise CacheClientError("unavailable", "Live cache daemon is unavailable.") from error
     if existing:
         _remove_metadata_if_owned(existing)
     command = [sys.executable, "-m", "delphi_lsp.agent_cache", "serve", "--root", canonical, "--max-memory", str(max_memory_bytes), "--idle-timeout", str(idle_timeout)]
     if project:
         command.extend(("--project-file", project))
-    process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    options: dict[str, object] = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    if os.name == "nt":
+        options["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        options["start_new_session"] = True
+    process = subprocess.Popen(command, **options)
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         metadata = _read_metadata(canonical)
@@ -545,8 +559,15 @@ def stop_cache(root: str | Path) -> None:
     except CacheClientError:
         pass
     deadline = time.monotonic() + 3
+    stopped = False
     while _pid_alive(metadata.pid) and time.monotonic() < deadline:
+        with contextlib.suppress(ChildProcessError):
+            if os.waitpid(metadata.pid, os.WNOHANG)[0] == metadata.pid:
+                stopped = True
+                break
         time.sleep(0.05)
+    if not stopped and _pid_alive(metadata.pid):
+        raise CacheClientError("stop_failed", "Cache daemon did not stop.")
     _remove_metadata_if_owned(metadata)
 
 
