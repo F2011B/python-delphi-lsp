@@ -379,6 +379,17 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def _reap_child_if_exited(pid: int) -> bool:
+    waitpid = getattr(os, "waitpid", None)
+    nohang = getattr(os, "WNOHANG", None)
+    if not callable(waitpid) or nohang is None:
+        return False
+    try:
+        return waitpid(pid, nohang)[0] == pid
+    except (ChildProcessError, OSError):
+        return False
+
+
 def _start_lock_path(root: str | Path) -> Path:
     return _safe_metadata_path(root, create=True).with_name("start.lock")
 
@@ -804,10 +815,9 @@ def stop_cache(root: str | Path) -> None:
     deadline = time.monotonic() + 3
     stopped = False
     while _pid_alive(metadata.pid) and time.monotonic() < deadline:
-        with contextlib.suppress(ChildProcessError):
-            if os.waitpid(metadata.pid, os.WNOHANG)[0] == metadata.pid:
-                stopped = True
-                break
+        if _reap_child_if_exited(metadata.pid):
+            stopped = True
+            break
         time.sleep(0.05)
     if not stopped and _pid_alive(metadata.pid):
         raise CacheClientError("stop_failed", "Cache daemon did not stop.")

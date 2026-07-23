@@ -377,6 +377,17 @@ def test_concurrent_starts_reuse_one_daemon(tmp_path: Path) -> None:
         stop_cache(tmp_path)
 
 
+def test_child_reaping_is_portable_without_posix_waitpid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from delphi_lsp import agent_cache
+
+    monkeypatch.delattr(agent_cache.os, "waitpid")
+    monkeypatch.delattr(agent_cache.os, "WNOHANG")
+
+    assert agent_cache._reap_child_if_exited(424242) is False
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX metadata permissions")
 def test_metadata_reader_rejects_symlink_and_unsafe_permissions(tmp_path: Path) -> None:
     from delphi_lsp.agent_cache import CacheClientError, cache_metadata_path, query_cache, start_cache, stop_cache
