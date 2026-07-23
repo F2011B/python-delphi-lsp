@@ -9,7 +9,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import Callable, Iterable
 
-from .lsp_server import build_outline_semantic_model, iter_symbols
+from .lsp_server import build_outline_semantic_model
 from .semantic_builder import SemanticModel
 from .source_reader import read_source_text
 
@@ -113,7 +113,7 @@ def _parse_outline_task(task: OutlineTask) -> OutlineResult:
         text=text if task.return_text else "",
         model=model,
         lines_processed=len(text.splitlines()),
-        symbols_discovered=sum(1 for _ in iter_symbols(model.unit_scope)),
+        symbols_discovered=sum(len(items) for items in model.index.name_index.values()),
     )
 
 

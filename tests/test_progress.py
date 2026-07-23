@@ -5,8 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from delphi_lsp.agent_layers import build_codebase_index
+import delphi_lsp.parallel_outline as parallel_outline
+from delphi_lsp.agent_layers import CodebaseIndex, build_codebase_index
+from delphi_lsp.parallel_outline import ParallelBuildStats
 from delphi_lsp.project_indexer import ProjectIndexer
+from delphi_lsp.semantic import SymbolIndex
 
 
 def _write(path: Path, text: str) -> None:
@@ -49,6 +52,36 @@ def test_codebase_index_propagates_parallel_outline_callback_errors(tmp_path: Pa
             workers=2,
             on_progress=lambda _event: (_ for _ in ()).throw(RuntimeError("callback failed")),
         )
+
+
+def test_codebase_index_reports_unreadable_outline_completion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write(tmp_path / "One.pas", "unit One; interface implementation end.\n")
+    _write(tmp_path / "Unreadable.pas", "unit Unreadable; interface implementation end.\n")
+    original_read_source_text = parallel_outline.read_source_text
+
+    def read_source_text(path: Path) -> str:
+        if path.name == "Unreadable.pas":
+            raise OSError("source unavailable")
+        return original_read_source_text(path)
+
+    monkeypatch.setattr(parallel_outline, "read_source_text", read_source_text)
+    events: list[object] = []
+
+    index = build_codebase_index(tmp_path, workers=1, on_progress=events.append)
+
+    outlines = [event for event in events if event.phase == "outline"]
+    assert [event.files_completed for event in outlines] == [1, 2]
+    assert [event.files_total for event in outlines] == [2, 2]
+    assert outlines[-1].detail == "source unreadable"
+    assert outlines[-1].lines_processed == outlines[-2].lines_processed
+    assert outlines[-1].symbols_discovered == outlines[-2].symbols_discovered
+    assert "Unreadable" not in {model.unit_scope.name for model in index.models.values()}
+
+
+def test_codebase_index_parallel_stats_defaults_to_zero_for_manual_construction() -> None:
+    index = CodebaseIndex("", None, {}, SymbolIndex(), {})  # type: ignore[arg-type]
+
+    assert index.parallel_stats == ParallelBuildStats(0, 0, 0, 0.0, 0)
 
 
 def test_project_indexer_reports_each_parsed_unit_and_propagates_callback_errors(tmp_path: Path) -> None:

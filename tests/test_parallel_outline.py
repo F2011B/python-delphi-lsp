@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -57,6 +58,20 @@ def test_serial_outline_task_returns_model_text_and_counts(tmp_path: Path) -> No
     assert batch.results[0].model.unit_scope.name == "One"
     assert batch.results[0].lines_processed == 5
     assert batch.results[0].symbols_discovered >= 1
+
+
+def test_outline_symbol_count_matches_semantic_model_name_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "One.pas"
+    _write_source(source, "One")
+    model = SimpleNamespace(index=SimpleNamespace(name_index={"One": [object()]}), unit_scope=object())
+    monkeypatch.setattr(parallel_outline, "build_outline_semantic_model", lambda *_args, **_kwargs: model)
+    monkeypatch.setattr(parallel_outline, "iter_symbols", lambda _scope: iter((object(), object(), object())), raising=False)
+
+    batch = run_outline_tasks([OutlineTask(0, str(source), (), False)], configured_workers=1)
+
+    assert batch.results[0].symbols_discovered == sum(len(items) for items in model.index.name_index.values())
 
 
 def test_missing_source_returns_read_error_with_os_detail(tmp_path: Path) -> None:

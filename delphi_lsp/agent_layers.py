@@ -22,7 +22,7 @@ class CodebaseIndex:
     models: dict[str, SemanticModel]
     symbol_index: SymbolIndex
     project_results: dict[str, ProjectIndexResult]
-    parallel_stats: ParallelBuildStats
+    parallel_stats: ParallelBuildStats = ParallelBuildStats(0, 0, 0, 0.0, 0)
 
 
 def build_codebase_index(
@@ -39,32 +39,33 @@ def build_codebase_index(
     lines_processed = 0
     symbols_discovered = 0
     completed_outlines = 0
+    outline_tasks = tuple(
+        OutlineTask(ordinal, source, tuple(discovery.defines), False)
+        for ordinal, source in enumerate(discovery.source_files)
+        if Path(source).suffix.casefold() in {".pas", ".dpr", ".dpk", ".inc"}
+    )
+    outline_task_count = len(outline_tasks)
 
     def on_outline_complete(result: OutlineResult) -> None:
         nonlocal completed_outlines, lines_processed, symbols_discovered
-        if result.read_error:
-            return
         completed_outlines += 1
-        lines_processed += result.lines_processed
-        symbols_discovered += result.symbols_discovered
+        if not result.read_error:
+            lines_processed += result.lines_processed
+            symbols_discovered += result.symbols_discovered
         _emit_progress(
             progress,
             "outline",
             result.source_path,
             len(discovery.source_files),
             completed_outlines,
-            len(discovery.source_files),
-            "source outlined",
+            outline_task_count,
+            "source unreadable" if result.read_error else "source outlined",
             lines_processed=lines_processed,
             symbols_discovered=symbols_discovered,
         )
 
     outline_batch = run_outline_tasks(
-        (
-            OutlineTask(ordinal, source, tuple(discovery.defines), False)
-            for ordinal, source in enumerate(discovery.source_files)
-            if Path(source).suffix.casefold() in {".pas", ".dpr", ".dpk", ".inc"}
-        ),
+        outline_tasks,
         configured_workers=workers,
         on_complete=on_outline_complete,
     )
