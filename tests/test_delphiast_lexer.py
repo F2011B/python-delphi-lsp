@@ -83,3 +83,15 @@ def test_lexer_always_makes_progress_on_invalid_unicode_and_unclosed_text() -> N
     assert tokens[1].kind is TokenKind.STRING
     assert tokens[-1].kind is TokenKind.COMMENT
     assert all(token.end > token.start for token in tokens)
+
+
+def test_lexer_compacts_very_large_constant_initializers() -> None:
+    values = ",".join("$FF" for _ in range(20_000))
+    source = f"const Lookup = ({values}); procedure Done;"
+
+    tokens = significant(source)
+
+    assert len(tokens) < 12
+    opaque = next(token for token in tokens if token.value == "<large-initializer>")
+    assert opaque.end - opaque.start > 64_000
+    assert tokens[-3].value.casefold() == "procedure"

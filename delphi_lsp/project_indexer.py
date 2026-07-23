@@ -8,6 +8,7 @@ from typing import Callable, Iterable, Optional
 from .consts import AttributeName, SyntaxNodeType
 from .nodes import SyntaxNode
 from .parser import DelphiParser
+from .parser_backend import ParserBackend, ParserMode, normalize_backend, normalize_mode
 from .preprocessor import IncludeLoader
 from .progress import ProgressCallback, ProgressEvent
 from .source_reader import read_source_text
@@ -73,6 +74,8 @@ class ProjectIndexer:
         on_unit_parsed: UnitParsedHook | None = None,
         source_transform: SourceTransform | None = None,
         on_progress: ProgressCallback | None = None,
+        backend: ParserBackend | str = ParserBackend.DELPHIAST,
+        mode: ParserMode | str = ParserMode.STRICT,
     ) -> None:
         self.search_paths = [Path(path) for path in search_paths]
         self.include_paths = [Path(path) for path in include_paths]
@@ -82,6 +85,8 @@ class ProjectIndexer:
         self.on_unit_parsed = on_unit_parsed
         self.source_transform = source_transform
         self.on_progress = on_progress
+        self.backend = normalize_backend(backend)
+        self.mode = normalize_mode(mode)
 
         self._parsed_units: dict[str, UnitInfo] = {}
         self._problems: list[ProjectProblem] = []
@@ -144,6 +149,7 @@ class ProjectIndexer:
 
         syntax_tree: Optional[SyntaxNode] = hook_tree
         from_parser = False
+        parser_error = UnitErrorInfo()
 
         if syntax_tree is None and do_parse_unit:
             source = self._read_file(file_path)
@@ -158,6 +164,8 @@ class ProjectIndexer:
                 include_paths=[str(path) for path in self.include_paths],
                 defines=self.defines,
                 include_loader=self._build_include_loader(),
+                backend=self.backend,
+                mode=self.mode,
             )
             try:
                 if self.source_transform is not None:
@@ -165,6 +173,23 @@ class ProjectIndexer:
                 result = parser.parse(source, str(file_path), build_semantic=False)
                 syntax_tree = result.root
                 from_parser = True
+                if result.problems:
+                    first = result.problems[0]
+                    parser_error = UnitErrorInfo(
+                        line=first.line,
+                        col=first.column,
+                        error=first.message,
+                    )
+                    self._problems.append(
+                        ProjectProblem(
+                            problem_type=ProjectProblemType.CANT_PARSE_FILE,
+                            file_name=str(file_path),
+                            description=(
+                                f"Partial DelphiAST parse at {first.line}:{first.column}: "
+                                f"{first.message}"
+                            ),
+                        )
+                    )
             except Exception as exc:  # pragma: no cover - parser error branch
                 self._problems.append(
                     ProjectProblem(
@@ -191,7 +216,13 @@ class ProjectIndexer:
 
         actual_name = syntax_tree.get_attribute(AttributeName.anName) or unit_name
         normalized_name = actual_name.casefold()
-        unit_info = UnitInfo(name=actual_name, path=str(file_path), syntax_tree=syntax_tree)
+        unit_info = UnitInfo(
+            name=actual_name,
+            path=str(file_path),
+            syntax_tree=syntax_tree,
+            has_error=bool(parser_error.error),
+            error_info=parser_error,
+        )
         self._parsed_units[normalized_name] = unit_info
         self._files_completed += 1
         self._emit_progress("detail", str(file_path), "unit parsed")

@@ -11,6 +11,7 @@ from .agent_workspace import AgentWorkspace
 from .consts import AttributeName, SyntaxNodeType
 from .nodes import SyntaxNode
 from .parser import DelphiParser
+from .parser_backend import ParserMode
 from .project_indexer import ProjectIndexer, ProjectProblem
 from .semantic import (
     GenericInstanceTypeRef,
@@ -484,6 +485,11 @@ def _load_project_roots(
     active_project = workspace.active_project
     if active_project is None:
         raise AgentProtocolError("project_required", "Select a project before tracing relations.")
+    parser_mode = (
+        ParserMode.TOLERANT
+        if len(workspace.units) >= 256
+        else ParserMode.STRICT
+    )
     if active_project.kind != "workspace":
         project_path = Path(active_project.path)
         if not project_path.is_absolute():
@@ -492,6 +498,7 @@ def _load_project_roots(
             search_paths=workspace.search_paths,
             include_paths=workspace.include_paths,
             defines=workspace.defines,
+            mode=parser_mode,
         )
         result = indexer.index(str(project_path.resolve()))
         roots = {
@@ -502,7 +509,11 @@ def _load_project_roots(
         problems = [_project_problem_item(problem, workspace.root) for problem in result.problems]
         return roots, problems
 
-    parser = DelphiParser(include_paths=workspace.include_paths, defines=workspace.defines)
+    parser = DelphiParser(
+        include_paths=workspace.include_paths,
+        defines=workspace.defines,
+        mode=parser_mode,
+    )
     roots: dict[str, SyntaxNode] = {}
     problems: list[dict[str, object]] = []
     for unit in workspace.units:
@@ -512,11 +523,25 @@ def _load_project_roots(
         source_path = source_path.expanduser().resolve()
         try:
             text = read_source_text(source_path)
-            roots[str(source_path)] = parser.parse(
+            parsed = parser.parse(
                 text,
                 str(source_path),
                 build_semantic=False,
-            ).root
+            )
+            roots[str(source_path)] = parsed.root
+            if parsed.problems:
+                first = parsed.problems[0]
+                problems.append(
+                    {
+                        "item_type": "relation_problem",
+                        "kind": "partial_parse",
+                        "message": (
+                            f"Partial DelphiAST parse at {first.line}:{first.column}: "
+                            f"{first.message}"
+                        ),
+                        "path": _display_project_path(source_path, workspace.root),
+                    }
+                )
         except Exception as exc:
             problems.append(
                 {

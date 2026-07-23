@@ -3,8 +3,10 @@ from __future__ import annotations
 import pytest
 
 from delphi_lsp.consts import AttributeName
+from delphi_lsp.metrics import analyze_project
 from delphi_lsp.parser import DelphiParser
 from delphi_lsp.parser_backend import ParserBackend, ParserMode
+from delphi_lsp.project_indexer import ProjectIndexer
 
 
 SOURCE = """unit BackendDemo;
@@ -88,3 +90,46 @@ def test_strict_compatibility_never_falls_back_for_large_sources(
     result = DelphiParser().parse(large_source, "BackendDemo.pas")
 
     assert result.root.get_attribute(AttributeName.anName) == "BackendDemo"
+
+
+def test_project_indexer_can_force_tolerant_delphiast(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import delphi_lsp.parser as parser_module
+
+    monkeypatch.setattr(
+        parser_module,
+        "_get_lark_parser",
+        lambda: (_ for _ in ()).throw(AssertionError("legacy parser called")),
+    )
+    source = tmp_path / "Main.dpr"
+    source.write_text("program Main; begin end.", encoding="utf-8")
+
+    result = ProjectIndexer(mode=ParserMode.TOLERANT).index(str(source))
+
+    assert [unit.name for unit in result.parsed_units] == ["Main"]
+
+
+def test_large_project_metrics_automatically_avoid_lark(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import delphi_lsp.parser as parser_module
+
+    monkeypatch.setattr(
+        parser_module,
+        "_get_lark_parser",
+        lambda: (_ for _ in ()).throw(AssertionError("legacy parser called")),
+    )
+    sources = {
+        f"Unit{index}.pas": (
+            f"unit Unit{index}; interface procedure Run; "
+            "implementation procedure Run; begin end; end."
+        )
+        for index in range(256)
+    }
+
+    result = analyze_project(sources)
+
+    assert result.unit_count == 256
+    assert all(not unit.problems for unit in result.units)

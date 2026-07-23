@@ -38,6 +38,7 @@ class DelphiAstLexer:
         self._index = 0
         self._line = 1
         self._column = 1
+        self._previous_significant = ""
 
     def tokenize(self, *, include_trivia: bool = False) -> list[Token]:
         del include_trivia  # Comments/directives are useful parser evidence.
@@ -45,10 +46,15 @@ class DelphiAstLexer:
         while self._index < len(self.source):
             character = self.source[self._index]
             if character.isspace():
-                self._advance_to(self._index + 1)
+                end = self._index + 1
+                while end < len(self.source) and self.source[end].isspace():
+                    end += 1
+                self._advance_to(end)
                 continue
             token = self._next_token()
             tokens.append(token)
+            if token.kind not in {TokenKind.COMMENT, TokenKind.DIRECTIVE}:
+                self._previous_significant = token.normalized
             if token.end <= token.start:  # Defensive forward-progress guard.
                 self._advance_to(self._index + 1)
         tokens.append(
@@ -94,6 +100,17 @@ class DelphiAstLexer:
         if character == "'":
             end = self._quoted_end(start)
             return self._emit(TokenKind.STRING, start, end, line, column)
+        if character == "(" and self._previous_significant == "=":
+            initializer_end = self._large_initializer_end(start)
+            if initializer_end is not None:
+                return self._emit(
+                    TokenKind.UNKNOWN,
+                    start,
+                    initializer_end,
+                    line,
+                    column,
+                    value="<large-initializer>",
+                )
         if character == "#":
             end = start + 1
             if end < len(self.source) and self.source[end] == "$":
@@ -175,6 +192,14 @@ class DelphiAstLexer:
         return end
 
     def _quoted_end(self, start: int) -> int:
+        for delimiter in ("'''''", "'''"):
+            opening_end = start + len(delimiter)
+            if not self.source.startswith(delimiter, start):
+                continue
+            if self.source[opening_end : opening_end + 1] not in {"\r", "\n"}:
+                continue
+            close = self.source.find(delimiter, opening_end)
+            return len(self.source) if close < 0 else close + len(delimiter)
         end = start + 1
         while end < len(self.source):
             if self.source[end] in {"\r", "\n"}:
@@ -188,6 +213,39 @@ class DelphiAstLexer:
             return end + 1
         return len(self.source)
 
+    def _large_initializer_end(self, start: int) -> int | None:
+        stack = [")"]
+        index = start + 1
+        while index < len(self.source):
+            character = self.source[index]
+            following = self.source[index + 1] if index + 1 < len(self.source) else ""
+            if character == "'":
+                index = self._quoted_end(index)
+                continue
+            if character == "/" and following == "/":
+                newline = self.source.find("\n", index + 2)
+                index = len(self.source) if newline < 0 else newline + 1
+                continue
+            if character == "{":
+                close = self.source.find("}", index + 1)
+                index = len(self.source) if close < 0 else close + 1
+                continue
+            if character == "(" and following == "*":
+                close = self.source.find("*)", index + 2)
+                index = len(self.source) if close < 0 else close + 2
+                continue
+            if character == "(":
+                stack.append(")")
+            elif character == "[":
+                stack.append("]")
+            elif stack and character == stack[-1]:
+                stack.pop()
+                if not stack:
+                    end = index + 1
+                    return end if end - start >= 64 * 1024 else None
+            index += 1
+        return None
+
     def _emit(
         self,
         kind: TokenKind,
@@ -195,19 +253,24 @@ class DelphiAstLexer:
         end: int,
         line: int,
         column: int,
+        *,
+        value: str | None = None,
     ) -> Token:
-        value = self.source[start:end]
+        token_value = self.source[start:end] if value is None else value
         self._advance_to(end)
-        return Token(kind, value, line, column, start, end, self.file_name)
+        return Token(kind, token_value, line, column, start, end, self.file_name)
 
     def _advance_to(self, end: int) -> None:
-        while self._index < end:
-            if self.source[self._index] == "\n":
-                self._line += 1
-                self._column = 1
-            else:
-                self._column += 1
-            self._index += 1
+        if end <= self._index:
+            return
+        newline_count = self.source.count("\n", self._index, end)
+        if newline_count:
+            self._line += newline_count
+            last_newline = self.source.rfind("\n", self._index, end)
+            self._column = end - last_newline
+        else:
+            self._column += end - self._index
+        self._index = end
 
 
 def _identifier_start(character: str) -> bool:

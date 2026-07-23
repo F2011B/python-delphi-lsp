@@ -12,6 +12,7 @@ from .consts import AttributeName, SyntaxNodeType
 from .lark_tokens import KEYWORDS
 from .nodes import SyntaxNode
 from .parser import DelphiParser
+from .parser_backend import ParserMode, normalize_mode
 from .semantic import Scope, SymbolKind
 
 
@@ -34,6 +35,8 @@ _DEPENDENCY_NODES = frozenset(
         SyntaxNodeType.ntRequires,
     }
 )
+_LARGE_PROJECT_UNIT_THRESHOLD = 256
+_LARGE_PROJECT_CHAR_THRESHOLD = 16 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -258,6 +261,7 @@ def analyze_unit(
     *,
     defines: Iterable[str] = (),
     include_paths: Iterable[str] = (),
+    parser_mode: ParserMode | str = ParserMode.STRICT,
 ) -> UnitMetrics:
     scan = _scan_source(source)
     problems: list[MetricProblem] = []
@@ -267,9 +271,22 @@ def analyze_unit(
         parsed = DelphiParser(
             defines=tuple(defines),
             include_paths=tuple(include_paths),
+            mode=normalize_mode(parser_mode),
         ).parse(source, path, build_semantic=True)
         root = parsed.root
         semantic = parsed.semantic
+        if parsed.problems:
+            first = parsed.problems[0]
+            problems.append(
+                MetricProblem(
+                    kind="partial_parse",
+                    path=path,
+                    message=(
+                        f"Partial DelphiAST parse at {first.line}:{first.column}: "
+                        f"{first.message}"
+                    ),
+                )
+            )
     except Exception as error:
         problems.append(
             MetricProblem(
@@ -333,10 +350,27 @@ def analyze_project(
     project_id: str = "",
     project_name: str = "",
     unit_ids: Mapping[str, str] | None = None,
+    parser_mode: ParserMode | str | None = None,
 ) -> ProjectMetrics:
     unique_sources = _unique_sources(sources)
+    if parser_mode is None:
+        source_chars = sum(len(source) for source in unique_sources.values())
+        selected_mode = (
+            ParserMode.TOLERANT
+            if len(unique_sources) >= _LARGE_PROJECT_UNIT_THRESHOLD
+            or source_chars >= _LARGE_PROJECT_CHAR_THRESHOLD
+            else ParserMode.STRICT
+        )
+    else:
+        selected_mode = normalize_mode(parser_mode)
     units = [
-        analyze_unit(source, path, defines=defines, include_paths=include_paths)
+        analyze_unit(
+            source,
+            path,
+            defines=defines,
+            include_paths=include_paths,
+            parser_mode=selected_mode,
+        )
         for path, source in unique_sources.items()
     ]
     units.sort(key=lambda item: (item.name.casefold(), item.path.casefold(), item.name, item.path))
