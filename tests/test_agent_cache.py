@@ -308,7 +308,7 @@ def test_status_polling_does_not_extend_cache_idle_lifetime(tmp_path: Path) -> N
                     cache_status(tmp_path)
                 except CacheClientError as error:
                     assert error.code in {"cache_not_running", "unavailable"}
-                    break
+                    continue
         assert not cache_metadata_path(tmp_path).exists()
     finally:
         stop_cache(tmp_path)
