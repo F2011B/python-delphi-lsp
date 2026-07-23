@@ -124,7 +124,12 @@ type
 implementation
 end. { changed }
 """, encoding="utf-8")
-        after = query_cache(tmp_path, {"action": "open"}).payload["workspace_revision"]
+        deadline = time.monotonic() + 5
+        after = before
+        while after == before and time.monotonic() < deadline:
+            after = query_cache(tmp_path, {"action": "open"}).payload["workspace_revision"]
+            if after == before:
+                time.sleep(0.05)
         assert before != after
         assert cache_status(tmp_path)["invalidations"] >= 1
         source.write_text("""unit UnitA;
@@ -137,7 +142,13 @@ type
 implementation
 end.
 """, encoding="utf-8")
-        rebuilt = query_cache(tmp_path, {"action": "find", "query": "TAdded"}).payload
+        deadline = time.monotonic() + 5
+        rebuilt = {"result": []}
+        while time.monotonic() < deadline:
+            rebuilt = query_cache(tmp_path, {"action": "find", "query": "TAdded"}).payload
+            if any(item["name"] == "TAdded" for item in rebuilt["result"]):
+                break
+            time.sleep(0.05)
         assert any(item["name"] == "TAdded" for item in rebuilt["result"])
         stop_cache(tmp_path)
         stop_cache(tmp_path)

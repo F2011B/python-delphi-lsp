@@ -271,6 +271,35 @@ def test_request_refreshes_the_selected_workspace_once(
     assert calls == 1
 
 
+def test_cached_context_coalesces_revision_scans_until_explicit_invalidation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_source(tmp_path / "Main.dpr", "program Main; begin end.")
+    context = AgentContext.open(tmp_path, revision_check_interval_seconds=10.0)
+    calls = 0
+    real_fingerprint = agent_workspace_module._selection_fingerprint
+
+    def counted_fingerprint(*args: object, **kwargs: object):
+        nonlocal calls
+        calls += 1
+        return real_fingerprint(*args, **kwargs)
+
+    monkeypatch.setattr(
+        agent_workspace_module,
+        "_selection_fingerprint",
+        counted_fingerprint,
+    )
+
+    context.handle({"action": "open"})
+    context.handle({"action": "find", "query": "Main"})
+    assert calls == 1
+
+    context.invalidate_revision_cache()
+    context.handle({"action": "open"})
+    assert calls == 2
+
+
 def test_declaration_section_queries_scan_each_token_at_most_once_in_source_order(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

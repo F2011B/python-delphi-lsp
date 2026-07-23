@@ -20,6 +20,8 @@ import threading
 import time
 from types import ModuleType
 
+from watchfiles import watch
+
 from ._version import __version__
 from .agent_context import AgentContext
 from .agent_protocol import AgentProtocolError
@@ -32,10 +34,15 @@ DEFAULT_IDLE_TIMEOUT = 1800
 DEFAULT_STARTUP_TIMEOUT = 120.0
 _MAX_MESSAGE_BYTES = 1024 * 1024
 _CONNECTION_TIMEOUT = 2.0
+_CLIENT_RESPONSE_TIMEOUT = 30.0
 _MEMORY_SIZE = re.compile(r"^(?P<count>[1-9][0-9]*)(?P<suffix>[KMG]?)$", re.IGNORECASE)
 _STARTUP_DIAGNOSTIC_BYTES = 16 * 1024
 _STARTUP_TOKEN_RE = re.compile(r"(?i)(token\b[^\n\r]*?:?\s*['\"]?[A-Za-z0-9_-]+['\"]?|\b[a-zA-Z0-9_-]{32,})")
 _START_LOCK_INCOMPLETE_GRACE_SECONDS = 1.0
+_CACHE_REVISION_CHECK_INTERVAL_SECONDS = 3600.0
+_WATCHED_SUFFIXES = frozenset(
+    {".pas", ".pp", ".inc", ".dpr", ".dpk", ".dproj", ".cfg"}
+)
 
 
 def estimate_deep_size(value: object) -> int:
@@ -475,7 +482,7 @@ def _start_lock(root: str | Path, timeout: float):
 def _client_exchange(metadata: CacheMetadata, request: dict[str, object]) -> CacheClientResponse:
     try:
         with socket.create_connection(("127.0.0.1", metadata.port), timeout=2) as connection:
-            connection.settimeout(3)
+            connection.settimeout(_CLIENT_RESPONSE_TIMEOUT)
             request_without_token = {key: value for key, value in request.items() if key != "token"}
             connection.sendall(json.dumps({"token": metadata.token, **request_without_token}, separators=(",", ":")).encode("utf-8") + b"\n")
             response = _read_line(connection)
@@ -541,6 +548,7 @@ class _CacheService:
             metadata.project_file or None,
             workers=metadata.workers,
             worker_memory_budget_bytes=metadata.max_memory_bytes,
+            revision_check_interval_seconds=_CACHE_REVISION_CHECK_INTERVAL_SECONDS,
         )
         self.budget = CacheBudget(metadata.max_memory_bytes)
         self.stats = CacheStats()
@@ -641,8 +649,29 @@ class _CacheService:
             "parallel_seconds": self.context.parallel_stats.elapsed_seconds,
             "parallel_fallbacks": self.stats.parallel_fallbacks,
             "idle_timeout": self.metadata.idle_timeout, "idle_remaining": max(0.0, self.metadata.idle_timeout - idle),
-            "workspace_revision": self.context.workspace.workspace_revision,
+            "workspace_revision": self.last_revision,
         }
+
+
+def _watch_filter(_change: object, path: str) -> bool:
+    return Path(path).suffix.casefold() in _WATCHED_SUFFIXES
+
+
+def _watch_workspace(service: _CacheService) -> None:
+    try:
+        for changes in watch(
+            service.metadata.root,
+            watch_filter=_watch_filter,
+            stop_event=service.shutdown,
+            debounce=50,
+            step=20,
+            recursive=True,
+            raise_interrupt=False,
+        ):
+            if changes:
+                service.context.invalidate_revision_cache()
+    except (OSError, RuntimeError):
+        service.context.invalidate_revision_cache()
 
 
 def _serve_connection(connection: socket.socket, service: _CacheService) -> None:
@@ -690,9 +719,17 @@ def run_cache_daemon(
         idle_timeout,
         time.time(),
     )
+    watcher: threading.Thread | None = None
     try:
         service = _CacheService(metadata)
         service.prewarm()
+        watcher = threading.Thread(
+            target=_watch_workspace,
+            args=(service,),
+            name="delphi-cache-watcher",
+            daemon=True,
+        )
+        watcher.start()
         _write_metadata(metadata)
         while not service.shutdown.is_set() and time.monotonic() - service.last_activity < idle_timeout:
             try:
@@ -703,6 +740,10 @@ def run_cache_daemon(
                 connection.settimeout(_CONNECTION_TIMEOUT)
                 _serve_connection(connection, service)
     finally:
+        if "service" in locals():
+            service.shutdown.set()
+        if watcher is not None:
+            watcher.join(timeout=2.0)
         listener.close()
         _remove_metadata_if_owned(metadata)
 

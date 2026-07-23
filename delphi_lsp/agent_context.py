@@ -9,6 +9,7 @@ import hashlib
 import json
 from pathlib import Path, PureWindowsPath
 import sys
+import time
 import unicodedata
 
 from .agent_protocol import (
@@ -445,10 +446,16 @@ class AgentContext:
         *,
         workers: int = 0,
         worker_memory_budget_bytes: int | None = None,
+        revision_check_interval_seconds: float = 0.0,
     ) -> None:
         self._workspace = workspace
         self._workers = workers
         self._worker_memory_budget_bytes = worker_memory_budget_bytes
+        self._revision_check_interval_seconds = max(
+            0.0,
+            revision_check_interval_seconds,
+        )
+        self._last_revision_check_at = 0.0
         self._parallel_stats = ParallelBuildStats(0, 0, 0, 0.0, 0)
         project_id = workspace.active_project_id
         self._focus = Focus(project_id=project_id) if project_id else Focus()
@@ -466,11 +473,13 @@ class AgentContext:
         *,
         workers: int = 0,
         worker_memory_budget_bytes: int | None = None,
+        revision_check_interval_seconds: float = 0.0,
     ) -> AgentContext:
         return cls(
             AgentWorkspace.open(root, project_file=project_file),
             workers=workers,
             worker_memory_budget_bytes=worker_memory_budget_bytes,
+            revision_check_interval_seconds=revision_check_interval_seconds,
         )
 
     @property
@@ -530,6 +539,9 @@ class AgentContext:
         self._require_registry(revision)
         return revision
 
+    def invalidate_revision_cache(self) -> None:
+        self._last_revision_check_at = 0.0
+
     def handle(self, request: AgentRequest | Mapping[str, object]) -> AgentResponse:
         parsed = _validated_request(request)
         revision = self._refresh_workspace(parsed.project_id)
@@ -573,10 +585,25 @@ class AgentContext:
     def _refresh_workspace(self, requested_project_id: str) -> str:
         previous_project_id = self._workspace.active_project_id
         selected_project_id = requested_project_id or previous_project_id
-        if selected_project_id:
+        now = time.monotonic()
+        selection_changed = bool(
+            requested_project_id
+            and requested_project_id != previous_project_id
+        )
+        revision_is_fresh = (
+            not selection_changed
+            and self._revision_check_interval_seconds > 0.0
+            and now - self._last_revision_check_at
+            < self._revision_check_interval_seconds
+        )
+        if revision_is_fresh:
+            revision = self._last_revision
+        elif selected_project_id:
             revision = self._workspace._select_project_with_revision(selected_project_id)
         else:
             revision = self._workspace.workspace_revision
+        if not revision_is_fresh:
+            self._last_revision_check_at = now
         current_project_id = self._workspace.active_project_id
 
         if current_project_id != previous_project_id:
