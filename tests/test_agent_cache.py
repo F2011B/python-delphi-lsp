@@ -197,18 +197,33 @@ def test_warning_threshold_is_inclusive_and_evictions_are_ordered_and_compacted(
     assert calls == ["auxiliary", "navigation"]
 
 
+@pytest.mark.parametrize(
+    ("max_bytes", "warning_percent"),
+    [
+        (0, 80),
+        (-1, 80),
+        (100, 0),
+        (100, 101),
+        (100, -10),
+    ],
+)
+def test_cache_budget_rejects_invalid_configuration(max_bytes: int, warning_percent: int) -> None:
+    with pytest.raises(ValueError):
+        CacheBudget(max_bytes=max_bytes, warning_percent=warning_percent)
+
+
 def test_cache_warning_includes_peak_and_actions_when_compacted() -> None:
     result = BudgetResult(
         retained_bytes=20,
         utilization_percent=20.0,
-        peak_utilization_percent=101.0,
+        peak_utilization_percent=126.3,
         warning_active=False,
         warning_triggered=True,
         compacted=True,
     )
 
     assert cache_warning(result, max_bytes=100) == (
-        "Warning: Delphi cache reached 101.0% of 100 bytes. Cache compacted. "
+        "Warning: Delphi cache reached 126.3% peak at 20 retained bytes of 100 byte budget. Cache compacted. "
         "Increase --max-memory, stop unused daemons, or allow compact mode."
     )
 

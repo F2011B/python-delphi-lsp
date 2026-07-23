@@ -66,6 +66,12 @@ class CacheBudget:
     max_bytes: int = DEFAULT_MAX_MEMORY_BYTES
     warning_percent: int = WARNING_THRESHOLD_PERCENT
 
+    def __post_init__(self) -> None:
+        if self.max_bytes <= 0:
+            raise ValueError("max_bytes must be greater than zero.")
+        if not 0 < self.warning_percent <= 100:
+            raise ValueError("warning_percent must be between 1 and 100.")
+
     def enforce(
         self,
         *,
@@ -118,7 +124,8 @@ def cache_warning(result: BudgetResult, max_bytes: int) -> str:
     compacted = " Cache compacted." if result.compacted else ""
     return (
         "Warning: Delphi cache reached "
-        f"{result.peak_utilization_percent:.1f}% of {max_bytes} bytes.{compacted} "
+        f"{result.peak_utilization_percent:.1f}% peak at "
+        f"{result.retained_bytes} retained bytes of {max_bytes} byte budget.{compacted} "
         "Increase --max-memory, stop unused daemons, or allow compact mode."
     )
 
