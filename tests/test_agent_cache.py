@@ -41,14 +41,19 @@ def test_cache_daemon_lifecycle_reuses_one_authenticated_process(tmp_path: Path)
     implementation
     end.""")
     try:
-        metadata = start_cache(tmp_path, max_memory_bytes=1024 * 1024)
+        metadata = start_cache(tmp_path, max_memory_bytes=512 * 1024**2, workers=2, startup_timeout=30)
         first = metadata
-        second = start_cache(tmp_path, max_memory_bytes=1024 * 1024)
+        second = start_cache(tmp_path, max_memory_bytes=512 * 1024**2, workers=2, startup_timeout=30)
         assert first.pid == second.pid
         response = query_cache(tmp_path, {"action": "open"})
         assert response.payload["schema"] == 2
         status = cache_status(tmp_path)
         assert status["pid"] == first.pid
+        assert status["workers_configured"] == 2
+        assert status["workers_effective"] == 2
+        assert status["parallel_files_completed"] >= 2
+        assert status["prewarm_seconds"] >= status["parallel_seconds"] >= 0
+        assert status["parallel_fallbacks"] == 0
         rendered = json.dumps(status, sort_keys=True)
         assert metadata.token not in rendered
         metadata_file = cache_metadata_path(tmp_path)
@@ -165,6 +170,19 @@ def test_live_unreachable_metadata_is_preserved_without_spawning(tmp_path: Path)
     assert json.loads(path.read_text(encoding="utf-8")) == raw
 
 
+def test_live_cache_rejects_conflicting_worker_configuration(tmp_path: Path) -> None:
+    from delphi_lsp.agent_cache import CacheClientError, start_cache, stop_cache
+
+    write_source(tmp_path / "Demo.dpr", "program Demo; begin end.")
+    try:
+        start_cache(tmp_path, workers=2)
+        with pytest.raises(CacheClientError) as error:
+            start_cache(tmp_path, workers=1)
+        assert error.value.code == "configuration_conflict"
+    finally:
+        stop_cache(tmp_path)
+
+
 def test_cache_startup_reports_child_diagnostics_on_failure(tmp_path: Path) -> None:
     from delphi_lsp.agent_cache import CacheClientError, cache_metadata_path, _read_metadata, start_cache, stop_cache
 
@@ -179,6 +197,55 @@ def test_cache_startup_reports_child_diagnostics_on_failure(tmp_path: Path) -> N
     assert cache_metadata_path(tmp_path).exists() is False
     assert _read_metadata(tmp_path) is None
     stop_cache(tmp_path)
+
+
+def test_startup_timeout_replaces_the_old_ten_second_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from delphi_lsp import agent_cache
+
+    class PendingProcess:
+        pid = 424242
+
+        def __init__(self) -> None:
+            self.killed = False
+            self.polls = 0
+
+        def poll(self) -> int | None:
+            self.polls += 1
+            return -9 if self.killed else None
+
+        def kill(self) -> None:
+            self.killed = True
+
+        def wait(self) -> int:
+            return -9
+
+    process = PendingProcess()
+    ticks = iter((0.0, 11.0, 22.0, 31.0))
+    monkeypatch.setattr(agent_cache.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(agent_cache.time, "sleep", lambda _: None)
+    monkeypatch.setattr(agent_cache.subprocess, "Popen", lambda *args, **kwargs: process)
+    monkeypatch.setattr(agent_cache, "_read_metadata", lambda _: None)
+
+    with pytest.raises(agent_cache.CacheClientError) as error:
+        agent_cache._start_cache_unlocked(tmp_path, startup_timeout=30)
+
+    assert error.value.code == "startup_failed"
+    assert process.polls >= 3
+    assert process.killed is True
+
+
+@pytest.mark.parametrize("startup_timeout", [0, -1, float("nan"), float("inf")])
+def test_start_cache_rejects_non_positive_startup_timeout(
+    tmp_path: Path,
+    startup_timeout: float,
+) -> None:
+    from delphi_lsp.agent_cache import start_cache
+
+    with pytest.raises(ValueError, match="startup_timeout"):
+        start_cache(tmp_path, startup_timeout=startup_timeout)
 
 
 def test_startup_diagnostic_truncates_normalizes_and_redacts_tokens() -> None:
@@ -247,7 +314,7 @@ def test_warning_is_consumed_after_compaction_but_remains_while_active(monkeypat
     from delphi_lsp.agent_cache import CacheMetadata, _CacheService
 
     write_source(tmp_path / "Demo.dpr", "program Demo; begin end.")
-    metadata = CacheMetadata(1, str(tmp_path.resolve()), os.getpid(), 1, "x" * 32, "test", "", 100, 10, time.time())
+    metadata = CacheMetadata(2, str(tmp_path.resolve()), os.getpid(), 1, "x" * 32, "test", "", 100, 0, 10, time.time())
     service = _CacheService(metadata)
     compacted = BudgetResult(20, 20.0, 120.0, False, True, True)
     active = BudgetResult(80, 80.0, 80.0, True, True, False)
@@ -265,7 +332,19 @@ def test_prewarm_only_tolerates_project_selection_error(monkeypatch, tmp_path: P
     from delphi_lsp.agent_protocol import AgentProtocolError
 
     write_source(tmp_path / "Demo.dpr", "program Demo; begin end.")
-    metadata = CacheMetadata(1, str(tmp_path.resolve()), os.getpid(), 1, "x" * 32, "test", "", 1024 * 1024, 10, time.time())
+    metadata = CacheMetadata(
+        2,
+        str(tmp_path.resolve()),
+        os.getpid(),
+        1,
+        "x" * 32,
+        "test",
+        "",
+        1024 * 1024,
+        0,
+        10,
+        time.time(),
+    )
     service = _CacheService(metadata)
     monkeypatch.setattr(service.context, "handle", lambda request: (_ for _ in ()).throw(AgentProtocolError("project_required", "Select a project.")))
     service.prewarm()
@@ -526,6 +605,7 @@ def test_cache_stats_defaults() -> None:
     assert stats.rebuilds == 0
     assert stats.invalidations == 0
     assert stats.evictions == 0
+    assert stats.parallel_fallbacks == 0
 
 
 def test_warning_threshold_is_inclusive_and_evictions_are_ordered_and_compacted() -> None:

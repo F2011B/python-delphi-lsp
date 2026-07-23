@@ -57,8 +57,9 @@ def test_parser_adds_worker_without_changing_legacy_commands() -> None:
 
     worker = parser.parse_args(["worker", "--root", "workspace", "--project-file", "Main.dpr", "--workers", "2"])
     auto_worker = parser.parse_args(["worker", "--root", "workspace", "--workers", "auto"])
-    view = parser.parse_args(["view", "--layer", "overview"])
+    view = parser.parse_args(["view", "--layer", "overview", "--workers", "3"])
     metrics = parser.parse_args(["view", "--layer", "metrics"])
+    index = parser.parse_args(["index", "--workers", "auto"])
 
     assert worker.command == "worker"
     assert worker.root == Path("workspace")
@@ -67,7 +68,10 @@ def test_parser_adds_worker_without_changing_legacy_commands() -> None:
     assert auto_worker.workers == 0
     assert view.command == "view"
     assert view.layer == "overview"
+    assert view.workers == 3
     assert metrics.layer == "metrics"
+    assert metrics.workers == 0
+    assert index.workers == 0
 
 
 def test_worker_parallel_output_is_deterministic(tmp_path: Path) -> None:
@@ -90,10 +94,24 @@ def test_parser_adds_cache_lifecycle_and_ergonomic_query_commands() -> None:
     parser = agent_cli.build_parser()
 
     start = parser.parse_args(["cache", "start"])
+    configured_start = parser.parse_args(
+        ["cache", "start", "--workers", "2", "--startup-timeout", "45.5"]
+    )
     status = parser.parse_args(["cache", "status", "--root", "workspace", "--format", "json"])
     stop = parser.parse_args(["cache", "stop", "--root", "workspace"])
     serve = parser.parse_args(
-        ["cache", "serve", "--root", "workspace", "--max-memory", "2M", "--idle-timeout", "90"]
+        [
+            "cache",
+            "serve",
+            "--root",
+            "workspace",
+            "--max-memory",
+            "2M",
+            "--workers",
+            "2",
+            "--idle-timeout",
+            "90",
+        ]
     )
     query = parser.parse_args(
         ["query", "--root", "workspace", "find", "TCustomer", "--project-id", "Main.dpr", "--max-items", "4"]
@@ -104,9 +122,14 @@ def test_parser_adds_cache_lifecycle_and_ergonomic_query_commands() -> None:
     assert start.root == Path(".")
     assert start.max_memory == DEFAULT_MAX_MEMORY_BYTES
     assert start.idle_timeout == 1800
+    assert start.workers == 0
+    assert start.startup_timeout == 120.0
+    assert configured_start.workers == 2
+    assert configured_start.startup_timeout == 45.5
     assert status.format == "json"
     assert stop.root == Path("workspace")
     assert serve.max_memory == 2 * 1024**2
+    assert serve.workers == 2
     assert serve.idle_timeout == 90
     assert query.action == "find"
     assert query.value == "TCustomer"

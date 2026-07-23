@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -12,6 +13,7 @@ from .agent_cache import (
     CacheClientError,
     DEFAULT_IDLE_TIMEOUT,
     DEFAULT_MAX_MEMORY_BYTES,
+    DEFAULT_STARTUP_TIMEOUT,
     parse_memory_size,
     query_cache,
     run_cache_daemon,
@@ -61,12 +63,14 @@ def build_parser() -> argparse.ArgumentParser:
     view.add_argument("--query", default="")
     view.add_argument("--format", default="markdown", choices=["markdown", "json"])
     view.add_argument("--deep-projects", action="store_true", help="Deep-parse project dependencies for the projects layer.")
+    view.add_argument("--workers", type=parse_worker_setting, default=0)
     view.set_defaults(func=_view)
 
     index = subcommands.add_parser("index", help="Materialize a JSON codebase index.")
     index.add_argument("--root", type=Path, default=Path("."))
     index.add_argument("--project-file", type=Path)
     index.add_argument("--out", type=Path, default=Path(".delphi-lsp") / "agent-index" / "index.json")
+    index.add_argument("--workers", type=parse_worker_setting, default=0)
     index.set_defaults(func=_index)
 
     skill = subcommands.add_parser("skill", help="Install agent skill templates.")
@@ -115,6 +119,7 @@ def build_parser() -> argparse.ArgumentParser:
     cache_serve.add_argument("--root", type=Path, required=True)
     cache_serve.add_argument("--project-file", type=Path)
     cache_serve.add_argument("--max-memory", type=parse_memory_size, required=True)
+    cache_serve.add_argument("--workers", type=parse_worker_setting, required=True)
     cache_serve.add_argument("--idle-timeout", type=int, required=True)
     cache_serve.set_defaults(func=_cache_serve)
 
@@ -137,7 +142,16 @@ def _add_cache_start_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--root", type=Path, default=Path("."))
     parser.add_argument("--project-file", type=Path)
     parser.add_argument("--max-memory", type=parse_memory_size, default=DEFAULT_MAX_MEMORY_BYTES)
+    parser.add_argument("--workers", type=parse_worker_setting, default=0)
     parser.add_argument("--idle-timeout", type=int, default=DEFAULT_IDLE_TIMEOUT)
+    parser.add_argument("--startup-timeout", type=_positive_float, default=DEFAULT_STARTUP_TIMEOUT)
+
+
+def _positive_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be greater than zero")
+    return parsed
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -175,12 +189,22 @@ def _discard_broken_stdout() -> None:
 
 
 def _view(args: argparse.Namespace) -> None:
-    index = build_codebase_index(args.root, project_file=args.project_file, index_projects=args.deep_projects)
+    index = build_codebase_index(
+        args.root,
+        project_file=args.project_file,
+        index_projects=args.deep_projects,
+        workers=args.workers,
+    )
     sys.stdout.write(render_layer(index, args.layer, query=args.query, output_format=args.format))
 
 
 def _index(args: argparse.Namespace) -> None:
-    index = build_codebase_index(args.root, project_file=args.project_file, index_projects=True)
+    index = build_codebase_index(
+        args.root,
+        project_file=args.project_file,
+        index_projects=True,
+        workers=args.workers,
+    )
     payload = {
         "overview": layer_payload(index, "overview"),
         "projects": layer_payload(index, "projects"),
@@ -237,7 +261,14 @@ def _cache_error(error: CacheClientError) -> int:
 
 def _cache_start(args: argparse.Namespace) -> int:
     try:
-        start_cache(args.root, project_file=args.project_file, max_memory_bytes=args.max_memory, idle_timeout=args.idle_timeout)
+        start_cache(
+            args.root,
+            project_file=args.project_file,
+            max_memory_bytes=args.max_memory,
+            workers=args.workers,
+            idle_timeout=args.idle_timeout,
+            startup_timeout=args.startup_timeout,
+        )
         response = query_cache(args.root, {"action": "status"})
     except CacheClientError as error:
         return _cache_error(error)
@@ -285,7 +316,13 @@ def _cache_stop(args: argparse.Namespace) -> int:
 
 
 def _cache_serve(args: argparse.Namespace) -> int:
-    run_cache_daemon(args.root, project_file=str(args.project_file or ""), max_memory_bytes=args.max_memory, idle_timeout=args.idle_timeout)
+    run_cache_daemon(
+        args.root,
+        project_file=str(args.project_file or ""),
+        max_memory_bytes=args.max_memory,
+        workers=args.workers,
+        idle_timeout=args.idle_timeout,
+    )
     return 0
 
 

@@ -6,6 +6,7 @@ import argparse
 import contextlib
 import hmac
 import json
+import math
 import os
 from pathlib import Path
 import secrets
@@ -26,8 +27,9 @@ from .agent_protocol import AgentProtocolError
 
 DEFAULT_MAX_MEMORY_BYTES = 512 * 1024**2
 WARNING_THRESHOLD_PERCENT = 80
-DAEMON_SCHEMA = 1
+DAEMON_SCHEMA = 2
 DEFAULT_IDLE_TIMEOUT = 1800
+DEFAULT_STARTUP_TIMEOUT = 120.0
 _MAX_MESSAGE_BYTES = 1024 * 1024
 _CONNECTION_TIMEOUT = 2.0
 _MEMORY_SIZE = re.compile(r"^(?P<count>[1-9][0-9]*)(?P<suffix>[KMG]?)$", re.IGNORECASE)
@@ -72,6 +74,7 @@ class CacheStats:
     rebuilds: int = 0
     invalidations: int = 0
     evictions: int = 0
+    parallel_fallbacks: int = 0
 
 
 @dataclass(frozen=True)
@@ -232,6 +235,7 @@ class CacheMetadata:
     version: str
     project_file: str
     max_memory_bytes: int
+    workers: int
     idle_timeout: int
     started_at: float
 
@@ -291,7 +295,7 @@ def _write_metadata(metadata: CacheMetadata) -> None:
             os.unlink(temporary)
 
 
-def _read_metadata(root: str | Path) -> CacheMetadata | None:
+def _read_metadata_record(root: str | Path) -> object | None:
     path = _safe_metadata_path(root)
     if not path.exists():
         return None
@@ -309,20 +313,54 @@ def _read_metadata(root: str | Path) -> CacheMetadata | None:
         raise
     except (OSError, ValueError, UnicodeError):
         return None
+    return raw
+
+
+def _read_metadata(root: str | Path) -> CacheMetadata | None:
+    raw = _read_metadata_record(root)
     required = {field.name for field in fields(CacheMetadata)}
     if not isinstance(raw, dict) or set(raw) != required:
         return None
-    values = tuple(raw[name] for name in ("schema", "root", "pid", "port", "token", "version", "project_file", "max_memory_bytes", "idle_timeout", "started_at"))
+    values = tuple(
+        raw[name]
+        for name in (
+            "schema",
+            "root",
+            "pid",
+            "port",
+            "token",
+            "version",
+            "project_file",
+            "max_memory_bytes",
+            "workers",
+            "idle_timeout",
+            "started_at",
+        )
+    )
     if (type(values[0]) is not int or values[0] != DAEMON_SCHEMA or not isinstance(values[1], str)
             or type(values[2]) is not int or values[2] <= 0 or type(values[3]) is not int or not 0 < values[3] < 65536
             or not isinstance(values[4], str) or len(values[4]) < 32 or not isinstance(values[5], str)
             or not isinstance(values[6], str) or type(values[7]) is not int or values[7] <= 0
-            or type(values[8]) is not int or values[8] <= 0 or type(values[9]) not in (int, float)):
+            or type(values[8]) is not int or not 0 <= values[8] <= 32
+            or type(values[9]) is not int or values[9] <= 0 or type(values[10]) not in (int, float)):
         return None
     canonical = str(Path(root).resolve())
     if values[1] != canonical:
         return None
     return CacheMetadata(*values)
+
+
+def _remove_incompatible_metadata_if_stale(root: str | Path) -> None:
+    path = _safe_metadata_path(root)
+    if not path.exists():
+        return
+    raw = _read_metadata_record(root)
+    canonical = str(Path(root).resolve())
+    pid = raw.get("pid") if isinstance(raw, dict) and raw.get("root") == canonical else None
+    if type(pid) is int and pid > 0 and _pid_alive(pid):
+        raise CacheClientError("unavailable", "Live cache daemon is unavailable.")
+    with contextlib.suppress(FileNotFoundError):
+        path.unlink()
 
 
 def _remove_metadata_if_owned(metadata: CacheMetadata) -> None:
@@ -346,10 +384,10 @@ def _start_lock_path(root: str | Path) -> Path:
 
 
 @contextlib.contextmanager
-def _start_lock(root: str | Path):
+def _start_lock(root: str | Path, timeout: float):
     path = _start_lock_path(root)
     token = secrets.token_urlsafe(24)
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + timeout
     while True:
         try:
             descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -365,7 +403,7 @@ def _start_lock(root: str | Path):
                 record = json.loads(path.read_text(encoding="utf-8"))
                 owner = record.get("pid") if isinstance(record, dict) else None
                 started = record.get("started_at") if isinstance(record, dict) else None
-                stale = type(owner) is not int or not _pid_alive(owner) or type(started) not in (int, float) or time.time() - started > 30
+                stale = type(owner) is not int or not _pid_alive(owner) or type(started) not in (int, float)
             except (OSError, ValueError, UnicodeError):
                 stale = True
             if stale:
@@ -450,7 +488,12 @@ def _read_startup_tail(diagnostics: object, *, max_bytes: int = _STARTUP_DIAGNOS
 class _CacheService:
     def __init__(self, metadata: CacheMetadata) -> None:
         self.metadata = metadata
-        self.context = AgentContext.open(metadata.root, metadata.project_file or None)
+        self.context = AgentContext.open(
+            metadata.root,
+            metadata.project_file or None,
+            workers=metadata.workers,
+            worker_memory_budget_bytes=metadata.max_memory_bytes,
+        )
         self.budget = CacheBudget(metadata.max_memory_bytes)
         self.stats = CacheStats()
         self.lock = threading.Lock()
@@ -459,9 +502,11 @@ class _CacheService:
         self.cache_state = "warming"
         self.last_revision = self.context.workspace.workspace_revision
         self.last_budget = BudgetResult(0, 0.0, 0.0, False, False, False)
+        self.prewarm_seconds = 0.0
         self.shutdown = threading.Event()
 
     def prewarm(self) -> None:
+        started = time.monotonic()
         try:
             self.context.handle({"action": "find", "query": "", "max_items": 1, "max_chars": 256})
             self.last_revision = self.context.workspace.workspace_revision
@@ -478,6 +523,8 @@ class _CacheService:
         if self.last_budget.compacted:
             self.stats.evictions += 1
             self.cache_state = "compact"
+        self.prewarm_seconds = time.monotonic() - started
+        self.stats.parallel_fallbacks = self.context.parallel_stats.fallbacks
 
     def request(self, request: dict[str, object]) -> CacheClientResponse:
         with self.lock:
@@ -506,6 +553,7 @@ class _CacheService:
                 self.stats.warm_hits += 1
             else:
                 self.stats.rebuilds += 1
+                self.stats.parallel_fallbacks += self.context.parallel_stats.fallbacks
             if before != after:
                 self.stats.invalidations += 1
             self.last_budget = self.budget.enforce(
@@ -539,6 +587,12 @@ class _CacheService:
             "warning_active": self.last_budget.warning_active, "warning_threshold_percent": WARNING_THRESHOLD_PERCENT,
             "cache_state": self.cache_state, "requests": self.stats.requests, "warm_hits": self.stats.warm_hits,
             "rebuilds": self.stats.rebuilds, "invalidations": self.stats.invalidations, "evictions": self.stats.evictions,
+            "workers_configured": "auto" if self.metadata.workers == 0 else self.metadata.workers,
+            "workers_effective": self.context.parallel_stats.effective_workers,
+            "parallel_files_completed": self.context.parallel_stats.files_completed,
+            "prewarm_seconds": self.prewarm_seconds,
+            "parallel_seconds": self.context.parallel_stats.elapsed_seconds,
+            "parallel_fallbacks": self.stats.parallel_fallbacks,
             "idle_timeout": self.metadata.idle_timeout, "idle_remaining": max(0.0, self.metadata.idle_timeout - idle),
             "workspace_revision": self.context.workspace.workspace_revision,
         }
@@ -562,14 +616,33 @@ def _serve_connection(connection: socket.socket, service: _CacheService) -> None
         connection.sendall(json.dumps(response, separators=(",", ":")).encode("utf-8") + b"\n")
 
 
-def run_cache_daemon(root: str | Path, *, project_file: str = "", max_memory_bytes: int = DEFAULT_MAX_MEMORY_BYTES, idle_timeout: int = DEFAULT_IDLE_TIMEOUT) -> None:
+def run_cache_daemon(
+    root: str | Path,
+    *,
+    project_file: str = "",
+    max_memory_bytes: int = DEFAULT_MAX_MEMORY_BYTES,
+    workers: int = 0,
+    idle_timeout: int = DEFAULT_IDLE_TIMEOUT,
+) -> None:
     canonical = str(Path(root).resolve())
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind(("127.0.0.1", 0))
     listener.listen(16)
     listener.settimeout(0.25)
-    metadata = CacheMetadata(DAEMON_SCHEMA, canonical, os.getpid(), listener.getsockname()[1], secrets.token_urlsafe(32), __version__, project_file, max_memory_bytes, idle_timeout, time.time())
+    metadata = CacheMetadata(
+        DAEMON_SCHEMA,
+        canonical,
+        os.getpid(),
+        listener.getsockname()[1],
+        secrets.token_urlsafe(32),
+        __version__,
+        project_file,
+        max_memory_bytes,
+        workers,
+        idle_timeout,
+        time.time(),
+    )
     try:
         service = _CacheService(metadata)
         service.prewarm()
@@ -587,7 +660,15 @@ def run_cache_daemon(root: str | Path, *, project_file: str = "", max_memory_byt
         _remove_metadata_if_owned(metadata)
 
 
-def _start_cache_unlocked(root: str | Path, *, project_file: str | Path | None = None, max_memory_bytes: int = DEFAULT_MAX_MEMORY_BYTES, idle_timeout: int = DEFAULT_IDLE_TIMEOUT) -> CacheMetadata:
+def _start_cache_unlocked(
+    root: str | Path,
+    *,
+    project_file: str | Path | None = None,
+    max_memory_bytes: int = DEFAULT_MAX_MEMORY_BYTES,
+    workers: int = 0,
+    idle_timeout: int = DEFAULT_IDLE_TIMEOUT,
+    startup_timeout: float = DEFAULT_STARTUP_TIMEOUT,
+) -> CacheMetadata:
     canonical = str(Path(root).resolve())
     project = str((Path(canonical) / project_file).resolve()) if project_file and not Path(project_file).is_absolute() else (str(Path(project_file).resolve()) if project_file else "")
     existing = _read_metadata(canonical)
@@ -596,12 +677,32 @@ def _start_cache_unlocked(root: str | Path, *, project_file: str | Path | None =
             _client_exchange(existing, {"action": "status", "_startup_probe": True})
         except CacheClientError as error:
             raise CacheClientError("unavailable", "Live cache daemon is unavailable.") from error
-        if (existing.project_file, existing.max_memory_bytes, existing.idle_timeout) != (project, max_memory_bytes, idle_timeout):
+        if (existing.project_file, existing.max_memory_bytes, existing.workers, existing.idle_timeout) != (
+            project,
+            max_memory_bytes,
+            workers,
+            idle_timeout,
+        ):
             raise CacheClientError("configuration_conflict", "A live cache daemon has conflicting configuration.")
         return existing
     if existing:
         _remove_metadata_if_owned(existing)
-    command = [sys.executable, "-m", "delphi_lsp.agent_cache", "serve", "--root", canonical, "--max-memory", str(max_memory_bytes), "--idle-timeout", str(idle_timeout)]
+    else:
+        _remove_incompatible_metadata_if_stale(canonical)
+    command = [
+        sys.executable,
+        "-m",
+        "delphi_lsp.agent_cache",
+        "serve",
+        "--root",
+        canonical,
+        "--max-memory",
+        str(max_memory_bytes),
+        "--workers",
+        str(workers),
+        "--idle-timeout",
+        str(idle_timeout),
+    ]
     if project:
         command.extend(("--project-file", project))
     options: dict[str, object] = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL}
@@ -612,7 +713,7 @@ def _start_cache_unlocked(root: str | Path, *, project_file: str | Path | None =
     with tempfile.TemporaryFile() as diagnostics:
         options["stderr"] = diagnostics
         process = subprocess.Popen(command, **options)
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + startup_timeout
         startup_ready = False
         try:
             while time.monotonic() < deadline:
@@ -649,14 +750,34 @@ def _start_cache_unlocked(root: str | Path, *, project_file: str | Path | None =
                     process.wait()
 
 
-def start_cache(root: str | Path, *, project_file: str | Path | None = None, max_memory_bytes: int = DEFAULT_MAX_MEMORY_BYTES, idle_timeout: int = DEFAULT_IDLE_TIMEOUT) -> CacheMetadata:
-    with _start_lock(root):
-        return _start_cache_unlocked(root, project_file=project_file, max_memory_bytes=max_memory_bytes, idle_timeout=idle_timeout)
+def start_cache(
+    root: str | Path,
+    *,
+    project_file: str | Path | None = None,
+    max_memory_bytes: int = DEFAULT_MAX_MEMORY_BYTES,
+    workers: int = 0,
+    idle_timeout: int = DEFAULT_IDLE_TIMEOUT,
+    startup_timeout: float = DEFAULT_STARTUP_TIMEOUT,
+) -> CacheMetadata:
+    if type(workers) is not int or not 0 <= workers <= 32:
+        raise ValueError("workers must be auto or an integer from 1 through 32.")
+    if not math.isfinite(startup_timeout) or startup_timeout <= 0:
+        raise ValueError("startup_timeout must be greater than zero.")
+    with _start_lock(root, startup_timeout):
+        return _start_cache_unlocked(
+            root,
+            project_file=project_file,
+            max_memory_bytes=max_memory_bytes,
+            workers=workers,
+            idle_timeout=idle_timeout,
+            startup_timeout=startup_timeout,
+        )
 
 
 def query_cache(root: str | Path, request: dict[str, object]) -> CacheClientResponse:
     metadata = _read_metadata(root)
     if metadata is None:
+        _remove_incompatible_metadata_if_stale(root)
         raise CacheClientError("cache_not_running", "Cache daemon is not running.")
     if not _pid_alive(metadata.pid):
         _remove_metadata_if_owned(metadata)
@@ -671,6 +792,7 @@ def cache_status(root: str | Path) -> dict[str, object]:
 def stop_cache(root: str | Path) -> None:
     metadata = _read_metadata(root)
     if metadata is None:
+        _remove_incompatible_metadata_if_stale(root)
         return
     if not _pid_alive(metadata.pid):
         _remove_metadata_if_owned(metadata)
@@ -699,10 +821,17 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument("--root", required=True)
     serve.add_argument("--project-file", default="")
     serve.add_argument("--max-memory", type=int, default=DEFAULT_MAX_MEMORY_BYTES)
+    serve.add_argument("--workers", type=int, default=0)
     serve.add_argument("--idle-timeout", type=int, default=DEFAULT_IDLE_TIMEOUT)
     args = parser.parse_args(argv)
     if args.command == "serve":
-        run_cache_daemon(args.root, project_file=args.project_file, max_memory_bytes=args.max_memory, idle_timeout=args.idle_timeout)
+        run_cache_daemon(
+            args.root,
+            project_file=args.project_file,
+            max_memory_bytes=args.max_memory,
+            workers=args.workers,
+            idle_timeout=args.idle_timeout,
+        )
     return 0
 
 
