@@ -17,6 +17,11 @@ workspace root, so repeated tool calls in that session reuse project, symbol,
 relation, metric, and focus state. Session deletion, transport failure, and
 plugin disposal stop those workers.
 
+The OpenCode tool existed in releases 1.1.0 and 1.1.1, but those versions
+started a new `view` process for every tool call. The persistent worker was
+introduced by commit `2202659` and was first included in the 2.0.0 release. It
+was not present in version 1.0.0.
+
 Standalone `view` and `index` commands create a new process for every
 invocation. They cannot reuse the OpenCode worker or each other's memory.
 
@@ -148,6 +153,19 @@ rebuild the required structure and is therefore slower, but remains
 functional. It is evicted again after the response if it still exceeds the
 budget. No correctness result is served from a partially evicted structure.
 
+At an estimated utilization greater than or equal to 80 percent, every
+lifecycle or query CLI invocation reports a warning on standard error. The
+warning contains the estimated retained bytes, configured budget, percentage,
+and suggested remedies: increase `--max-memory`, stop unused daemons, or allow
+compact mode. Successful Protocol v2 JSON remains the only content on standard
+output. Text status marks the threshold visibly, while JSON status exposes
+`warning_active`, `warning_threshold_percent`, and `utilization_percent`.
+
+If a request reaches the eviction limit and compaction immediately reduces
+utilization below 80 percent, that invocation still reports that the limit was
+reached and compaction occurred. Later invocations do not retain a stale active
+warning when current utilization is below the threshold.
+
 The daemon exits after 30 minutes without a query by default. Explicit
 `cache stop`, process termination, or idle shutdown removes its metadata when
 the current process still owns that metadata record.
@@ -158,6 +176,7 @@ the current process still owns that metadata record.
 
 - daemon PID, root, project, uptime, and last activity;
 - configured budget and current estimated retained bytes;
+- utilization percentage and an active warning from 80 percent onward;
 - cache state (`warming`, `warm`, or `compact`);
 - requests, warm hits, rebuilds, invalidations, and evictions;
 - idle timeout and remaining idle time;
@@ -188,11 +207,13 @@ Implementation follows test-driven development:
 1. parser tests cover lifecycle commands, ergonomic query translation, memory
    suffixes, and defaults;
 2. unit tests cover metadata validation, cache-size estimation, eviction order,
-   status sanitization, authentication, and idle decisions;
+   the inclusive 80-percent warning threshold, status sanitization,
+   authentication, and idle decisions;
 3. integration tests start a real daemon, make queries from separate Python
    processes, verify one PID is reused, inspect status, and stop it cleanly;
 4. a deliberately tiny budget forces `compact` mode and proves later queries
-   still return correct results;
+   still return correct results and the triggering CLI invocation warns even
+   when post-eviction utilization drops below 80 percent;
 5. editing a reachable Delphi source proves revision invalidation and rebuilt
    query results;
 6. existing worker and generated OpenCode runtime tests prove their current
