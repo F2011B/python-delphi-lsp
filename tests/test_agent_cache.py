@@ -16,6 +16,54 @@ from delphi_lsp.agent_cache import (
 )
 from delphi_lsp.agent_context import AgentContext
 
+
+def test_cache_daemon_lifecycle_reuses_one_authenticated_process(tmp_path: Path) -> None:
+    from delphi_lsp.agent_cache import cache_metadata_path, cache_status, query_cache, start_cache, stop_cache
+
+    write_source(tmp_path / "Demo.dpr", """program Demo;
+    uses UnitA in 'UnitA.pas';
+    begin
+    end.""")
+    write_source(tmp_path / "UnitA.pas", """unit UnitA;
+    interface
+    type
+      TDemo = class
+      end;
+    implementation
+    end.""")
+    try:
+        first = start_cache(tmp_path, max_memory_bytes=1024 * 1024)
+        second = start_cache(tmp_path, max_memory_bytes=1024 * 1024)
+        assert first.pid == second.pid
+        response = query_cache(tmp_path, {"action": "open"})
+        assert response.payload["schema"] == 2
+        status = cache_status(tmp_path)
+        assert status["pid"] == first.pid
+        assert "token" not in status
+        assert "token" not in cache_metadata_path(tmp_path).read_text(encoding="utf-8")[:0]
+    finally:
+        stop_cache(tmp_path)
+
+
+def test_cache_daemon_rejects_invalid_auth_without_dying(tmp_path: Path) -> None:
+    from delphi_lsp.agent_cache import CacheClientError, cache_metadata_path, query_cache, start_cache, stop_cache
+    import json
+
+    write_source(tmp_path / "Demo.dpr", "program Demo; begin end.")
+    try:
+        metadata = start_cache(tmp_path)
+        path = cache_metadata_path(tmp_path)
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["token"] = "0" * 32
+        path.write_text(json.dumps(raw), encoding="utf-8")
+        with pytest.raises(CacheClientError, match="authentication failed"):
+            query_cache(tmp_path, {"action": "find", "query": "Demo"})
+        raw["token"] = metadata.token
+        path.write_text(json.dumps(raw), encoding="utf-8")
+        assert query_cache(tmp_path, {"action": "find", "query": "Demo"}).payload["schema"] == 2
+    finally:
+        stop_cache(tmp_path)
+
 def write_source(path: Path, source: str) -> None:
     path.write_text(textwrap.dedent(source).strip() + "\n", encoding="utf-8")
 

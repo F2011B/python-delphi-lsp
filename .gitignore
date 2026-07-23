@@ -28,3 +28,4 @@ env/
 test_projects/
 output/
 .worktrees/
+.delphi-lsp/
