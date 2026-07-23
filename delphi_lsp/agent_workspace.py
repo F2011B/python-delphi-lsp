@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
+import sys
 import unicodedata
 
 from .agent_protocol import AgentProtocolError, Focus, make_target_id
@@ -178,6 +179,20 @@ class AgentWorkspace:
 
     def cache_roots(self) -> tuple[object, ...]:
         return (self._project_cache, self._active_result)
+
+    @property
+    def estimated_cache_bytes(self) -> int:
+        retained = 512
+        seen_results: set[int] = set()
+        for cached in self._project_cache.values():
+            result = cached.result
+            if id(result) in seen_results:
+                continue
+            seen_results.add(id(result))
+            retained += _estimate_project_result_bytes(result)
+        if self._active_result is not None and id(self._active_result) not in seen_results:
+            retained += _estimate_project_result_bytes(self._active_result)
+        return retained
 
     def evict_recomputable_caches(self) -> None:
         self._project_cache.clear()
@@ -530,6 +545,26 @@ def _selection_fingerprint(
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _estimate_project_result_bytes(result: ProjectIndexResult) -> int:
+    retained = 2048
+    retained += sum(
+        768 + sys.getsizeof(unit.name) + sys.getsizeof(unit.path)
+        for unit in result.parsed_units
+    )
+    retained += sum(
+        384 + sys.getsizeof(include.name) + sys.getsizeof(include.path)
+        for include in result.include_files
+    )
+    retained += sum(
+        512
+        + sys.getsizeof(problem.file_name)
+        + sys.getsizeof(problem.description)
+        for problem in result.problems
+    )
+    retained += sum(sys.getsizeof(name) + 96 for name in result.not_found_units)
+    return retained
 
 
 def _selection_state(

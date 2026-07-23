@@ -556,15 +556,14 @@ class _CacheService:
     def prewarm(self) -> None:
         started = time.monotonic()
         try:
-            self.context.handle({"action": "find", "query": "", "max_items": 1, "max_chars": 256})
-            self.last_revision = self.context.workspace.workspace_revision
+            self.last_revision = self.context.prewarm_navigation()
             self.cache_state = "warm"
         except AgentProtocolError as error:
             if error.code != "project_required":
                 raise
             self.cache_state = "ready"
         self.last_budget = self.budget.enforce(
-            measure=lambda: estimate_deep_size(self.context.cache_roots()),
+            measure=lambda: self.context.estimated_cache_bytes,
             evict_auxiliary=self.context.evict_auxiliary_caches,
             evict_navigation=self.context.evict_navigation_caches,
         )
@@ -605,7 +604,7 @@ class _CacheService:
             if before != after:
                 self.stats.invalidations += 1
             self.last_budget = self.budget.enforce(
-                measure=lambda: estimate_deep_size(self.context.cache_roots()),
+                measure=lambda: self.context.estimated_cache_bytes,
                 evict_auxiliary=self.context.evict_auxiliary_caches,
                 evict_navigation=self.context.evict_navigation_caches,
             )

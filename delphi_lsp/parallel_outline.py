@@ -15,7 +15,8 @@ from .source_reader import read_source_text
 
 
 _MEBIBYTE = 1024 * 1024
-_WORKER_MEMORY_BYTES = 128 * _MEBIBYTE
+_WORKER_MEMORY_BYTES = 64 * _MEBIBYTE
+_AUTO_WORKER_LIMIT = 8
 
 
 class ParallelOutlineError(RuntimeError):
@@ -83,7 +84,7 @@ def resolve_worker_count(
         return min(configured_workers, task_count)
 
     detected_cpus = os.cpu_count() if cpu_count is None else cpu_count
-    candidates = [task_count, 4, max(1, (detected_cpus or 1) - 1)]
+    candidates = [task_count, _AUTO_WORKER_LIMIT, max(1, (detected_cpus or 1) - 1)]
     if memory_budget_bytes is not None:
         candidates.append(max(1, memory_budget_bytes // _WORKER_MEMORY_BYTES))
     return min(candidates)
@@ -112,7 +113,9 @@ def _parse_outline_task(task: OutlineTask) -> OutlineResult:
         source_path=task.source_path,
         text=text if task.return_text else "",
         model=model,
-        lines_processed=len(text.splitlines()),
+        lines_processed=text.count("\n") + (
+            0 if not text or text.endswith(("\n", "\r")) else 1
+        ),
         symbols_discovered=sum(len(items) for items in model.index.name_index.values()),
     )
 
@@ -125,8 +128,10 @@ def run_outline_tasks(
     cpu_count: int | None = None,
     on_complete: Callable[[OutlineResult], None] | None = None,
     retain_results: bool = True,
+    task_runner: Callable[[OutlineTask], OutlineResult] | None = None,
 ) -> OutlineBatch:
     task_list = tuple(tasks)
+    operation = _parse_outline_task if task_runner is None else task_runner
     started = perf_counter()
     effective_workers = resolve_worker_count(
         configured_workers,
@@ -135,7 +140,12 @@ def run_outline_tasks(
         memory_budget_bytes=memory_budget_bytes,
     )
     if effective_workers <= 1:
-        results, completed = _run_serial(task_list, on_complete, retain_results)
+        results, completed = _run_serial(
+            task_list,
+            on_complete,
+            retain_results,
+            operation,
+        )
         return _batch(
             configured_workers,
             effective_workers,
@@ -152,9 +162,9 @@ def run_outline_tasks(
     try:
         context = multiprocessing.get_context("spawn")
         executor = ProcessPoolExecutor(max_workers=effective_workers, mp_context=context)
-        task_iterator = iter(task_list)
+        task_iterator = iter(_largest_sources_first(task_list))
         for task in task_iterator:
-            futures[executor.submit(_parse_outline_task, task)] = task
+            futures[executor.submit(operation, task)] = task
             if len(futures) == effective_workers:
                 break
         while futures:
@@ -171,7 +181,12 @@ def run_outline_tasks(
                 if configured_workers == 0 and completed == 0:
                     _cancel_futures(futures)
                     _shutdown_failed_executor(executor)
-                    results, serial_completed = _run_serial(task_list, on_complete, retain_results)
+                    results, serial_completed = _run_serial(
+                        task_list,
+                        on_complete,
+                        retain_results,
+                        operation,
+                    )
                     return _batch(
                         configured_workers,
                         1,
@@ -190,7 +205,7 @@ def run_outline_tasks(
                 next_task = next(task_iterator)
             except StopIteration:
                 continue
-            futures[executor.submit(_parse_outline_task, next_task)] = next_task
+            futures[executor.submit(operation, next_task)] = next_task
     except ParallelOutlineError:
         _cancel_futures(futures)
         _shutdown_failed_executor(executor)
@@ -199,7 +214,12 @@ def run_outline_tasks(
         _cancel_futures(futures)
         _shutdown_failed_executor(executor)
         if configured_workers == 0 and completed == 0:
-            results, serial_completed = _run_serial(task_list, on_complete, retain_results)
+            results, serial_completed = _run_serial(
+                task_list,
+                on_complete,
+                retain_results,
+                operation,
+            )
             return _batch(
                 configured_workers,
                 1,
@@ -227,14 +247,33 @@ def run_outline_tasks(
     )
 
 
+def _largest_sources_first(tasks: tuple[OutlineTask, ...]) -> tuple[OutlineTask, ...]:
+    sizes: dict[str, int] = {}
+    for task in tasks:
+        try:
+            sizes[task.source_path] = Path(task.source_path).stat().st_size
+        except OSError:
+            sizes[task.source_path] = -1
+    return tuple(
+        sorted(
+            tasks,
+            key=lambda task: (
+                -sizes[task.source_path],
+                task.ordinal,
+            ),
+        )
+    )
+
+
 def _run_serial(
     tasks: tuple[OutlineTask, ...],
     on_complete: Callable[[OutlineResult], None] | None,
     retain_results: bool,
+    operation: Callable[[OutlineTask], OutlineResult],
 ) -> tuple[list[OutlineResult], int]:
     results = []
     for task in tasks:
-        result = _parse_outline_task(task)
+        result = operation(task)
         if on_complete is not None:
             on_complete(result)
         if retain_results:

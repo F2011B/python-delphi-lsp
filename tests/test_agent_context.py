@@ -1416,7 +1416,114 @@ def test_many_routines_reuse_cached_token_starts_without_rebuilding_full_token_l
 
     assert response.page.total == 151  # 150 routines plus the matching program name.
     assert bisect_sequences
-    assert len({id(sequence) for sequence in bisect_sequences}) <= 2
+    # The eager build document is released and inspect creates one lazy document.
+    # Each document owns at most its token and token-start tuple.
+    assert len({id(sequence) for sequence in bisect_sequences}) <= 4
+
+
+def test_registry_releases_eager_source_documents_and_loads_them_on_inspect(
+    tmp_path: Path,
+) -> None:
+    source = (
+        "unit LazySource;\n"
+        "interface\n"
+        "type\n"
+        "  TLazySource = class\n"
+        "  end;\n"
+        "implementation\n"
+        "end.\n"
+    )
+    (tmp_path / "LazySource.pas").write_text(source, encoding="utf-8")
+    context = AgentContext.open(tmp_path)
+
+    target = card_named(
+        context.handle({"action": "find", "query": "TLazySource"}),
+        "TLazySource",
+    )
+    registry = context._registry
+
+    assert registry is not None
+    assert registry.sources.loaded_count == 0
+
+    response = context.handle(
+        {
+            "action": "inspect",
+            "target_id": target["target_id"],
+            "detail": "declaration",
+        }
+    )
+
+    assert "TLazySource = class" in result_items(response)[0]["text"]
+    assert registry.sources.loaded_count == 1
+
+
+def test_navigation_worker_returns_compact_symbols_without_source_or_model(
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "CompactWorker.pas"
+    source_path.write_text(
+        "unit CompactWorker;\n"
+        "interface\n"
+        "type\n"
+        "  TCompactWorker = class\n"
+        "  end;\n"
+        "implementation\n"
+        "end.\n",
+        encoding="utf-8",
+    )
+    task = agent_context_module._NavigationTask(
+        ordinal=0,
+        source_path=str(source_path),
+        display_path="CompactWorker.pas",
+        unit_name="CompactWorker",
+        unit_path="CompactWorker.pas",
+        unit_id="unit-compact-worker",
+        unit_has_error=False,
+        defines=(),
+        include_paths=(),
+    )
+
+    result = agent_context_module._parse_navigation_task(task)
+
+    assert result.text == ""
+    assert result.model is None
+    assert result.read_error == ""
+    assert any(raw.symbol.name == "TCompactWorker" for raw in result.raw_symbols)
+    assert len({id(raw.symbol.scope) for raw in result.raw_symbols}) == 1
+    assert all(not raw.symbol.scope.symbols for raw in result.raw_symbols)
+    assert all(raw.symbol.member_scope is None for raw in result.raw_symbols)
+
+
+def test_find_reuses_a_small_lru_of_ranked_queries(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "Queries.pas").write_text(
+        "unit Queries;\n"
+        "interface\n"
+        "type\n"
+        "  TAlpha = class end;\n"
+        "  TBeta = class end;\n"
+        "implementation\n"
+        "end.\n",
+        encoding="utf-8",
+    )
+    context = AgentContext.open(tmp_path)
+    real_ranked_entries = agent_context_module._ranked_entries
+    calls = 0
+
+    def counted_ranked_entries(entries: object, query: str):
+        nonlocal calls
+        calls += 1
+        return real_ranked_entries(entries, query)
+
+    monkeypatch.setattr(agent_context_module, "_ranked_entries", counted_ranked_entries)
+
+    context.handle({"action": "find", "query": "Alpha"})
+    context.handle({"action": "find", "query": "Beta"})
+    context.handle({"action": "find", "query": "Alpha"})
+
+    assert calls == 2
 
 
 def test_bodyless_class_routine_suffix_is_scanned_linearly(

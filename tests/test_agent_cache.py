@@ -350,12 +350,99 @@ def test_prewarm_only_tolerates_project_selection_error(monkeypatch, tmp_path: P
         time.time(),
     )
     service = _CacheService(metadata)
-    monkeypatch.setattr(service.context, "handle", lambda request: (_ for _ in ()).throw(AgentProtocolError("project_required", "Select a project.")))
+    monkeypatch.setattr(service.context, "prewarm_navigation", lambda: (_ for _ in ()).throw(AgentProtocolError("project_required", "Select a project.")))
     service.prewarm()
     assert service.cache_state == "ready"
-    monkeypatch.setattr(service.context, "handle", lambda request: (_ for _ in ()).throw(AgentProtocolError("invalid_request", "Bad request.")))
+    monkeypatch.setattr(service.context, "prewarm_navigation", lambda: (_ for _ in ()).throw(AgentProtocolError("invalid_request", "Bad request.")))
     with pytest.raises(AgentProtocolError, match="Bad request"):
         service.prewarm()
+
+
+def test_cache_service_uses_constant_time_accounting_instead_of_deep_graph_walk(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from delphi_lsp import agent_cache
+    from delphi_lsp.agent_cache import CacheMetadata, _CacheService
+
+    write_source(
+        tmp_path / "Demo.dpr",
+        """
+        program Demo;
+        type
+          TIndexed = class
+          end;
+        begin
+        end.
+        """,
+    )
+    metadata = CacheMetadata(
+        2,
+        str(tmp_path.resolve()),
+        os.getpid(),
+        1,
+        "x" * 32,
+        "test",
+        "",
+        512 * 1024**2,
+        1,
+        10,
+        time.time(),
+    )
+    service = _CacheService(metadata)
+    monkeypatch.setattr(
+        agent_cache,
+        "estimate_deep_size",
+        lambda _value: (_ for _ in ()).throw(AssertionError("deep graph walk entered request path")),
+    )
+
+    service.prewarm()
+    response = service.request({"action": "find", "query": "TIndexed"})
+
+    assert any(item["name"] == "TIndexed" for item in response.payload["result"])
+    assert service.last_budget.retained_bytes == service.context.estimated_cache_bytes
+
+
+def test_cache_prewarm_builds_registry_without_running_a_find_response(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from delphi_lsp.agent_cache import CacheMetadata, _CacheService
+
+    write_source(tmp_path / "Demo.dpr", "program Demo; begin end.")
+    metadata = CacheMetadata(
+        2,
+        str(tmp_path.resolve()),
+        os.getpid(),
+        1,
+        "x" * 32,
+        "test",
+        "",
+        512 * 1024**2,
+        1,
+        10,
+        time.time(),
+    )
+    service = _CacheService(metadata)
+    called = 0
+    real_prewarm = service.context.prewarm_navigation
+
+    def record_prewarm() -> str:
+        nonlocal called
+        called += 1
+        return real_prewarm()
+
+    monkeypatch.setattr(service.context, "prewarm_navigation", record_prewarm)
+    monkeypatch.setattr(
+        service.context,
+        "handle",
+        lambda _request: (_ for _ in ()).throw(AssertionError("find response constructed")),
+    )
+
+    service.prewarm()
+
+    assert called == 1
+    assert service.context.navigation_cache_is_warm
 
 
 def test_fresh_incomplete_start_lock_is_not_stale(tmp_path: Path) -> None:
@@ -541,8 +628,8 @@ def test_readme_documents_bounded_cache_daemon_commands_and_retention_contract()
     assert "Do not copy or share this token" in readme
     assert "--workers auto|N" in readme
     assert "--startup-timeout 120" in readme
-    assert "four worker processes" in readme
-    assert "128 MiB" in readme
+    assert "eight worker processes" in readme
+    assert "64 MiB" in readme
     assert "spawn" in readme
     assert "short-lived" in readme
     assert "transient worker memory" in readme

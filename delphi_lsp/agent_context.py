@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from bisect import bisect_left, bisect_right
+from collections import OrderedDict
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from heapq import heappop, heappush
 import hashlib
 import json
 from pathlib import Path, PureWindowsPath
+import sys
 import unicodedata
 
 from .agent_protocol import (
@@ -22,12 +24,17 @@ from .agent_metrics import build_workspace_metrics, project_metric_item, unit_me
 from .agent_relations import ProjectRelationIndex, RelationTarget
 from .agent_workspace import AgentUnit, AgentWorkspace, unit_display_path, unit_source_path, unit_target_id
 from .consts import AttributeName, SyntaxNodeType
-from .lsp_server import multiline_string_block_end
+from .lsp_server import build_outline_semantic_model, multiline_string_block_end
 from .nodes import CompoundSyntaxNode, SyntaxNode
 from .parser import DelphiParser
-from .semantic import Scope, ScopeKind, Symbol, SymbolKind
+from .semantic import NamedTypeRef, Scope, ScopeKind, Symbol, SymbolKind
 from .metrics import ProjectMetrics
-from .parallel_outline import OutlineResult, OutlineTask, ParallelBuildStats, run_outline_tasks
+from .parallel_outline import (
+    ParallelBuildStats,
+    ParallelOutlineError,
+    run_outline_tasks,
+)
+from .source_reader import read_source_text
 
 
 _ROUTINE_KINDS = frozenset(
@@ -90,9 +97,10 @@ _CALLING_CONVENTIONS = frozenset(
     {"cdecl", "pascal", "register", "safecall", "stdcall", "winapi"}
 )
 _SOURCE_CHUNK_CHARS = 6000
+_RANKED_QUERY_CACHE_SIZE = 16
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _Token:
     value: str
     start: int
@@ -137,6 +145,18 @@ class _SourceDocument:
         self.parser_spans: dict[str, tuple[int, int] | None] = {}
         self._full_parse_attempted = False
         self._full_parse_result: object | None = None
+        self.retained_bytes = (
+            sys.getsizeof(self)
+            + sys.getsizeof(self.text)
+            + sys.getsizeof(self.line_starts)
+            + len(self.line_starts) * 32
+            + sys.getsizeof(self.tokens)
+            + len(self.tokens) * 160
+            + sys.getsizeof(self.token_starts)
+            + len(self.token_starts) * 28
+            + sys.getsizeof(self.directive_starts)
+            + len(self.directive_starts) * 28
+        )
 
     def offset(self, line: int, column: int = 1) -> int:
         if not self.line_starts:
@@ -185,7 +205,78 @@ class _SourceDocument:
         return self._full_parse_result
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
+class _SourceSpec:
+    source_path: Path
+    display_path: str
+    defines: tuple[str, ...]
+    include_paths: tuple[str, ...]
+
+
+class _SourceStore:
+    """Load expensive tokenized source documents only when source evidence is requested."""
+
+    def __init__(
+        self,
+        specs: Mapping[Path, _SourceSpec],
+        *,
+        max_loaded_bytes: int,
+    ) -> None:
+        self._specs = dict(specs)
+        self._loaded: OrderedDict[Path, _SourceDocument] = OrderedDict()
+        self._loaded_bytes = 0
+        self._max_loaded_bytes = max(0, max_loaded_bytes)
+
+    def __getitem__(self, source_path: Path) -> _SourceDocument:
+        cached = self._loaded.pop(source_path, None)
+        if cached is not None:
+            self._loaded[source_path] = cached
+            return cached
+
+        spec = self._specs[source_path]
+        document = _SourceDocument(
+            spec.source_path,
+            spec.display_path,
+            read_source_text(spec.source_path),
+            defines=spec.defines,
+            include_paths=spec.include_paths,
+        )
+        if document.retained_bytes > self._max_loaded_bytes:
+            return document
+        while (
+            self._loaded
+            and self._loaded_bytes + document.retained_bytes > self._max_loaded_bytes
+        ):
+            _, evicted = self._loaded.popitem(last=False)
+            self._loaded_bytes -= evicted.retained_bytes
+        self._loaded[source_path] = document
+        self._loaded_bytes += document.retained_bytes
+        return document
+
+    @property
+    def loaded_count(self) -> int:
+        return len(self._loaded)
+
+    @property
+    def retained_bytes(self) -> int:
+        return self._loaded_bytes
+
+    @property
+    def metadata_bytes(self) -> int:
+        return 512 + sum(
+            256
+            + sys.getsizeof(path)
+            + sys.getsizeof(spec)
+            + sys.getsizeof(spec.display_path)
+            for path, spec in self._specs.items()
+        )
+
+    def clear_loaded(self) -> None:
+        self._loaded.clear()
+        self._loaded_bytes = 0
+
+
+@dataclass(frozen=True, slots=True)
 class _RawSymbol:
     symbol: Symbol
     source_path: Path
@@ -198,7 +289,115 @@ class _RawSymbol:
     signature: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
+class _NavigationTask:
+    ordinal: int
+    source_path: str
+    display_path: str
+    unit_name: str
+    unit_path: str
+    unit_id: str
+    unit_has_error: bool
+    defines: tuple[str, ...]
+    include_paths: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _NavigationResult:
+    ordinal: int
+    source_path: str
+    text: str
+    model: None
+    lines_processed: int
+    symbols_discovered: int
+    read_error: str
+    raw_symbols: tuple[_RawSymbol, ...]
+
+
+def _parse_navigation_task(task: _NavigationTask) -> _NavigationResult:
+    source_path = Path(task.source_path)
+    try:
+        text = read_source_text(source_path)
+    except (OSError, UnicodeError) as error:
+        return _NavigationResult(
+            task.ordinal,
+            task.source_path,
+            "",
+            None,
+            0,
+            0,
+            str(error),
+            (),
+        )
+    try:
+        model = build_outline_semantic_model(
+            text,
+            task.source_path,
+            defines=task.defines,
+        )
+        document = _SourceDocument(
+            source_path,
+            task.display_path,
+            text,
+            defines=task.defines,
+            include_paths=task.include_paths,
+        )
+        unit = AgentUnit(
+            unit_id=task.unit_id,
+            name=task.unit_name,
+            path=task.unit_path,
+            has_error=task.unit_has_error,
+        )
+        symbols = _collect_raw_symbols(model.unit_scope, unit, source_path, document)
+        raw_symbols = _detach_raw_symbols(
+            _exclude_routine_locals(symbols, document),
+            task.unit_name,
+        )
+    except Exception as error:
+        raise ParallelOutlineError(
+            f"failed to build navigation shard for {task.source_path}: {error}"
+        ) from error
+    return _NavigationResult(
+        task.ordinal,
+        task.source_path,
+        "",
+        None,
+        text.count("\n") + (0 if not text or text.endswith(("\n", "\r")) else 1),
+        len(raw_symbols),
+        "",
+        raw_symbols,
+    )
+
+
+def _detach_raw_symbols(
+    raw_symbols: list[_RawSymbol],
+    unit_name: str,
+) -> tuple[_RawSymbol, ...]:
+    detached_scope = Scope(kind=ScopeKind.UNIT, name=unit_name)
+    detached: list[_RawSymbol] = []
+    for raw in raw_symbols:
+        symbol = raw.symbol
+        flat_symbol = Symbol(
+            name=symbol.name,
+            kind=symbol.kind,
+            decl_range=symbol.decl_range,
+            name_range=symbol.name_range,
+            scope=detached_scope,
+            visibility=symbol.visibility,
+            type_ref=NamedTypeRef(symbol.type_ref.display_name()),
+            modifiers=set(symbol.modifiers),
+            attributes=dict(symbol.attributes),
+            doc=symbol.doc,
+            base_types=tuple(
+                NamedTypeRef(base_type.display_name())
+                for base_type in symbol.base_types
+            ),
+        )
+        detached.append(replace(raw, symbol=flat_symbol))
+    return tuple(detached)
+
+
+@dataclass(frozen=True, slots=True)
 class _SymbolEntry:
     symbol: Symbol
     source_path: Path
@@ -228,14 +427,15 @@ class _SymbolEntry:
         }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _Registry:
     project_id: str
     revision: str
     entries: tuple[_SymbolEntry, ...]
     by_target: dict[str, _SymbolEntry]
-    sources: dict[Path, _SourceDocument]
-    ranked_queries: dict[str, tuple[_SymbolEntry, ...]]
+    sources: _SourceStore
+    ranked_queries: OrderedDict[str, tuple[_SymbolEntry, ...]]
+    static_retained_bytes: int
 
 
 class AgentContext:
@@ -293,15 +493,42 @@ class AgentContext:
             self._metrics,
         )
 
+    @property
+    def estimated_cache_bytes(self) -> int:
+        retained = self._workspace.estimated_cache_bytes
+        if self._registry is not None:
+            retained += (
+                self._registry.static_retained_bytes
+                + self._registry.sources.retained_bytes
+                + sum(
+                    sys.getsizeof(query)
+                    + sys.getsizeof(ranked)
+                    + len(ranked) * 8
+                    for query, ranked in self._registry.ranked_queries.items()
+                )
+            )
+        if self._relation_index is not None:
+            retained += max(4096, len(self._registry.entries) * 512) if self._registry else 4096
+        if self._metrics is not None:
+            retained += 4096 + len(self._metrics.units) * 1024
+        return retained
+
     def evict_auxiliary_caches(self) -> None:
         self._relation_index = None
         self._metrics = None
         self._metrics_revision = ""
+        if self._registry is not None:
+            self._registry.sources.clear_loaded()
 
     def evict_navigation_caches(self) -> None:
         self.evict_auxiliary_caches()
         self._registry = None
         self._workspace.evict_recomputable_caches()
+
+    def prewarm_navigation(self) -> str:
+        revision = self._refresh_workspace("")
+        self._require_registry(revision)
+        return revision
 
     def handle(self, request: AgentRequest | Mapping[str, object]) -> AgentResponse:
         parsed = _validated_request(request)
@@ -328,11 +555,12 @@ class AgentContext:
             return self._handle_focus(parsed, revision)
         if parsed.action == "find":
             registry = self._require_registry(revision)
-            ranked = registry.ranked_queries.get(parsed.query)
+            ranked = registry.ranked_queries.pop(parsed.query, None)
             if ranked is None:
                 ranked = tuple(_ranked_entries(registry.entries, parsed.query))
-                registry.ranked_queries.clear()
-                registry.ranked_queries[parsed.query] = ranked
+            registry.ranked_queries[parsed.query] = ranked
+            while len(registry.ranked_queries) > _RANKED_QUERY_CACHE_SIZE:
+                registry.ranked_queries.popitem(last=False)
             items = [entry.card() for entry in ranked]
             return self._response(parsed, revision, items)
         if parsed.action == "inspect":
@@ -731,36 +959,39 @@ def _build_registry(
     worker_memory_budget_bytes: int | None = None,
 ) -> tuple[_Registry, ParallelBuildStats]:
     raw_symbols: list[_RawSymbol] = []
-    sources: dict[Path, _SourceDocument] = {}
     units = tuple(workspace.units)
+    source_specs = {
+        unit_source_path(workspace.root, unit): _SourceSpec(
+            unit_source_path(workspace.root, unit),
+            unit_display_path(workspace.root, unit),
+            workspace.defines,
+            workspace.include_paths,
+        )
+        for unit in units
+    }
 
-    def consume_result(result: OutlineResult) -> None:
-        unit = units[result.ordinal]
-        source_path = unit_source_path(workspace.root, unit)
-        display_path = unit_display_path(workspace.root, unit)
-        if result.read_error or result.model is None:
+    def consume_result(result: _NavigationResult) -> None:
+        if result.read_error:
+            unit = units[result.ordinal]
+            display_path = unit_display_path(workspace.root, unit)
             raise AgentProtocolError(
                 "source_unavailable",
                 f"Could not read selected source {display_path}.",
             )
-        document = _SourceDocument(
-            source_path,
-            display_path,
-            result.text,
-            defines=workspace.defines,
-            include_paths=workspace.include_paths,
-        )
-        sources[source_path] = document
-        unit_symbols = _collect_raw_symbols(result.model.unit_scope, unit, source_path, document)
-        raw_symbols.extend(_exclude_routine_locals(unit_symbols, document))
+        raw_symbols.extend(result.raw_symbols)
 
     outline_batch = run_outline_tasks(
         (
-            OutlineTask(
+            _NavigationTask(
                 ordinal,
                 str(unit_source_path(workspace.root, unit)),
+                unit_display_path(workspace.root, unit),
+                unit.name,
+                unit.path,
+                unit.unit_id,
+                unit.has_error,
                 workspace.defines,
-                True,
+                workspace.include_paths,
             )
             for ordinal, unit in enumerate(units)
         ),
@@ -768,6 +999,7 @@ def _build_registry(
         memory_budget_bytes=worker_memory_budget_bytes,
         on_complete=consume_result,
         retain_results=False,
+        task_runner=_parse_navigation_task,
     )
 
     ordered = sorted(raw_symbols, key=_raw_sort_key)
@@ -859,6 +1091,9 @@ def _build_registry(
         )
 
     entries_tuple = tuple(sorted(with_parents, key=_entry_sort_key))
+    source_cache_bytes = _source_cache_budget(worker_memory_budget_bytes)
+    sources = _SourceStore(source_specs, max_loaded_bytes=source_cache_bytes)
+    static_retained_bytes = _estimate_registry_bytes(entries_tuple, sources)
     return (
         _Registry(
             project_id=project_id,
@@ -866,10 +1101,38 @@ def _build_registry(
             entries=entries_tuple,
             by_target={entry.target_id: entry for entry in entries_tuple},
             sources=sources,
-            ranked_queries={},
+            ranked_queries=OrderedDict(),
+            static_retained_bytes=static_retained_bytes,
         ),
         outline_batch.stats,
     )
+
+
+def _source_cache_budget(total_budget_bytes: int | None) -> int:
+    if total_budget_bytes is None:
+        return 64 * 1024**2
+    return max(0, min(128 * 1024**2, total_budget_bytes // 4))
+
+
+def _estimate_registry_bytes(
+    entries: tuple[_SymbolEntry, ...],
+    sources: _SourceStore,
+) -> int:
+    retained = 4096 + sources.metadata_bytes
+    for entry in entries:
+        retained += (
+            1536
+            + sys.getsizeof(entry.path)
+            + sys.getsizeof(entry.unit_id)
+            + sys.getsizeof(entry.unit_name)
+            + sys.getsizeof(entry.qualified_name)
+            + sys.getsizeof(entry.owner)
+            + sys.getsizeof(entry.signature)
+            + sys.getsizeof(entry.target_id)
+            + sys.getsizeof(entry.parent_target_id)
+        )
+    retained += len(entries) * 96
+    return retained
 
 
 def _stable_path_component(value: str) -> str:

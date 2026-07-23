@@ -199,19 +199,28 @@ above 80 percent.
 
 Cold builds parse independent source units in short-lived processes created with
 the cross-platform `spawn` method. `--workers auto|N` defaults to `auto`.
-Automatic selection uses at most four worker processes, leaves one detected CPU
+Automatic selection uses at most eight worker processes, leaves one detected CPU
 free, never exceeds the source task count, and—for the cache daemon—allows one
-worker per `128 MiB` of retained-cache budget. `view` and `index` use the same
-task, CPU, and four-worker caps without the cache-budget term. An explicit value
+worker per `64 MiB` of retained-cache budget. `view` and `index` use the same
+task, CPU, and eight-worker caps without the cache-budget term. An explicit value
 from 1 through 32 overrides the automatic CPU and memory caps but is still
 limited by the number of tasks.
 
-Worker processes exit before retained-cache accounting. Their models and source
-text are streamed into the parent, so transient worker memory is separate from
-the retained navigation structures and the existing 80-percent warning. If an
-automatic pool fails before accepting a result, one automatic serial fallback
-is attempted; explicit worker counts fail instead of silently changing the
-requested configuration.
+Worker processes build compact, detached navigation shards and exit before
+retained-cache accounting. Full semantic object graphs and source text are not
+retained in the parent. Tokenized source documents are loaded only for source
+evidence requests such as `inspect`, and a byte-bounded LRU evicts older
+documents. The transient worker memory remains separate from retained navigation
+structures and the existing 80-percent warning. Retained bytes are maintained
+incrementally; requests never traverse the complete cache object graph merely
+to measure it. If an automatic pool fails before accepting a result, one
+automatic serial fallback is attempted; explicit worker counts fail instead of
+silently changing the requested configuration.
+
+Cache prewarming builds the navigation registry directly without constructing
+an empty-query result, symbol cards, pagination, or JSON payloads. Up to sixteen
+recent ranked queries are retained in a small LRU so alternating CLI and
+OpenCode searches remain warm.
 
 `cache start` waits up to `--startup-timeout 120` seconds by default for a large
 workspace to prewarm. The timeout belongs to the starting client and does not

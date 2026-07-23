@@ -34,8 +34,9 @@ def test_parse_worker_setting_accepts_auto_and_bounded_integers() -> None:
 
 
 def test_auto_workers_respect_cpu_tasks_and_cache_budget() -> None:
-    assert resolve_worker_count(0, task_count=20, cpu_count=8, memory_budget_bytes=512 * 1024**2) == 4
-    assert resolve_worker_count(0, task_count=20, cpu_count=8, memory_budget_bytes=128 * 1024**2) == 1
+    assert resolve_worker_count(0, task_count=20, cpu_count=10, memory_budget_bytes=512 * 1024**2) == 8
+    assert resolve_worker_count(0, task_count=20, cpu_count=8, memory_budget_bytes=128 * 1024**2) == 2
+    assert resolve_worker_count(0, task_count=20, cpu_count=8, memory_budget_bytes=64 * 1024**2) == 1
     assert resolve_worker_count(0, task_count=2, cpu_count=8, memory_budget_bytes=None) == 2
     assert resolve_worker_count(7, task_count=3, cpu_count=2, memory_budget_bytes=1) == 3
 
@@ -116,7 +117,7 @@ def test_effective_one_worker_never_constructs_a_process_pool(
         [OutlineTask(0, str(source), (), False), OutlineTask(1, str(source), (), False)],
         configured_workers=0,
         cpu_count=8,
-        memory_budget_bytes=128 * 1024**2,
+        memory_budget_bytes=64 * 1024**2,
     )
 
     assert batch.stats.effective_workers == 1
@@ -190,11 +191,13 @@ class _WindowExecutor:
         self.max_workers = max_workers
         self.active = 0
         self.peak_active = 0
+        self.submitted_paths: list[str] = []
         _WindowExecutor.instance = self
 
     def submit(self, _operation: object, task: OutlineTask) -> _WindowFuture:
         self.active += 1
         self.peak_active = max(self.peak_active, self.active)
+        self.submitted_paths.append(task.source_path)
         return _WindowFuture(task, self)
 
     def shutdown(self, *, wait: bool, cancel_futures: bool) -> None:
@@ -213,6 +216,31 @@ def test_parallel_submission_window_never_exceeds_effective_workers(
     assert batch.stats.files_completed == len(tasks)
     assert _WindowExecutor.instance is not None
     assert _WindowExecutor.instance.peak_active == 2
+
+
+def test_parallel_submission_starts_largest_sources_first(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    sources = []
+    for name, size in (("small", 10), ("large", 10_000), ("medium", 1_000)):
+        path = tmp_path / f"{name}.pas"
+        path.write_text("x" * size, encoding="utf-8")
+        sources.append(path)
+    tasks = [
+        OutlineTask(ordinal, str(path), (), False)
+        for ordinal, path in enumerate(sources)
+    ]
+    monkeypatch.setattr(parallel_outline, "ProcessPoolExecutor", _WindowExecutor)
+    monkeypatch.setattr(parallel_outline, "as_completed", lambda submitted: iter(tuple(submitted)))
+
+    run_outline_tasks(tasks, configured_workers=2)
+
+    assert _WindowExecutor.instance is not None
+    assert [
+        Path(path).stem
+        for path in _WindowExecutor.instance.submitted_paths[:2]
+    ] == ["large", "medium"]
 
 
 class _FutureResultTypeError:
