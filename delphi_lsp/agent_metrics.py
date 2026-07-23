@@ -15,7 +15,6 @@ from .metrics import (
     ProjectMetrics,
     UnitMetrics,
     aggregate_project_metrics,
-    analyze_project,
     analyze_unit,
 )
 from .parallel_outline import run_outline_tasks

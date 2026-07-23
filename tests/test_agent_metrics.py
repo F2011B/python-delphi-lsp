@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-import delphi_lsp.agent_metrics as agent_metrics_module
+import delphi_lsp.metrics as metrics_module
 from delphi_lsp.agent_context import AgentContext
 from delphi_lsp.agent_protocol import AgentProtocolError
 
@@ -83,7 +83,7 @@ def test_metrics_stream_units_without_materializing_a_project_source_map(
     context = open_metric_context(tmp_path)
 
     monkeypatch.setattr(
-        agent_metrics_module,
+        metrics_module,
         "analyze_project",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("project source map was materialized")
