@@ -19,12 +19,12 @@ def test_codebase_index_reports_frozen_per_file_progress_and_completion(tmp_path
     _write(tmp_path / "Two.pas", "unit Two; interface implementation end.\n")
     events: list[object] = []
 
-    build_codebase_index(tmp_path, on_progress=events.append)
+    build_codebase_index(tmp_path, on_progress=events.append, workers=2)
 
     assert events[0].phase == "discovery"
     assert events[-1].phase == "complete"
     outlines = [event for event in events if event.phase == "outline"]
-    assert [Path(event.path).name for event in outlines] == ["One.pas", "Two.pas"]
+    assert {Path(event.path).name for event in outlines} == {"One.pas", "Two.pas"}
     assert [event.files_completed for event in outlines] == [1, 2]
     assert outlines[-1].lines_processed == 2
     assert outlines[-1].symbols_discovered >= 2
@@ -37,6 +37,18 @@ def test_codebase_index_reports_frozen_per_file_progress_and_completion(tmp_path
     assert all(event.language == "delphi" for event in events)
     with pytest.raises(FrozenInstanceError):
         events[0].phase = "changed"  # type: ignore[misc]
+
+
+def test_codebase_index_propagates_parallel_outline_callback_errors(tmp_path: Path) -> None:
+    _write(tmp_path / "One.pas", "unit One; interface implementation end.\n")
+    _write(tmp_path / "Two.pas", "unit Two; interface implementation end.\n")
+
+    with pytest.raises(RuntimeError, match="callback failed"):
+        build_codebase_index(
+            tmp_path,
+            workers=2,
+            on_progress=lambda _event: (_ for _ in ()).throw(RuntimeError("callback failed")),
+        )
 
 
 def test_project_indexer_reports_each_parsed_unit_and_propagates_callback_errors(tmp_path: Path) -> None:

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from delphi_lsp.agent_layers import build_codebase_index, render_layer
+from delphi_lsp.agent_layers import build_codebase_index, layer_payload, render_layer
 from delphi_lsp.project_indexer import ProjectIndexer
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -118,6 +118,32 @@ def test_builds_layered_markdown_without_exposing_routine_bodies(tmp_path: Path)
     assert "TWorker" in markdown
     assert "Run" in markdown
     assert "body must not be exposed" not in markdown
+
+
+def test_parallel_layered_index_matches_serial_models_symbols_and_layers(tmp_path: Path) -> None:
+    make_project(tmp_path)
+    write_text(
+        tmp_path / "src" / "Extra.pas",
+        """
+        unit Extra;
+        interface
+        procedure ExtraWork;
+        implementation
+        procedure ExtraWork;
+        begin
+        end;
+        end.
+        """,
+    )
+
+    serial = build_codebase_index(tmp_path, workers=1)
+    parallel = build_codebase_index(tmp_path, workers=2)
+
+    assert layer_payload(parallel, "symbols") == layer_payload(serial, "symbols")
+    assert layer_payload(parallel, "units") == layer_payload(serial, "units")
+    assert list(parallel.models) == list(serial.models)
+    assert list(parallel.symbol_index.name_index) == list(serial.symbol_index.name_index)
+    assert parallel.parallel_stats.effective_workers == 2
 
 
 def test_implementation_layer_exposes_only_queried_method_body(tmp_path: Path) -> None:

@@ -5,8 +5,8 @@ from pathlib import Path
 from typing import Any, Iterable
 import json
 
-from .lsp_server import build_outline_semantic_model
 from .metrics import analyze_project
+from .parallel_outline import OutlineResult, OutlineTask, ParallelBuildStats, run_outline_tasks
 from .project_discovery import DelphiProjectDiscovery, discover_delphi_project
 from .project_indexer import ProjectIndexResult, ProjectIndexer
 from .progress import ProgressCallback, ProgressEvent
@@ -22,6 +22,7 @@ class CodebaseIndex:
     models: dict[str, SemanticModel]
     symbol_index: SymbolIndex
     project_results: dict[str, ProjectIndexResult]
+    parallel_stats: ParallelBuildStats
 
 
 def build_codebase_index(
@@ -30,39 +31,47 @@ def build_codebase_index(
     project_file: str | Path | None = None,
     index_projects: bool = False,
     on_progress: ProgressCallback | None = None,
+    workers: int = 0,
 ) -> CodebaseIndex:
     progress = _MonotonicProgress(on_progress)
     discovery = discover_delphi_project(root, project_file=project_file, on_progress=progress)
     models: dict[str, SemanticModel] = {}
     lines_processed = 0
     symbols_discovered = 0
-    for completed, source in enumerate(discovery.source_files, start=1):
-        path = Path(source)
-        if path.suffix.casefold() not in {".pas", ".dpr", ".dpk", ".inc"}:
-            continue
-        try:
-            text = read_source_text(path)
-        except (OSError, UnicodeError):
-            continue
-        model = build_outline_semantic_model(
-            text,
-            source,
-            defines=discovery.defines,
-        )
-        models[source] = model
-        lines_processed += text.count("\n") + (0 if not text or text.endswith("\n") else 1)
-        symbols_discovered += sum(len(items) for items in model.index.name_index.values())
+    completed_outlines = 0
+
+    def on_outline_complete(result: OutlineResult) -> None:
+        nonlocal completed_outlines, lines_processed, symbols_discovered
+        if result.read_error:
+            return
+        completed_outlines += 1
+        lines_processed += result.lines_processed
+        symbols_discovered += result.symbols_discovered
         _emit_progress(
             progress,
             "outline",
-            source,
+            result.source_path,
             len(discovery.source_files),
-            completed,
+            completed_outlines,
             len(discovery.source_files),
             "source outlined",
             lines_processed=lines_processed,
             symbols_discovered=symbols_discovered,
         )
+
+    outline_batch = run_outline_tasks(
+        (
+            OutlineTask(ordinal, source, tuple(discovery.defines), False)
+            for ordinal, source in enumerate(discovery.source_files)
+            if Path(source).suffix.casefold() in {".pas", ".dpr", ".dpk", ".inc"}
+        ),
+        configured_workers=workers,
+        on_complete=on_outline_complete,
+    )
+    for result in outline_batch.results:
+        if result.read_error or result.model is None:
+            continue
+        models[result.source_path] = result.model
 
     symbol_index = SymbolIndex()
     for model in models.values():
@@ -99,6 +108,7 @@ def build_codebase_index(
         models=models,
         symbol_index=symbol_index,
         project_results=project_results,
+        parallel_stats=outline_batch.stats,
     )
     _emit_progress(
         progress,
