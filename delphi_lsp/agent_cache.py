@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Collection, Mapping
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass, replace
 import argparse
 import contextlib
 import hmac
@@ -442,7 +442,9 @@ class _CacheService:
             self.context.handle({"action": "find", "query": "", "max_items": 1, "max_chars": 256})
             self.last_revision = self.context.workspace.workspace_revision
             self.cache_state = "warm"
-        except Exception:
+        except AgentProtocolError as error:
+            if error.code != "project_required":
+                raise
             self.cache_state = "ready"
         self.last_budget = self.budget.enforce(
             measure=lambda: estimate_deep_size(self.context.cache_roots()),
@@ -455,13 +457,14 @@ class _CacheService:
 
     def request(self, request: dict[str, object]) -> CacheClientResponse:
         with self.lock:
-            self.last_activity = time.monotonic()
             action = request.get("action")
             if action == "status":
-                return CacheClientResponse(self.status(), cache_warning(self.last_budget, self.budget.max_bytes))
+                warning = "" if request.get("_startup_probe") is True else self._consume_warning()
+                return CacheClientResponse(self.status(), warning)
             if action == "stop":
                 self.shutdown.set()
                 return CacheClientResponse({"stopping": True})
+            self.last_activity = time.monotonic()
             before = self.last_revision
             was_warm = self.context.navigation_cache_is_warm
             try:
@@ -491,7 +494,13 @@ class _CacheService:
                 self.cache_state = "compact"
             else:
                 self.cache_state = "warm" if self.context.navigation_cache_is_warm else "ready"
-            return CacheClientResponse(response, cache_warning(self.last_budget, self.budget.max_bytes))
+            return CacheClientResponse(response, self._consume_warning())
+
+    def _consume_warning(self) -> str:
+        warning = cache_warning(self.last_budget, self.budget.max_bytes)
+        if self.last_budget.warning_triggered and not self.last_budget.warning_active:
+            self.last_budget = replace(self.last_budget, warning_triggered=False)
+        return warning
 
     def status(self) -> dict[str, object]:
         now = time.monotonic()
@@ -560,7 +569,7 @@ def _start_cache_unlocked(root: str | Path, *, project_file: str | Path | None =
     existing = _read_metadata(canonical)
     if existing and _pid_alive(existing.pid):
         try:
-            _client_exchange(existing, {"action": "status"})
+            _client_exchange(existing, {"action": "status", "_startup_probe": True})
         except CacheClientError as error:
             raise CacheClientError("unavailable", "Live cache daemon is unavailable.") from error
         if (existing.project_file, existing.max_memory_bytes, existing.idle_timeout) != (project, max_memory_bytes, idle_timeout):
@@ -582,7 +591,7 @@ def _start_cache_unlocked(root: str | Path, *, project_file: str | Path | None =
         metadata = _read_metadata(canonical)
         if metadata:
             try:
-                _client_exchange(metadata, {"action": "status"})
+                _client_exchange(metadata, {"action": "status", "_startup_probe": True})
                 return metadata
             except CacheClientError:
                 pass
@@ -605,7 +614,10 @@ def start_cache(root: str | Path, *, project_file: str | Path | None = None, max
 def query_cache(root: str | Path, request: dict[str, object]) -> CacheClientResponse:
     metadata = _read_metadata(root)
     if metadata is None:
-        raise CacheClientError("unavailable", "Cache daemon is unavailable.")
+        raise CacheClientError("cache_not_running", "Cache daemon is not running.")
+    if not _pid_alive(metadata.pid):
+        _remove_metadata_if_owned(metadata)
+        raise CacheClientError("cache_not_running", "Cache daemon is not running.")
     return _client_exchange(metadata, request)
 
 
@@ -616,6 +628,9 @@ def cache_status(root: str | Path) -> dict[str, object]:
 def stop_cache(root: str | Path) -> None:
     metadata = _read_metadata(root)
     if metadata is None:
+        return
+    if not _pid_alive(metadata.pid):
+        _remove_metadata_if_owned(metadata)
         return
     try:
         _client_exchange(metadata, {"action": "stop"})

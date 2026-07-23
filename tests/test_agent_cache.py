@@ -92,8 +92,16 @@ def test_cache_daemon_compacts_handles_bad_clients_and_idles(tmp_path: Path) -> 
 def test_cache_daemon_stale_metadata_restarts_and_tracks_source_revision(tmp_path: Path) -> None:
     from delphi_lsp.agent_cache import cache_metadata_path, cache_status, query_cache, start_cache, stop_cache
 
-    source = tmp_path / "Demo.dpr"
-    write_source(source, "program Demo; begin end.")
+    source = tmp_path / "UnitA.pas"
+    write_source(tmp_path / "Demo.dpr", "program Demo; uses UnitA in 'UnitA.pas'; begin end.")
+    write_source(source, """unit UnitA;
+interface
+type
+  TOriginal = class
+  end;
+implementation
+end.
+""")
     metadata_path = cache_metadata_path(tmp_path)
     metadata_path.parent.mkdir(parents=True)
     metadata_path.write_text(json.dumps({"schema": 1, "root": str(tmp_path.resolve()), "pid": 999999, "port": 1, "token": "x" * 32, "version": "x", "project_file": "", "max_memory_bytes": 1024, "idle_timeout": 10, "started_at": 1.0}), encoding="utf-8")
@@ -102,10 +110,29 @@ def test_cache_daemon_stale_metadata_restarts_and_tracks_source_revision(tmp_pat
     try:
         start_cache(tmp_path, max_memory_bytes=1024)
         before = query_cache(tmp_path, {"action": "open"}).payload["workspace_revision"]
-        source.write_text("program Demo; { changed } begin end.\n", encoding="utf-8")
+        source.write_text("""unit UnitA;
+interface
+type
+  TOriginal = class
+  end;
+implementation
+end. { changed }
+""", encoding="utf-8")
         after = query_cache(tmp_path, {"action": "open"}).payload["workspace_revision"]
         assert before != after
         assert cache_status(tmp_path)["invalidations"] >= 1
+        source.write_text("""unit UnitA;
+interface
+type
+  TOriginal = class
+  end;
+  TAdded = class
+  end;
+implementation
+end.
+""", encoding="utf-8")
+        rebuilt = query_cache(tmp_path, {"action": "find", "query": "TAdded"}).payload
+        assert any(item["name"] == "TAdded" for item in rebuilt["result"])
         stop_cache(tmp_path)
         stop_cache(tmp_path)
     finally:
@@ -167,6 +194,54 @@ def test_idle_client_times_out_without_blocking_daemon_or_idle_shutdown(tmp_path
         assert not cache_metadata_path(tmp_path).exists()
     finally:
         stop_cache(tmp_path)
+
+
+def test_status_polling_does_not_extend_cache_idle_lifetime(tmp_path: Path) -> None:
+    from delphi_lsp.agent_cache import cache_metadata_path, cache_status, start_cache, stop_cache
+
+    write_source(tmp_path / "Demo.dpr", "program Demo; begin end.")
+    try:
+        start_cache(tmp_path, idle_timeout=1)
+        deadline = time.monotonic() + 3
+        while cache_metadata_path(tmp_path).exists() and time.monotonic() < deadline:
+            time.sleep(0.2)
+            if cache_metadata_path(tmp_path).exists():
+                cache_status(tmp_path)
+        assert not cache_metadata_path(tmp_path).exists()
+    finally:
+        stop_cache(tmp_path)
+
+
+def test_warning_is_consumed_after_compaction_but_remains_while_active(monkeypatch, tmp_path: Path) -> None:
+    from delphi_lsp.agent_cache import CacheMetadata, _CacheService
+
+    write_source(tmp_path / "Demo.dpr", "program Demo; begin end.")
+    metadata = CacheMetadata(1, str(tmp_path.resolve()), os.getpid(), 1, "x" * 32, "test", "", 100, 10, time.time())
+    service = _CacheService(metadata)
+    compacted = BudgetResult(20, 20.0, 120.0, False, True, True)
+    active = BudgetResult(80, 80.0, 80.0, True, True, False)
+    monkeypatch.setattr(CacheBudget, "enforce", lambda self, **_: compacted)
+    service.prewarm()
+    assert service.request({"action": "status"}).warning
+    assert not service.request({"action": "status"}).warning
+    service.last_budget = active
+    assert service.request({"action": "status"}).warning
+    assert service.request({"action": "status"}).warning
+
+
+def test_prewarm_only_tolerates_project_selection_error(monkeypatch, tmp_path: Path) -> None:
+    from delphi_lsp.agent_cache import CacheMetadata, _CacheService
+    from delphi_lsp.agent_protocol import AgentProtocolError
+
+    write_source(tmp_path / "Demo.dpr", "program Demo; begin end.")
+    metadata = CacheMetadata(1, str(tmp_path.resolve()), os.getpid(), 1, "x" * 32, "test", "", 1024 * 1024, 10, time.time())
+    service = _CacheService(metadata)
+    monkeypatch.setattr(service.context, "handle", lambda request: (_ for _ in ()).throw(AgentProtocolError("project_required", "Select a project.")))
+    service.prewarm()
+    assert service.cache_state == "ready"
+    monkeypatch.setattr(service.context, "handle", lambda request: (_ for _ in ()).throw(AgentProtocolError("invalid_request", "Bad request.")))
+    with pytest.raises(AgentProtocolError, match="Bad request"):
+        service.prewarm()
 
 
 def test_concurrent_starts_reuse_one_daemon(tmp_path: Path) -> None:

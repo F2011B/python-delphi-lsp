@@ -175,7 +175,7 @@ end.
         assert status.returncode == 0
         assert reported["pid"] == started["pid"]
         assert reported["warning_threshold_percent"] == 80
-        assert "Warning:" in status.stderr
+        assert status.stderr == ""
 
         text_status = subprocess.run(
             [sys.executable, "-m", "delphi_lsp.agent_cli", "cache", "status", "--root", str(tmp_path)],
@@ -185,7 +185,7 @@ end.
         )
         assert text_status.returncode == 0
         assert text_status.stdout.startswith(f"running pid={started['pid']} state=")
-        assert "Warning:" in text_status.stderr
+        assert text_status.stderr == ""
     finally:
         stop = subprocess.run(
             [sys.executable, "-m", "delphi_lsp.agent_cli", "cache", "stop", "--root", str(tmp_path)],
@@ -195,8 +195,7 @@ end.
         )
     assert stop.returncode == 0
     assert json.loads(stop.stdout) == {"stopped": True}
-    assert "bytes" in stop.stderr
-    assert "Increase --max-memory" in stop.stderr
+    assert stop.stderr == ""
 
 
 def test_query_does_not_start_a_missing_cache_and_sanitizes_errors(tmp_path: Path) -> None:
@@ -209,7 +208,33 @@ def test_query_does_not_start_a_missing_cache_and_sanitizes_errors(tmp_path: Pat
 
     assert completed.returncode == 1
     assert completed.stdout == ""
-    assert completed.stderr == "cache_error:unavailable: Cache daemon is unavailable.\n"
+    assert completed.stderr == "cache_error:cache_not_running: Cache daemon is not running.\n"
+
+
+def test_cache_stop_cleans_missing_or_stale_metadata_idempotently(tmp_path: Path) -> None:
+    missing = subprocess.run(
+        [sys.executable, "-m", "delphi_lsp.agent_cli", "cache", "stop", "--root", str(tmp_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert missing.returncode == 0
+    assert json.loads(missing.stdout) == {"stopped": False}
+
+    metadata = tmp_path / ".delphi-lsp" / "agent-cache" / "daemon.json"
+    metadata.parent.mkdir(parents=True)
+    metadata.write_text(json.dumps({"schema": 1, "root": str(tmp_path.resolve()), "pid": 999999, "port": 1, "token": "x" * 32, "version": "x", "project_file": "", "max_memory_bytes": 1024, "idle_timeout": 10, "started_at": 1.0}), encoding="utf-8")
+    if os.name != "nt":
+        metadata.chmod(0o600)
+    stale = subprocess.run(
+        [sys.executable, "-m", "delphi_lsp.agent_cli", "cache", "stop", "--root", str(tmp_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert stale.returncode == 0
+    assert json.loads(stale.stdout) == {"stopped": False}
+    assert not metadata.exists()
 
 
 def test_worker_preserves_focus_across_requests_in_one_process(tmp_path: Path) -> None:

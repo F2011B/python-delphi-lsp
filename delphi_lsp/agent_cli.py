@@ -265,7 +265,11 @@ def _cache_stop(args: argparse.Namespace) -> int:
     try:
         response = query_cache(args.root, {"action": "status"})
     except CacheClientError as error:
-        if error.code == "unavailable":
+        if error.code in {"unavailable", "cache_not_running"}:
+            try:
+                stop_cache(args.root)
+            except CacheClientError as cleanup_error:
+                return _cache_error(cleanup_error)
             _write_json({"stopped": False})
             return 0
         return _cache_error(error)
