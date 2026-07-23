@@ -23,7 +23,6 @@ from .semantic import (
     Symbol,
     SymbolIndex,
     SymbolKind,
-    SymbolReference,
     TypeRef,
 )
 from .source_reader import read_source_text

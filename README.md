@@ -2,7 +2,7 @@
 
 `python-delphi-lsp` parses Delphi/Object Pascal, builds semantic and project
 indexes, serves LSP, and provides bounded codebase navigation for agents.
-Version 2.0.2 is authored by Dark Light and supports Windows, macOS, and Linux.
+Version 2.1.0 is authored by Dark Light and supports Windows, macOS, and Linux.
 
 ## Install and quick start
 
@@ -41,6 +41,19 @@ project = ProjectIndexer(
     search_paths=["src"], include_paths=["include"], defines=["DEBUG"]
 ).index("Main.dpr")
 print(project.parsed_units)
+```
+
+Long-running discovery and indexing accept a keyword-only `on_progress`
+callback. It receives an immutable `ProgressEvent` with package-controlled
+phase, path, and monotonic counters; callback exceptions are not suppressed.
+
+```python
+from delphi_lsp import ProjectIndexer, ProgressEvent
+
+def report(event: ProgressEvent) -> None:
+    print(event.phase, event.files_completed, event.path)
+
+ProjectIndexer(on_progress=report).index("Main.dpr")
 ```
 
 ## Architecture metrics
@@ -133,14 +146,92 @@ problems; paths are not guessed.
 `delphi-lsp-agent` has these subcommands and options:
 
 ```text
+delphi-lsp-agent cache start --root PATH [--project-file FILE] [--max-memory 512M]
+                                  [--workers auto|N] [--startup-timeout 120]
+                                  [--idle-timeout 1800]
+delphi-lsp-agent cache status --root PATH [--format text|json]
+delphi-lsp-agent cache stop --root PATH
 delphi-lsp-agent view --root PATH [--project-file FILE] --layer LAYER
                       [--query TEXT] [--format markdown|json] [--deep-projects]
+                      [--workers auto|N]
 delphi-lsp-agent index --root PATH [--project-file FILE] [--out FILE]
+                       [--workers auto|N]
+delphi-lsp-agent query --root PATH ACTION [VALUE]
+                      [--project-id FILE] [--detail summary|declaration|members|context|body|implementations]
+                      [--relation references|callers|callees|uses|used_by|inherits|implements]
+                      [--cursor TEXT] [--max-items INT] [--max-chars INT]
 delphi-lsp-agent skill install [--target PATH] [--force]
 delphi-lsp-agent opencode install [--target PATH] [--python PYTHON]
                                   [--force] [--write-agent|--write-config]
-delphi-lsp-agent worker --root PATH [--project-file FILE]
+delphi-lsp-agent worker --root PATH [--project-file FILE] [--workers auto|N]
 ```
+
+The `cache` commands manage one daemon per canonical root. Use these:
+
+```bash
+delphi-lsp-agent cache start --root PATH
+delphi-lsp-agent cache status --root PATH
+delphi-lsp-agent cache stop --root PATH
+```
+
+`cache start` outputs cache lifecycle JSON; runtime warnings are still on stderr.
+`cache status --format json` outputs status JSON to stdout and the same warning stream on stderr.
+`cache stop` outputs stop status JSON and may include warnings on stderr.
+`query` outputs Protocol v2 JSON responses and writes warnings to stderr.
+
+```bash
+delphi-lsp-agent query --root PATH find TCustomer
+delphi-lsp-agent query --root PATH focus TARGET_ID
+delphi-lsp-agent query --root PATH inspect
+delphi-lsp-agent query --root PATH trace TARGET_ID --relation callers
+delphi-lsp-agent query --root PATH metrics
+delphi-lsp-agent query --root PATH metrics UNIT_QUERY
+delphi-lsp-agent cache status --root PATH --format json
+```
+
+`inspect` uses the currently focused target, so call `focus TARGET_ID` before
+`inspect` unless a previous request already selected it.
+
+The cache daemon prewarms the navigation cache at startup so first `find` requests are
+fast. The cache retained-cache budget is `512 MiB` by default and tracks retained
+cache usage only, not a hard RSS/parse peak. Warnings are emitted on stderr at or
+above 80 percent.
+
+Cold builds parse independent source units in short-lived processes created with
+the cross-platform `spawn` method. `--workers auto|N` defaults to `auto`.
+Automatic selection uses at most four worker processes, leaves one detected CPU
+free, never exceeds the source task count, and—for the cache daemon—allows one
+worker per `128 MiB` of retained-cache budget. `view` and `index` use the same
+task, CPU, and four-worker caps without the cache-budget term. An explicit value
+from 1 through 32 overrides the automatic CPU and memory caps but is still
+limited by the number of tasks.
+
+Worker processes exit before retained-cache accounting. Their models and source
+text are streamed into the parent, so transient worker memory is separate from
+the retained navigation structures and the existing 80-percent warning. If an
+automatic pool fails before accepting a result, one automatic serial fallback
+is attempted; explicit worker counts fail instead of silently changing the
+requested configuration.
+
+`cache start` waits up to `--startup-timeout 120` seconds by default for a large
+workspace to prewarm. The timeout belongs to the starting client and does not
+change daemon compatibility or idle shutdown. Starting a live root with a
+different worker configuration reports a configuration conflict.
+
+Eviction is ordered: auxiliary caches are evicted first, navigation caches second.
+If compaction removes navigable data, the daemon rebuilds the navigation state on demand
+while preserving focus state for the next request.
+
+The daemon tracks a 30-minute idle timeout; idle state shows in JSON status (`cache status`).
+`source revision` changes on source edits and invalidate reused request caches.
+Workspace state appears in status as `requests`, `warm_hits`, `rebuilds`, `invalidations`,
+`evictions`, and `cache_state`. Parallel prewarm status adds
+`workers_configured`, `workers_effective`, `parallel_files_completed`,
+`prewarm_seconds`, `parallel_seconds`, and `parallel_fallbacks`.
+
+Metadata is stored in `.delphi-lsp/agent-cache/daemon.json` with owner-only token and
+permissions (`daemon.json` mode 600 and parent 700). Do not copy or share this token
+outside the root workspace.
 
 `view --layer` accepts `overview`, `projects`, `units`, `unit`,
 `symbols`, `symbol`, `implementation`, `references`, `problems`, and
@@ -175,7 +266,7 @@ Focus preserves the selected project, unit, or target. Cursors bind a workspace
 revision and request fingerprint, so source changes and cross-target or
 cross-detail reuse invalidate them. `max_items` and `max_chars` bound each
 response. A `sound_partial` relation is sound but incomplete: unresolved and
-ambiguous relations are never fabricated.
+ambiguous relations are never fabricated. Unsupported relations are rejected.
 
 For every source size the navigator builds an outline first, loads source detail
 lazily for a selected target, and returns only selected fragments. Typed source
@@ -210,19 +301,40 @@ The plugin maintains one worker per session/root, reusing focus and indexes.
 During compaction it restores the focus and summary into the new context.
 Transport failure, session deletion, and plugin disposal clean up the worker.
 
+OpenCode history: 1.1.0 and 1.1.1 used a spawned view per call model.
+Persistent session/root worker support first shipped in 2.0.0.
+This is the same persistent session/root worker boundary.
+The OpenCode worker stays separate from CLI daemon, and current plugin behavior is unchanged.
+
 A generated OpenCode agent starts with this Markdown frontmatter:
 
 ```markdown
 ---
 description: Inspect Delphi and Object Pascal codebases through python-delphi-lsp.
-mode: subagent
+mode: all
 temperature: 0
 permission:
-  "*": deny
   delphi_codebase: allow
   skill:
     "*": deny
     python-delphi-lsp: allow
+  lsp: deny
+  bash: deny
+  read: deny
+  glob: deny
+  grep: deny
+  list: deny
+  edit: deny
+  write: deny
+  patch: deny
+  task: deny
+  webfetch: deny
+  websearch: deny
+  question: deny
+  todowrite: deny
+  todoread: deny
+  codebase_map: deny
+  code_guidelines: deny
 ---
 ```
 

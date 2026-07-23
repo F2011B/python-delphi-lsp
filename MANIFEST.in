@@ -1,16 +1,23 @@
 include LICENSE
 include README.md
 include opencode.json
+include .github/workflows/ci.yml
 include scripts/check_ornith_cache.py
 include scripts/audit_delphi_language_features.py
+include scripts/build_github_performance_corpus.py
+include scripts/benchmark_github_corpus.py
+include scripts/benchmark_parallel_cache.py
 include scripts/bootstrap_vllm_opencode_test.py
 include scripts/bootstrap_vllm_codebase_skill_test.py
 include scripts/bootstrap_vllm_opencode_test.ps1
 include scripts/bootstrap_vllm_opencode_test.sh
 include scripts/generate_release_evidence.py
+include scripts/generate_progress_pdf.py
 include scripts/prepare_ornith_cache.py
 include scripts/run_opencode_lsp_probe.py
+include scripts/run_openrouter_github_e2e.py
 include scripts/start_ornith_vllm.sh
 include scripts/summarize_opencode_request_payloads.py
 include scripts/ollama/ornith-lspctx.Modelfile
+include tests/corpora.performance.lock.json
 recursive-include tests *.py *.pas *.inc *.dpr *.dpk

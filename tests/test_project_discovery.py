@@ -1,6 +1,9 @@
 import textwrap
+import errno
 import os
 from pathlib import Path
+
+import pytest
 
 from delphi_lsp.project_discovery import (
     DelphiProjectDiscovery,
@@ -53,15 +56,15 @@ def test_workspace_source_scan_uses_one_root_traversal(
     write_text(tmp_path / "ignored.txt", "ignored")
 
     traversal_calls = 0
-    original_rglob = Path.rglob
+    original_walk = os.walk
 
-    def counting_rglob(path: Path, pattern: str):
+    def counting_walk(path, *args, **kwargs):
         nonlocal traversal_calls
-        if path.resolve() == tmp_path.resolve():
+        if Path(path).resolve() == tmp_path.resolve():
             traversal_calls += 1
-        return original_rglob(path, pattern)
+        return original_walk(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "rglob", counting_rglob)
+    monkeypatch.setattr(os, "walk", counting_walk)
     discovery = DelphiProjectDiscovery(root=str(tmp_path.resolve()))
 
     populate_workspace_sources(discovery)
@@ -72,6 +75,75 @@ def test_workspace_source_scan_uses_one_root_traversal(
         str((tmp_path / "include" / "common.inc").resolve()),
         str((tmp_path / "z" / "Zeta.pas").resolve()),
     ]
+
+
+def test_workspace_source_scan_skips_path_too_long_directory(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    write_text(tmp_path / "Live.pas", "unit Live; interface implementation end.")
+    blocked = tmp_path / "too_long"
+    write_text(blocked / "Skipped.pas", "unit Skipped; interface implementation end.")
+    original_scandir = os.scandir
+
+    def guarded_scandir(path):
+        if Path(path) == blocked:
+            error = OSError(errno.ENAMETOOLONG, "filename too long", str(path))
+            error.winerror = 206
+            raise error
+        return original_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", guarded_scandir)
+    discovery = DelphiProjectDiscovery(root=str(tmp_path.resolve()))
+
+    populate_workspace_sources(discovery)
+
+    assert discovery.source_files == [str((tmp_path / "Live.pas").resolve())]
+
+
+def test_workspace_source_scan_skips_path_too_long_file(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    live = tmp_path / "Live.pas"
+    write_text(live, "unit Live; interface implementation end.")
+    blocked = tmp_path / "Skipped.pas"
+    write_text(blocked, "unit Skipped; interface implementation end.")
+    original_is_file = Path.is_file
+
+    def guarded_is_file(path: Path) -> bool:
+        if path == blocked:
+            error = OSError(errno.ENAMETOOLONG, "filename too long", str(path))
+            error.winerror = 206
+            raise error
+        return original_is_file(path)
+
+    monkeypatch.setattr(Path, "is_file", guarded_is_file)
+    discovery = DelphiProjectDiscovery(root=str(tmp_path.resolve()))
+
+    populate_workspace_sources(discovery)
+
+    assert discovery.source_files == [str(live.resolve())]
+
+
+def test_workspace_source_scan_does_not_hide_other_directory_errors(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    blocked = tmp_path / "blocked"
+    write_text(blocked / "Skipped.pas", "unit Skipped; interface implementation end.")
+    original_scandir = os.scandir
+
+    def guarded_scandir(path):
+        if Path(path) == blocked:
+            raise OSError(errno.EACCES, "permission denied", str(path))
+        return original_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", guarded_scandir)
+    discovery = DelphiProjectDiscovery(root=str(tmp_path.resolve()))
+
+    with pytest.raises(OSError, match="permission denied"):
+        populate_workspace_sources(discovery)
 
 
 def test_discovery_can_skip_workspace_source_scan(tmp_path: Path) -> None:

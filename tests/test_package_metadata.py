@@ -28,12 +28,12 @@ def test_lsp_console_script_dependencies_are_installed_by_default() -> None:
     assert '"lsprotocol>=2023.0.1"' in project
 
 
-def test_release_metadata_declares_2_0_1_sole_namespace_author_and_windows_support() -> None:
+def test_release_metadata_declares_2_1_0_sole_namespace_author_and_windows_support() -> None:
     pyproject = (ROOT / 'pyproject.toml').read_text(encoding='utf-8')
     project = _section('project', pyproject)
     scripts = _section('project.scripts', pyproject)
 
-    assert 'version = "2.0.2"' in project
+    assert 'version = "2.1.0"' in project
     assert '"Operating System :: OS Independent"' in project
     assert '"Operating System :: Microsoft :: Windows"' in project
     assert '"Operating System :: MacOS"' in project
@@ -83,7 +83,7 @@ def test_readme_documents_v2_release_plugin_protocol_discovery_and_vllm_proof() 
     assert 'Auto-discovery reads `.dpr`, `.dpk`, `.dproj`, `.cfg`, and `.dof` files' in readme
     assert 'no file-size threshold' in readme
     assert 'final answer' in readme
-    assert 'Version 2.0.2' in readme
+    assert 'Version 2.1.0' in readme
     assert 'view --layer metrics' in readme
     assert '`metrics`' in readme
     assert 'total_loc_with_includes' in readme
@@ -128,11 +128,18 @@ def test_ci_covers_cross_platform_test_matrix_and_release_build() -> None:
 def test_sdist_includes_files_required_by_packaged_tests() -> None:
     manifest = (ROOT / 'MANIFEST.in').read_text(encoding='utf-8')
 
+    assert 'include .github/workflows/ci.yml' in manifest
     assert 'include opencode.json' in manifest
     assert 'include scripts/check_ornith_cache.py' in manifest
     assert 'include scripts/start_ornith_vllm.sh' in manifest
     assert 'include scripts/run_opencode_lsp_probe.py' in manifest
+    assert 'include scripts/run_openrouter_github_e2e.py' in manifest
     assert 'include scripts/bootstrap_vllm_codebase_skill_test.py' in manifest
     assert 'include scripts/generate_release_evidence.py' in manifest
+    assert 'include scripts/generate_progress_pdf.py' in manifest
     assert 'include scripts/audit_delphi_language_features.py' in manifest
+    assert 'include scripts/build_github_performance_corpus.py' in manifest
+    assert 'include scripts/benchmark_github_corpus.py' in manifest
+    assert 'include scripts/benchmark_parallel_cache.py' in manifest
     assert 'include scripts/ollama/ornith-lspctx.Modelfile' in manifest
+    assert 'include tests/corpora.performance.lock.json' in manifest

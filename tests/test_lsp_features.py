@@ -12,10 +12,8 @@ from delphi_lsp.lsp_server import (
     iter_member_symbols,
     iter_symbols,
     resolve_base_for_member_completion,
-    resolve_reference,
 )
 from delphi_lsp.parser import parse
-from delphi_lsp.semantic import SymbolKind
 
 
 FIXTURE_DIR = pathlib.Path(__file__).parent / 'fixtures'

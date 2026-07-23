@@ -176,6 +176,13 @@ class AgentWorkspace:
     def active_project_id(self) -> str:
         return self._active_project_id
 
+    def cache_roots(self) -> tuple[object, ...]:
+        return (self._project_cache, self._active_result)
+
+    def evict_recomputable_caches(self) -> None:
+        self._project_cache.clear()
+        self._active_result = None
+
     @property
     def focus(self) -> Focus:
         return self._focus
@@ -264,6 +271,9 @@ class AgentWorkspace:
         return f"workspace_v2_{fingerprint}"
 
     def select_project(self, project_id: str) -> None:
+        self._select_project_with_revision(project_id)
+
+    def _select_project_with_revision(self, project_id: str) -> str:
         if project_id not in self._project_paths:
             raise AgentProtocolError("project_not_found", f"Project not found: {project_id}.")
         project_path = self._project_paths[project_id]
@@ -280,7 +290,7 @@ class AgentWorkspace:
             fingerprint = _selection_fingerprint(discovery, cached.result, root=self._root)
             if fingerprint == cached.fingerprint:
                 self._activate_project(project_id, discovery, cached.result)
-                return
+                return f"workspace_v2_{fingerprint}"
 
         if project_path is None:
             result = _catalog_workspace_sources(discovery)
@@ -292,11 +302,13 @@ class AgentWorkspace:
                 source_transform=_outline_agent_source,
             )
             result = indexer.index(str(project_path))
+        fingerprint = _selection_fingerprint(discovery, result, root=self._root)
         self._project_cache[project_id] = _ProjectCache(
             result=result,
-            fingerprint=_selection_fingerprint(discovery, result, root=self._root),
+            fingerprint=fingerprint,
         )
         self._activate_project(project_id, discovery, result)
+        return f"workspace_v2_{fingerprint}"
 
     def _activate_project(
         self,

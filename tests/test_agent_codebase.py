@@ -10,8 +10,33 @@ from pathlib import Path
 
 import pytest
 
-from delphi_lsp.agent_layers import build_codebase_index, render_layer
+from delphi_lsp.agent_layers import build_codebase_index, layer_payload, render_layer
 from delphi_lsp.project_indexer import ProjectIndexer
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_readme_documents_opencode_history_and_query_ergonomics() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "1.1.0" in readme
+    assert "1.1.1" in readme
+    assert "view per call" in readme
+    assert "2.0.0" in readme
+    assert "persistent session/root worker" in readme
+    assert "OpenCode worker stays separate from CLI daemon" in readme
+    assert "current plugin behavior is unchanged" in readme
+    readme_contracts = [
+        "delphi-lsp-agent query --root PATH find TCustomer",
+        "delphi-lsp-agent query --root PATH focus TARGET_ID",
+        "delphi-lsp-agent query --root PATH inspect",
+        "delphi-lsp-agent query --root PATH trace TARGET_ID --relation callers",
+        "delphi-lsp-agent query --root PATH metrics",
+        "delphi-lsp-agent cache status --root PATH --format json",
+    ]
+    for contract in readme_contracts:
+        assert contract in readme
+    assert "JSON status" in readme
 
 
 def write_text(path: Path, text: str) -> None:
@@ -95,6 +120,32 @@ def test_builds_layered_markdown_without_exposing_routine_bodies(tmp_path: Path)
     assert "body must not be exposed" not in markdown
 
 
+def test_parallel_layered_index_matches_serial_models_symbols_and_layers(tmp_path: Path) -> None:
+    make_project(tmp_path)
+    write_text(
+        tmp_path / "src" / "Extra.pas",
+        """
+        unit Extra;
+        interface
+        procedure ExtraWork;
+        implementation
+        procedure ExtraWork;
+        begin
+        end;
+        end.
+        """,
+    )
+
+    serial = build_codebase_index(tmp_path, workers=1)
+    parallel = build_codebase_index(tmp_path, workers=2)
+
+    assert layer_payload(parallel, "symbols") == layer_payload(serial, "symbols")
+    assert layer_payload(parallel, "units") == layer_payload(serial, "units")
+    assert list(parallel.models) == list(serial.models)
+    assert list(parallel.symbol_index.name_index) == list(serial.symbol_index.name_index)
+    assert parallel.parallel_stats.effective_workers == 2
+
+
 def test_implementation_layer_exposes_only_queried_method_body(tmp_path: Path) -> None:
     make_project(tmp_path)
 
@@ -139,6 +190,85 @@ def test_implementation_layer_slices_single_method_from_100k_line_file(tmp_path:
     assert "procedure MegaProc02499;" not in text
     assert "procedure MegaProc02498;" not in text
     assert item["fragments"][0]["range"]["start_line"] > 100_000
+
+
+def test_symbol_range_ends_at_outer_end_after_conditional_statement_blocks(
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "ConditionalRoutine.pas"
+    write_text(
+        source_path,
+        """
+        unit ConditionalRoutine;
+        interface
+        implementation
+        procedure ConditionalRun;
+        begin
+        {$IFDEF WINDOWS}
+          try
+        {$ELSE}
+          begin
+        {$ENDIF}
+            if Ready then
+            begin
+              NestedWork;
+            end;
+        {$IFDEF WINDOWS}
+          finally
+        {$ENDIF}
+          end;
+          WorkAfterNestedBlock;
+        end;
+        end.
+        """,
+    )
+    expected_end_line = len(source_path.read_text(encoding="utf-8").splitlines()) - 1
+
+    index = build_codebase_index(tmp_path)
+    payload = json.loads(
+        render_layer(index, "symbols", query="ConditionalRun", output_format="json")
+    )
+
+    [item] = payload["items"]
+    assert item["name"] == "ConditionalRun"
+    assert item["range"]["end_line"] == expected_end_line
+
+
+def test_symbol_range_correlates_split_conditional_block_boundaries(
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "SplitConditionalBlock.pas"
+    write_text(
+        source_path,
+        """
+        unit SplitConditionalBlock;
+        interface
+        implementation
+        procedure SplitConditionalRun;
+        begin
+        {$IFDEF X}
+          if Ready then
+          begin
+        {$ENDIF}
+          ConditionalWork;
+        {$IFDEF X}
+          end;
+        {$ENDIF}
+          WorkAfterConditional;
+        end;
+        end.
+        """,
+    )
+    expected_end_line = len(source_path.read_text(encoding="utf-8").splitlines()) - 1
+
+    index = build_codebase_index(tmp_path)
+    payload = json.loads(
+        render_layer(index, "symbols", query="SplitConditionalRun", output_format="json")
+    )
+
+    [item] = payload["items"]
+    assert item["name"] == "SplitConditionalRun"
+    assert item["range"]["end_line"] == expected_end_line
 
 
 def test_default_layer_index_does_not_deep_parse_project_dependencies(tmp_path: Path, monkeypatch) -> None:
@@ -266,6 +396,34 @@ def test_opencode_install_writes_protocol_v2_skill_plugin_and_agent(tmp_path: Pa
     assert "sound_partial" in skill_text
     assert "Call `metrics`" in skill_text
     assert b"\r\n" not in skill_bytes
+
+    agent_text = agent.read_text(encoding="utf-8")
+    agent_frontmatter = agent_text.split("---", maxsplit=2)[1]
+    assert "mode: all" in agent_frontmatter
+    assert "\ntools:" not in agent_frontmatter
+    assert 'permission:\n  "*": deny' not in agent_frontmatter
+    assert "  delphi_codebase: allow" in agent_frontmatter
+    assert '  skill:\n    "*": deny\n    python-delphi-lsp: allow' in agent_frontmatter
+    for denied_tool in (
+        "lsp",
+        "bash",
+        "read",
+        "glob",
+        "grep",
+        "list",
+        "edit",
+        "write",
+        "patch",
+        "task",
+        "webfetch",
+        "websearch",
+        "question",
+        "todowrite",
+        "todoread",
+        "codebase_map",
+        "code_guidelines",
+    ):
+        assert f"  {denied_tool}: deny" in agent_frontmatter
 
     plugin_bytes = plugin.read_bytes()
     plugin_text = plugin_bytes.decode("utf-8")
@@ -1024,8 +1182,13 @@ def test_opencode_install_writes_package_named_skill_plugin_and_markdown_agent(
     skill, _, agent = installed
     assert "name: python-delphi-lsp" in skill.read_text(encoding="utf-8")
     agent_text = agent.read_text(encoding="utf-8")
-    assert "mode: subagent" in agent_text
+    assert "mode: all" in agent_text
     assert "temperature: 0" in agent_text
+    assert "\ntools:" not in agent_text
+    assert 'permission:\n  "*": deny' not in agent_text
+    assert "delphi_codebase: allow" in agent_text
+    assert "codebase_map: deny" in agent_text
+    assert "code_guidelines: deny" in agent_text
     assert "python-delphi-lsp: allow" in agent_text
     assert "Load `python-delphi-lsp`" in agent_text
     assert "vllm-delphi-codebase" not in agent_text

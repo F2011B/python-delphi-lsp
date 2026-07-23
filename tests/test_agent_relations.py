@@ -244,20 +244,21 @@ def test_grouped_and_split_parameters_share_a_canonical_signature(tmp_path: Path
         "nested_cdecl": "(#1:procedure(#2:integer)|cc:cdecl)",
         "nested_stdcall": "(#1:procedure(#2:integer)|cc:stdcall)",
     }
-    target = lambda signature: agent_relations.RelationTarget(
-        target_id=signature,
-        source_path="Signatures.pas",
-        path="Signatures.pas",
-        unit_id="Signatures",
-        unit_name="Signatures",
-        name="Run",
-        qualified_name="Signatures.Run",
-        kind=SymbolKind.PROCEDURE.value,
-        signature=signature,
-        line=1,
-        column=1,
-        card={},
-    )
+    def target(signature: str) -> agent_relations.RelationTarget:
+        return agent_relations.RelationTarget(
+            target_id=signature,
+            source_path="Signatures.pas",
+            path="Signatures.pas",
+            unit_id="Signatures",
+            unit_name="Signatures",
+            name="Run",
+            qualified_name="Signatures.Run",
+            kind=SymbolKind.PROCEDURE.value,
+            signature=signature,
+            line=1,
+            column=1,
+            card={},
+        )
 
     assert identity(target(signatures["grouped"])) == identity(target(signatures["split"]))
     assert identity(target(signatures["grouped"])) != identity(target(signatures["three"]))

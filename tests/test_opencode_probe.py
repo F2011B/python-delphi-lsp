@@ -3,10 +3,14 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import signal
+import subprocess
 import sys
 import time
 from argparse import Namespace
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -59,46 +63,346 @@ def test_build_opencode_command_accepts_explicit_agent() -> None:
     assert command[command.index('--model') + 1] == 'vllm/ornith-lspctx'
 
 
-def test_probe_uses_portable_threaded_stdout_and_process_shutdown() -> None:
+def test_build_opencode_command_accepts_explicit_binary() -> None:
+    probe = _load_probe_module()
+
+    command = probe.build_opencode_command(
+        opencode='/opt/release/opencode',
+        title='release-gate',
+        model='openrouter/google/gemma-4-31b-it',
+        agent='python-delphi-lsp',
+        cwd=str(ROOT),
+        prompt='use the semantic tools',
+    )
+
+    assert command[0] == '/opt/release/opencode'
+
+
+def test_probe_uses_portable_threaded_stdout() -> None:
     script = SCRIPT.read_text(encoding='utf-8')
 
     assert 'import selectors' not in script
-    assert 'import signal' not in script
-    assert 'signal.SIGTERM' not in script
     assert 'threading.Thread' in script
     assert 'queue.Queue' in script
-    assert 'proc.terminate()' in script
-    assert 'proc.kill()' in script
 
 
-def test_stop_process_kills_process_that_ignores_terminate() -> None:
+def test_process_group_launch_kwargs_preserve_platform_and_inheritance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     probe = _load_probe_module()
 
-    class StubbornProcess:
-        def __init__(self) -> None:
-            self.terminated = False
-            self.killed = False
+    monkeypatch.setattr(probe, '_IS_WINDOWS', False, raising=False)
+    assert probe._process_group_popen_kwargs(inherit_process_group=False) == {
+        'start_new_session': True,
+    }
+    assert probe._process_group_popen_kwargs(inherit_process_group=True) == {
+        'start_new_session': False,
+    }
 
-        def poll(self):
-            return None
+    monkeypatch.setattr(probe, '_IS_WINDOWS', True)
+    assert probe._process_group_popen_kwargs(inherit_process_group=False) == {
+        'creationflags': probe._CREATE_NEW_PROCESS_GROUP,
+    }
+    assert probe._process_group_popen_kwargs(inherit_process_group=True) == {
+        'creationflags': 0,
+    }
 
-        def terminate(self) -> None:
-            self.terminated = True
+
+def test_windows_owned_process_assigns_job_before_one_byte_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe = _load_probe_module()
+    lifecycle: list[str] = []
+    launched: list[str] = []
+
+    class FakeStdin:
+        closed = False
+
+        def fileno(self):
+            return 71
+
+        def close(self):
+            self.closed = True
+            lifecycle.append('stdin-close')
+
+    class FakeProcess:
+        stdin = FakeStdin()
+
+    class FakeJob:
+        def assign(self, process):
+            assert process is fake_process
+            lifecycle.append('assign')
+
+    fake_process = FakeProcess()
+    fake_job = FakeJob()
+
+    def fake_new_job():
+        lifecycle.append('new-job')
+        return fake_job
+
+    def fake_popen(command, **kwargs):
+        launched.extend(command)
+        assert kwargs['stdin'] is subprocess.PIPE
+        lifecycle.append('popen')
+        return fake_process
+
+    def fake_write(fd, payload):
+        assert fd == 71
+        assert payload == probe._WINDOWS_BOOTSTRAP_RELEASE
+        lifecycle.append('release')
+        return len(payload)
+
+    monkeypatch.setattr(probe, '_IS_WINDOWS', True)
+    monkeypatch.setattr(probe, '_new_windows_job', fake_new_job)
+    monkeypatch.setattr(probe.subprocess, 'Popen', fake_popen)
+    monkeypatch.setattr(probe.os, 'write', fake_write)
+
+    process, job = probe._start_owned_process(['opencode', '--version'], text=True)
+
+    assert process is fake_process
+    assert job is fake_job
+    assert lifecycle == ['new-job', 'popen', 'assign', 'release', 'stdin-close']
+    assert launched[:4] == [sys.executable, '-I', '-c', probe._WINDOWS_BOOTSTRAP]
+    assert launched[4:] == ['opencode', '--version']
+    assert process.stdin is None
+
+
+def test_windows_owned_process_assignment_failure_never_releases_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe = _load_probe_module()
+    lifecycle: list[str] = []
+
+    class FakeApi:
+        def assign(self, handle, process_handle):
+            lifecycle.append(f'assign:{handle}:{process_handle}')
+            raise OSError('assignment failed')
+
+        def close(self, handle):
+            lifecycle.append(f'job-close:{handle}')
+
+    class FakeStdin:
+        def fileno(self):
+            return 72
+
+        def close(self):
+            lifecycle.append('stdin-close')
+
+    class FakeProcess:
+        _handle = 74
+        stdin = FakeStdin()
+
+        def kill(self):
+            lifecycle.append('kill-wrapper')
 
         def wait(self, timeout=None):
-            if not self.killed:
-                raise probe.subprocess.TimeoutExpired('opencode', timeout)
+            lifecycle.append(f'wait-wrapper:{timeout}')
             return 1
 
-        def kill(self) -> None:
-            self.killed = True
+    process = FakeProcess()
+    job = probe._WindowsJob(api=FakeApi(), handle=73)
+    monkeypatch.setattr(probe, '_IS_WINDOWS', True)
+    monkeypatch.setattr(probe, '_new_windows_job', lambda: job)
+    monkeypatch.setattr(probe.subprocess, 'Popen', lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(
+        probe.os,
+        'write',
+        lambda *_args: pytest.fail('target must not be released after failed job assignment'),
+    )
+
+    with pytest.raises(OSError, match='assignment failed'):
+        probe._start_owned_process(['opencode'], text=True)
+
+    assert lifecycle == [
+        'assign:73:74',
+        'kill-wrapper',
+        'wait-wrapper:5.0',
+        'job-close:73',
+        'stdin-close',
+    ]
+    assert process.stdin is None
+
+
+def test_windows_bootstrap_mirrors_target_exitcode_stdout_and_stderr() -> None:
+    probe = _load_probe_module()
+    target = [
+        sys.executable,
+        '-c',
+        "import sys; print('target-out'); print('target-err', file=sys.stderr); raise SystemExit(7)",
+    ]
+
+    completed = subprocess.run(
+        probe._windows_bootstrap_command(target),
+        input=probe._WINDOWS_BOOTSTRAP_RELEASE,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 7
+    assert completed.stdout.splitlines() == [b'target-out']
+    assert completed.stderr.splitlines() == [b'target-err']
+
+
+def test_windows_stop_process_terminates_job_after_leader_exits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe = _load_probe_module()
+    calls: list[tuple[object, float]] = []
+
+    class ExitedProcess:
+        pid = 4242
+        returncode = 0
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            del timeout
+            return self.returncode
+
+    class FakeWindowsJob:
+        def terminate_and_wait(self, process, *, timeout):
+            calls.append((process, timeout))
+
+    process = ExitedProcess()
+    job = FakeWindowsJob()
+
+    monkeypatch.setattr(probe, '_IS_WINDOWS', True, raising=False)
+    monkeypatch.setattr(
+        probe.subprocess,
+        'run',
+        lambda *_args, **_kwargs: pytest.fail('Windows cleanup must not resolve an executable via PATH'),
+    )
+
+    probe._stop_process(process, windows_job=job, timeout=0.1)
+
+    assert calls == [(process, 0.1)]
+
+
+def test_windows_job_waits_until_all_assigned_processes_exit() -> None:
+    probe = _load_probe_module()
+    events: list[object] = []
+
+    class FakeApi:
+        active = iter([2, 1, 0])
+
+        def terminate(self, handle, exit_code):
+            events.append(('terminate', handle, exit_code))
+
+        def active_processes(self, handle):
+            events.append(('query', handle))
+            return next(self.active)
+
+        def close(self, handle):
+            events.append(('close', handle))
+
+    class ExitedLeader:
+        def wait(self, timeout=None):
+            events.append(('wait', timeout))
+            return 0
+
+    job = probe._WindowsJob(api=FakeApi(), handle=91)
+
+    job.terminate_and_wait(ExitedLeader(), timeout=0.2)
+
+    assert events[0] == ('terminate', 91, 1)
+    assert events.count(('query', 91)) == 3
+    assert events[-1] == ('close', 91)
+    assert any(isinstance(event, tuple) and event[0] == 'wait' for event in events)
+
+
+def test_windows_job_close_can_retry_after_close_handle_failure() -> None:
+    probe = _load_probe_module()
+    attempts: list[int] = []
+
+    class FlakyApi:
+        def close(self, handle):
+            attempts.append(handle)
+            if len(attempts) == 1:
+                raise OSError('CloseHandle failed')
+
+    job = probe._WindowsJob(api=FlakyApi(), handle=92)
+
+    with pytest.raises(OSError, match='CloseHandle failed'):
+        job.close()
+
+    assert job._closed is False
+    job.close()
+    job.close()
+
+    assert attempts == [92, 92]
+    assert job._closed is True
+
+
+def test_windows_job_assignment_preserves_original_error_for_exited_process(
+) -> None:
+    probe = _load_probe_module()
+    events: list[object] = []
+
+    class FakeApi:
+        def create_kill_on_close(self):
+            return 93
+
+        def assign(self, handle, process_handle):
+            events.append(('assign', handle, process_handle))
+            raise OSError('assignment failed')
+
+        def close(self, handle):
+            events.append(('close', handle))
+
+    class ExitedProcess:
+        _handle = 94
+
+        def kill(self):
+            raise ProcessLookupError
+
+        def wait(self, timeout=None):
+            events.append(('wait', timeout))
+            return 0
+
+    job = probe._WindowsJob(api=FakeApi(), handle=93)
+
+    with pytest.raises(OSError, match='assignment failed'):
+        job.assign(ExitedProcess())
+
+    assert events == [('assign', 93, 94), ('wait', 5.0), ('close', 93)]
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX can address a process group after its leader exits')
+def test_stop_process_kills_group_even_when_leader_already_exited(monkeypatch) -> None:
+    probe = _load_probe_module()
+    group_alive = True
+    signals: list[int] = []
+
+    class StubbornProcess:
+        pid = 4141
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            del timeout
+            return 0
+
+    def fake_killpg(pid: int, sig: int) -> None:
+        nonlocal group_alive
+        assert pid == 4141
+        if sig == 0:
+            if not group_alive:
+                raise ProcessLookupError
+            return
+        signals.append(sig)
+        if sig == signal.SIGKILL:
+            group_alive = False
+
+    monkeypatch.setattr(probe.os, 'killpg', fake_killpg)
 
     process = StubbornProcess()
 
     probe._stop_process(process, timeout=0.01)
 
-    assert process.terminated is True
-    assert process.killed is True
+    assert signals == [signal.SIGTERM, signal.SIGKILL]
+    assert group_alive is False
 
 
 def test_evidence_from_jsonl_extracts_completed_lsp_tool_timing() -> None:
@@ -298,8 +602,7 @@ def test_run_probe_waits_until_all_required_tools_are_seen(tmp_path) -> None:
             f'lines = {event_lines!r}; '
             'print(lines[0], flush=True); '
             'time.sleep(0.1); '
-            'print(lines[1], flush=True); '
-            'time.sleep(5)'
+            'print(lines[1], flush=True)'
         ),
     ]
     args = Namespace(
@@ -413,8 +716,7 @@ def test_run_probe_rejects_forbidden_tools_before_required_evidence(tmp_path) ->
             f'lines = {event_lines!r}; '
             'print(lines[0], flush=True); '
             'time.sleep(0.1); '
-            'print(lines[1], flush=True); '
-            'time.sleep(5)'
+            'print(lines[1], flush=True)'
         ),
     ]
     args = Namespace(
@@ -434,8 +736,156 @@ def test_run_probe_rejects_forbidden_tools_before_required_evidence(tmp_path) ->
 
     assert result == 2
     lines = (tmp_path / 'probe.jsonl').read_text(encoding='utf-8').splitlines()
-    assert len(lines) == 1
+    assert len(lines) == 2
     assert json.loads(lines[0])['part']['tool'] == 'bash'
+
+
+def test_run_probe_rejects_forbidden_tool_after_matching_final(tmp_path) -> None:
+    probe = _load_probe_module()
+    required = {
+        'type': 'tool_use',
+        'part': {
+            'tool': 'lsp',
+            'state': {
+                'status': 'completed',
+                'input': {'operation': 'workspaceSymbol'},
+                'output': 'MegaProc02500',
+            },
+        },
+    }
+    final = {'type': 'text', 'part': {'text': 'MegaProc02500 found.'}}
+    forbidden = {
+        'type': 'tool_use',
+        'part': {
+            'tool': 'bash',
+            'state': {
+                'status': 'completed',
+                'input': {'command': 'cat source'},
+                'output': 'source',
+            },
+        },
+    }
+    lines = [json.dumps(event) for event in (required, final, forbidden)]
+    probe.build_opencode_command = lambda **_kwargs: [
+        sys.executable,
+        '-c',
+        f'lines={lines!r}; [print(line, flush=True) for line in lines]',
+    ]
+    output = tmp_path / 'late-forbidden.jsonl'
+    args = Namespace(
+        title='late-forbidden',
+        model='test/model',
+        prompt='probe',
+        cwd=str(tmp_path),
+        output=str(output),
+        timeout=2.0,
+        tool='lsp',
+        expected='MegaProc02500',
+        require_tool=None,
+        require_final=['MegaProc02500'],
+        forbid_tool=['bash'],
+    )
+
+    result = probe.run_probe(args)
+
+    assert result == 2
+    assert len(output.read_text(encoding='utf-8').splitlines()) == 3
+
+
+def test_run_probe_rejects_additional_tool_in_exact_mode(tmp_path) -> None:
+    probe = _load_probe_module()
+    events = [
+        {
+            'type': 'tool_use',
+            'part': {
+                'tool': 'lsp',
+                'state': {
+                    'status': 'completed',
+                    'input': {'operation': 'workspaceSymbol'},
+                    'output': 'MegaProc02500',
+                },
+            },
+        },
+        {'type': 'text', 'part': {'text': 'MegaProc02500 found.'}},
+        {
+            'type': 'tool_use',
+            'part': {
+                'tool': 'edit',
+                'state': {
+                    'status': 'completed',
+                    'input': {'filePath': 'x'},
+                    'output': 'changed',
+                },
+            },
+        },
+    ]
+    lines = [json.dumps(event) for event in events]
+    probe.build_opencode_command = lambda **_kwargs: [
+        sys.executable,
+        '-c',
+        f'lines={lines!r}; [print(line, flush=True) for line in lines]',
+    ]
+    args = Namespace(
+        title='late-extra',
+        model='test/model',
+        prompt='probe',
+        cwd=str(tmp_path),
+        output=None,
+        timeout=2.0,
+        tool='lsp',
+        expected='MegaProc02500',
+        require_tool=['lsp.workspaceSymbol:MegaProc02500'],
+        require_final=['MegaProc02500'],
+        forbid_tool=[],
+        exact_tools=True,
+    )
+
+    assert probe.run_probe(args) == 2
+
+
+def test_run_probe_waits_for_normal_completion_after_final(tmp_path) -> None:
+    probe = _load_probe_module()
+    marker = tmp_path / 'completed'
+    event = json.dumps(
+        {
+            'type': 'tool_use',
+            'part': {
+                'tool': 'lsp',
+                'state': {
+                    'status': 'completed',
+                    'input': {'operation': 'workspaceSymbol'},
+                    'output': 'MegaProc02500',
+                },
+            },
+        }
+    )
+    final = json.dumps({'type': 'text', 'part': {'text': 'MegaProc02500 found.'}})
+    probe.build_opencode_command = lambda **_kwargs: [
+        sys.executable,
+        '-c',
+        (
+            'import pathlib,time; '
+            f'print({event!r}, flush=True); print({final!r}, flush=True); '
+            'time.sleep(0.15); '
+            f'pathlib.Path({str(marker)!r}).write_text("done")'
+        ),
+    ]
+    args = Namespace(
+        title='normal-completion',
+        model='test/model',
+        prompt='probe',
+        cwd=str(tmp_path),
+        output=None,
+        timeout=2.0,
+        tool='lsp',
+        expected='MegaProc02500',
+        require_tool=None,
+        require_final=['MegaProc02500'],
+        forbid_tool=[],
+    )
+
+    assert probe.run_probe(args) == 0
+    assert marker.read_text(encoding='utf-8') == 'done'
 
 
 def test_run_probe_timeout_is_not_blocked_waiting_for_first_output(tmp_path) -> None:

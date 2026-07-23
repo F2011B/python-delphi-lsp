@@ -3,6 +3,7 @@ from __future__ import annotations
 from bisect import bisect_left, bisect_right
 from collections.abc import Mapping
 from dataclasses import dataclass
+from heapq import heappop, heappush
 import hashlib
 import json
 from pathlib import Path, PureWindowsPath
@@ -14,20 +15,19 @@ from .agent_protocol import (
     AgentResponse,
     ContextBudget,
     Focus,
-    Page,
     make_target_id,
     paginate_items,
 )
 from .agent_metrics import build_workspace_metrics, project_metric_item, unit_metric_item
 from .agent_relations import ProjectRelationIndex, RelationTarget
-from .agent_workspace import AgentWorkspace, unit_display_path, unit_source_path, unit_target_id
+from .agent_workspace import AgentUnit, AgentWorkspace, unit_display_path, unit_source_path, unit_target_id
 from .consts import AttributeName, SyntaxNodeType
-from .lsp_server import build_outline_semantic_model, multiline_string_block_end
+from .lsp_server import multiline_string_block_end
 from .nodes import CompoundSyntaxNode, SyntaxNode
 from .parser import DelphiParser
 from .semantic import Scope, ScopeKind, Symbol, SymbolKind
-from .source_reader import read_source_text
 from .metrics import ProjectMetrics
+from .parallel_outline import OutlineResult, OutlineTask, ParallelBuildStats, run_outline_tasks
 
 
 _ROUTINE_KINDS = frozenset(
@@ -121,6 +121,10 @@ class _SourceDocument:
         self.tokens = tuple(_lex_delphi(text))
         self.token_starts = tuple(token.start for token in self.tokens)
         self.directive_starts = tuple(token.start for token in self.tokens if token.directive)
+        self.declaration_section_indexes = [0]
+        self.declaration_section_checkpoints: dict[int, tuple[str, int, int, int]] = {
+            0: ("", 0, 0, 0)
+        }
         words = [token for token in self.tokens if token.word and not token.escaped]
         self.unit_kind = next(
             (token.value for token in words if token.value in {"unit", "program", "library", "package"}),
@@ -129,6 +133,7 @@ class _SourceDocument:
         implementation = next((token for token in words if token.value == "implementation"), None)
         self.implementation_line = self.line_col(implementation.start)[0] if implementation else 0
         self.routine_spans: dict[int, tuple[int, int] | None] = {}
+        self.routine_token_spans: dict[int, tuple[int, int, int] | None] = {}
         self.parser_spans: dict[str, tuple[int, int] | None] = {}
         self._full_parse_attempted = False
         self._full_parse_result: object | None = None
@@ -230,11 +235,21 @@ class _Registry:
     entries: tuple[_SymbolEntry, ...]
     by_target: dict[str, _SymbolEntry]
     sources: dict[Path, _SourceDocument]
+    ranked_queries: dict[str, tuple[_SymbolEntry, ...]]
 
 
 class AgentContext:
-    def __init__(self, workspace: AgentWorkspace) -> None:
+    def __init__(
+        self,
+        workspace: AgentWorkspace,
+        *,
+        workers: int = 0,
+        worker_memory_budget_bytes: int | None = None,
+    ) -> None:
         self._workspace = workspace
+        self._workers = workers
+        self._worker_memory_budget_bytes = worker_memory_budget_bytes
+        self._parallel_stats = ParallelBuildStats(0, 0, 0, 0.0, 0)
         project_id = workspace.active_project_id
         self._focus = Focus(project_id=project_id) if project_id else Focus()
         self._last_revision = workspace.workspace_revision
@@ -248,12 +263,45 @@ class AgentContext:
         cls,
         root: str | Path,
         project_file: str | Path | None = None,
+        *,
+        workers: int = 0,
+        worker_memory_budget_bytes: int | None = None,
     ) -> AgentContext:
-        return cls(AgentWorkspace.open(root, project_file=project_file))
+        return cls(
+            AgentWorkspace.open(root, project_file=project_file),
+            workers=workers,
+            worker_memory_budget_bytes=worker_memory_budget_bytes,
+        )
 
     @property
     def workspace(self) -> AgentWorkspace:
         return self._workspace
+
+    @property
+    def navigation_cache_is_warm(self) -> bool:
+        return self._registry is not None
+
+    @property
+    def parallel_stats(self) -> ParallelBuildStats:
+        return self._parallel_stats
+
+    def cache_roots(self) -> tuple[object, ...]:
+        return (
+            *self._workspace.cache_roots(),
+            self._registry,
+            self._relation_index,
+            self._metrics,
+        )
+
+    def evict_auxiliary_caches(self) -> None:
+        self._relation_index = None
+        self._metrics = None
+        self._metrics_revision = ""
+
+    def evict_navigation_caches(self) -> None:
+        self.evict_auxiliary_caches()
+        self._registry = None
+        self._workspace.evict_recomputable_caches()
 
     def handle(self, request: AgentRequest | Mapping[str, object]) -> AgentResponse:
         parsed = _validated_request(request)
@@ -280,7 +328,12 @@ class AgentContext:
             return self._handle_focus(parsed, revision)
         if parsed.action == "find":
             registry = self._require_registry(revision)
-            items = [entry.card() for entry in _ranked_entries(registry.entries, parsed.query)]
+            ranked = registry.ranked_queries.get(parsed.query)
+            if ranked is None:
+                ranked = tuple(_ranked_entries(registry.entries, parsed.query))
+                registry.ranked_queries.clear()
+                registry.ranked_queries[parsed.query] = ranked
+            items = [entry.card() for entry in ranked]
             return self._response(parsed, revision, items)
         if parsed.action == "inspect":
             registry = self._require_registry(revision)
@@ -293,9 +346,10 @@ class AgentContext:
         previous_project_id = self._workspace.active_project_id
         selected_project_id = requested_project_id or previous_project_id
         if selected_project_id:
-            self._workspace.select_project(selected_project_id)
+            revision = self._workspace._select_project_with_revision(selected_project_id)
+        else:
+            revision = self._workspace.workspace_revision
         current_project_id = self._workspace.active_project_id
-        revision = self._workspace.workspace_revision
 
         if current_project_id != previous_project_id:
             self._registry = None
@@ -473,7 +527,13 @@ class AgentContext:
             and self._registry.revision == revision
         ):
             return self._registry
-        self._registry = _build_registry(self._workspace, project_id, revision)
+        self._registry, self._parallel_stats = _build_registry(
+            self._workspace,
+            project_id,
+            revision,
+            workers=self._workers,
+            worker_memory_budget_bytes=self._worker_memory_budget_bytes,
+        )
         if self._focus.target_id:
             focused_entry = self._registry.by_target.get(self._focus.target_id)
             if focused_entry is None:
@@ -662,30 +722,53 @@ def _validated_request(request: AgentRequest | Mapping[str, object]) -> AgentReq
     return AgentRequest.from_mapping(request)
 
 
-def _build_registry(workspace: AgentWorkspace, project_id: str, revision: str) -> _Registry:
+def _build_registry(
+    workspace: AgentWorkspace,
+    project_id: str,
+    revision: str,
+    *,
+    workers: int = 0,
+    worker_memory_budget_bytes: int | None = None,
+) -> tuple[_Registry, ParallelBuildStats]:
     raw_symbols: list[_RawSymbol] = []
     sources: dict[Path, _SourceDocument] = {}
-    for unit in workspace.units:
+    units = tuple(workspace.units)
+
+    def consume_result(result: OutlineResult) -> None:
+        unit = units[result.ordinal]
         source_path = unit_source_path(workspace.root, unit)
         display_path = unit_display_path(workspace.root, unit)
-        try:
-            text = read_source_text(source_path)
-        except OSError as exc:
+        if result.read_error or result.model is None:
             raise AgentProtocolError(
                 "source_unavailable",
-                f"Could not read selected source {unit.path}: {exc}.",
-            ) from None
+                f"Could not read selected source {display_path}.",
+            )
         document = _SourceDocument(
             source_path,
             display_path,
-            text,
+            result.text,
             defines=workspace.defines,
             include_paths=workspace.include_paths,
         )
         sources[source_path] = document
-        model = build_outline_semantic_model(text, str(source_path))
-        unit_symbols = _collect_raw_symbols(model.unit_scope, unit, source_path, document)
+        unit_symbols = _collect_raw_symbols(result.model.unit_scope, unit, source_path, document)
         raw_symbols.extend(_exclude_routine_locals(unit_symbols, document))
+
+    outline_batch = run_outline_tasks(
+        (
+            OutlineTask(
+                ordinal,
+                str(unit_source_path(workspace.root, unit)),
+                workspace.defines,
+                True,
+            )
+            for ordinal, unit in enumerate(units)
+        ),
+        configured_workers=workers,
+        memory_budget_bytes=worker_memory_budget_bytes,
+        on_complete=consume_result,
+        retain_results=False,
+    )
 
     ordered = sorted(raw_symbols, key=_raw_sort_key)
     overload_groups: dict[tuple[str, str, str, str], list[_RawSymbol]] = {}
@@ -776,12 +859,16 @@ def _build_registry(workspace: AgentWorkspace, project_id: str, revision: str) -
         )
 
     entries_tuple = tuple(sorted(with_parents, key=_entry_sort_key))
-    return _Registry(
-        project_id=project_id,
-        revision=revision,
-        entries=entries_tuple,
-        by_target={entry.target_id: entry for entry in entries_tuple},
-        sources=sources,
+    return (
+        _Registry(
+            project_id=project_id,
+            revision=revision,
+            entries=entries_tuple,
+            by_target={entry.target_id: entry for entry in entries_tuple},
+            sources=sources,
+            ranked_queries={},
+        ),
+        outline_batch.stats,
     )
 
 
@@ -925,32 +1012,47 @@ def _correct_outline_symbol_kind(document: _SourceDocument, symbol: Symbol) -> N
         symbol.kind = SymbolKind.TYPE
 
 
+def _advance_declaration_section(
+    state: tuple[str, int, int, int],
+    token: _Token,
+) -> tuple[str, int, int, int]:
+    section, parentheses, brackets, angles = state
+    if token.directive:
+        return state
+    if token.value == "(":
+        parentheses += 1
+    elif token.value == ")":
+        parentheses = max(0, parentheses - 1)
+    elif token.value == "[":
+        brackets += 1
+    elif token.value == "]":
+        brackets = max(0, brackets - 1)
+    elif token.value == "<":
+        angles += 1
+    elif token.value == ">":
+        angles = max(0, angles - 1)
+    elif not parentheses and not brackets and not angles and token.word:
+        if token.value in {"const", "resourcestring", "threadvar", "type", "var"}:
+            section = token.value
+        elif token.value in {"implementation", "initialization", "finalization"}:
+            section = ""
+    return section, parentheses, brackets, angles
+
+
 def _declaration_section(document: _SourceDocument, offset: int) -> str:
-    section = ""
-    parentheses = 0
-    brackets = 0
-    angles = 0
-    for token in document.tokens[:document.first_token_index(offset)]:
-        if token.directive:
-            continue
-        if token.value == "(":
-            parentheses += 1
-        elif token.value == ")":
-            parentheses = max(0, parentheses - 1)
-        elif token.value == "[":
-            brackets += 1
-        elif token.value == "]":
-            brackets = max(0, brackets - 1)
-        elif token.value == "<":
-            angles += 1
-        elif token.value == ">":
-            angles = max(0, angles - 1)
-        elif not any((parentheses, brackets, angles)) and token.word:
-            if token.value in {"const", "resourcestring", "threadvar", "type", "var"}:
-                section = token.value
-            elif token.value in {"implementation", "initialization", "finalization"}:
-                section = ""
-    return section
+    target_index = document.first_token_index(offset)
+    cached = document.declaration_section_checkpoints.get(target_index)
+    if cached is not None:
+        return cached[0]
+    checkpoint_position = bisect_right(document.declaration_section_indexes, target_index) - 1
+    checkpoint_index = document.declaration_section_indexes[checkpoint_position]
+    state = document.declaration_section_checkpoints[checkpoint_index]
+    for token in document.tokens[checkpoint_index:target_index]:
+        state = _advance_declaration_section(state, token)
+    insert_at = bisect_left(document.declaration_section_indexes, target_index)
+    document.declaration_section_indexes.insert(insert_at, target_index)
+    document.declaration_section_checkpoints[target_index] = state
+    return state[0]
 
 
 def _declared_symbol_name(document: _SourceDocument, symbol: Symbol) -> str:
@@ -1208,20 +1310,47 @@ def _exclude_routine_locals(
         span = _raw_routine_span(raw, document)
         if span is not None:
             containers.append((span[0], span[1], raw))
+    if not containers:
+        return symbols
 
-    filtered: list[_RawSymbol] = []
-    for raw in symbols:
-        offset = document.offset(
-            raw.symbol.decl_range.start_line,
-            raw.symbol.decl_range.start_col,
+    containers.sort(key=lambda item: (item[0], item[1]))
+    positioned = sorted(
+        (
+            document.offset(
+                raw.symbol.decl_range.start_line,
+                raw.symbol.decl_range.start_col,
+            ),
+            order,
+            raw,
         )
-        if any(
-            start < offset < end and raw is not container
-            for start, end, container in containers
+        for order, raw in enumerate(symbols)
+    )
+    active_ends: list[tuple[int, int, int]] = []
+    active_ids: set[int] = set()
+    excluded_orders: set[int] = set()
+    container_index = 0
+    for offset, order, raw in positioned:
+        while (
+            container_index < len(containers)
+            and containers[container_index][0] < offset
         ):
-            continue
-        filtered.append(raw)
-    return filtered
+            _, end, container = containers[container_index]
+            container_id = id(container)
+            heappush(active_ends, (end, container_index, container_id))
+            active_ids.add(container_id)
+            container_index += 1
+        while active_ends and active_ends[0][0] <= offset:
+            _, _, container_id = heappop(active_ends)
+            active_ids.discard(container_id)
+        raw_id = id(raw)
+        if active_ids and (raw_id not in active_ids or len(active_ids) > 1):
+            excluded_orders.add(order)
+
+    return [
+        raw
+        for order, raw in enumerate(symbols)
+        if order not in excluded_orders
+    ]
 
 
 def _raw_routine_span(
@@ -1523,6 +1652,7 @@ def _routine_span(
         document.tokens,
         document.token_starts,
         token_index,
+        cache=document.routine_token_spans,
     )
     span = (start, found[1]) if found is not None else None
     document.routine_spans[start] = span
@@ -1534,6 +1664,7 @@ def _find_routine_token_span(
     token_starts: tuple[int, ...],
     start_index: int,
     *,
+    cache: dict[int, tuple[int, int, int] | None] | None = None,
     depth: int = 0,
 ) -> tuple[int, int, int] | None:
     if depth > 64:
@@ -1541,56 +1672,100 @@ def _find_routine_token_span(
     routine_index = _routine_keyword_index(tokens, start_index)
     if routine_index is None:
         return None
+    spans = cache if cache is not None else {}
+    missing = object()
+    cached = spans.get(routine_index, missing)
+    if cached is not missing:
+        if cached is None:
+            return None
+        return tokens[start_index].start, cached[1], cached[2]
+
     heading_end = _heading_semicolon_index(tokens, routine_index)
     if heading_end is None:
+        spans[routine_index] = None
         return None
 
-    index = heading_end + 1
-    while index < len(tokens):
+    frames: list[list[int]] = [[routine_index, heading_end + 1]]
+
+    def reject_active_frames() -> None:
+        for active_routine_index, _ in frames:
+            spans[active_routine_index] = None
+        frames.clear()
+
+    while frames:
+        frame = frames[-1]
+        frame_routine_index, index = frame
+        if index >= len(tokens):
+            reject_active_frames()
+            continue
+
         token = tokens[index]
         if token.directive:
-            return None
+            reject_active_frames()
+            continue
         if token.word and not token.escaped:
             if token.value in _NO_BODY_DIRECTIVES:
-                return None
+                spans[frame_routine_index] = None
+                frames.pop()
+                continue
             if token.value in {"implementation", "initialization", "finalization"}:
-                return None
+                reject_active_frames()
+                continue
             if (
                 token.value in _STRUCTURED_TYPE_WORDS
                 and _is_structured_type_opener(tokens, index)
             ):
                 if index + 1 < len(tokens) and tokens[index + 1].value == ";":
-                    index += 2
+                    frame[1] = index + 2
                     continue
                 structured_end = _match_end_terminated_block(tokens, index)
                 if structured_end is None:
-                    return None
-                index = bisect_left(token_starts, structured_end)
+                    reject_active_frames()
+                    continue
+                frame[1] = bisect_left(token_starts, structured_end)
                 continue
             if token.value == "end":
-                return None
+                reject_active_frames()
+                continue
             if token.value in {"begin", "asm"}:
                 end = _match_end_terminated_block(tokens, index)
                 if end is None:
-                    return None
+                    reject_active_frames()
+                    continue
                 end_index = bisect_left(token_starts, end)
-                return tokens[start_index].start, end, end_index
-            if token.value in _ROUTINE_WORDS and _is_nested_routine_declaration(tokens, index):
-                nested = _find_routine_token_span(
-                    tokens,
-                    token_starts,
-                    index,
-                    depth=depth + 1,
+                spans[frame_routine_index] = (
+                    tokens[frame_routine_index].start,
+                    end,
+                    end_index,
                 )
+                frames.pop()
+                continue
+            if token.value in _ROUTINE_WORDS and _is_nested_routine_declaration(tokens, index):
+                nested_routine_index = _routine_keyword_index(tokens, index)
+                if nested_routine_index is None:
+                    frame[1] = index + 1
+                    continue
+                nested = spans.get(nested_routine_index, missing)
+                if nested is missing:
+                    nested_heading_end = _heading_semicolon_index(tokens, nested_routine_index)
+                    if nested_heading_end is None:
+                        spans[nested_routine_index] = None
+                        continue
+                    frames.append([nested_routine_index, nested_heading_end + 1])
+                    continue
                 if nested is not None:
-                    index = max(index + 1, nested[2])
+                    frame[1] = max(index + 1, nested[2])
                     continue
                 skipped = _routine_declaration_end_index(tokens, index)
                 if skipped is not None:
-                    index = skipped + 1
+                    frame[1] = skipped + 1
                     continue
-        index += 1
-    return None
+        frame[1] = index + 1
+
+    result = spans.get(routine_index)
+    if result is None:
+        return None
+    return tokens[start_index].start, result[1], result[2]
 
 
 def _routine_keyword_index(

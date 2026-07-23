@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable
 import json
 
-from .lsp_server import build_outline_semantic_model, outline_source
 from .metrics import analyze_project
+from .parallel_outline import OutlineResult, OutlineTask, ParallelBuildStats, run_outline_tasks
 from .project_discovery import DelphiProjectDiscovery, discover_delphi_project
 from .project_indexer import ProjectIndexResult, ProjectIndexer
+from .progress import ProgressCallback, ProgressEvent
 from .semantic import Scope, SourceRange, Symbol, SymbolIndex, SymbolKind
 from .semantic_builder import SemanticModel
 from .source_reader import read_source_text
@@ -21,6 +22,7 @@ class CodebaseIndex:
     models: dict[str, SemanticModel]
     symbol_index: SymbolIndex
     project_results: dict[str, ProjectIndexResult]
+    parallel_stats: ParallelBuildStats = ParallelBuildStats(0, 0, 0, 0.0, 0)
 
 
 def build_codebase_index(
@@ -28,24 +30,67 @@ def build_codebase_index(
     *,
     project_file: str | Path | None = None,
     index_projects: bool = False,
+    on_progress: ProgressCallback | None = None,
+    workers: int = 0,
 ) -> CodebaseIndex:
-    discovery = discover_delphi_project(root, project_file=project_file)
+    progress = _MonotonicProgress(on_progress)
+    discovery = discover_delphi_project(root, project_file=project_file, on_progress=progress)
     models: dict[str, SemanticModel] = {}
-    for source in discovery.source_files:
-        path = Path(source)
-        if path.suffix.casefold() not in {".pas", ".dpr", ".dpk", ".inc"}:
+    lines_processed = 0
+    symbols_discovered = 0
+    completed_outlines = 0
+    outline_tasks = tuple(
+        OutlineTask(ordinal, source, tuple(discovery.defines), False)
+        for ordinal, source in enumerate(discovery.source_files)
+        if Path(source).suffix.casefold() in {".pas", ".dpr", ".dpk", ".inc"}
+    )
+    outline_task_count = len(outline_tasks)
+
+    def on_outline_complete(result: OutlineResult) -> None:
+        nonlocal completed_outlines, lines_processed, symbols_discovered
+        completed_outlines += 1
+        if not result.read_error:
+            lines_processed += result.lines_processed
+            symbols_discovered += result.symbols_discovered
+        _emit_progress(
+            progress,
+            "outline",
+            result.source_path,
+            len(discovery.source_files),
+            completed_outlines,
+            outline_task_count,
+            "source unreadable" if result.read_error else "source outlined",
+            lines_processed=lines_processed,
+            symbols_discovered=symbols_discovered,
+        )
+
+    outline_batch = run_outline_tasks(
+        outline_tasks,
+        configured_workers=workers,
+        on_complete=on_outline_complete,
+    )
+    for result in outline_batch.results:
+        if result.read_error or result.model is None:
             continue
-        try:
-            text = read_source_text(path)
-        except (OSError, UnicodeError):
-            continue
-        models[source] = build_outline_semantic_model(outline_source(text), source)
+        models[result.source_path] = result.model
 
     symbol_index = SymbolIndex()
     for model in models.values():
         symbol_index.register_unit(model.unit_scope.name, model.unit_scope)
     for model in models.values():
         model.index = symbol_index
+
+    _emit_progress(
+        progress,
+        "relations",
+        str(Path(root).expanduser().resolve()),
+        len(discovery.source_files),
+        len(discovery.source_files),
+        len(discovery.source_files),
+        "semantic relations indexed",
+        lines_processed=lines_processed,
+        symbols_discovered=sum(len(items) for items in symbol_index.name_index.values()),
+    )
 
     project_results: dict[str, ProjectIndexResult] = {}
     if index_projects:
@@ -54,16 +99,91 @@ def build_codebase_index(
                 search_paths=discovery.search_paths,
                 include_paths=discovery.include_paths,
                 defines=discovery.defines,
+                on_progress=progress,
             )
             project_results[project] = indexer.index(project)
 
-    return CodebaseIndex(
+    index = CodebaseIndex(
         root=str(Path(root).expanduser().resolve()),
         discovery=discovery,
         models=models,
         symbol_index=symbol_index,
         project_results=project_results,
+        parallel_stats=outline_batch.stats,
     )
+    _emit_progress(
+        progress,
+        "complete",
+        str(Path(root).expanduser().resolve()),
+        len(discovery.source_files),
+        len(discovery.source_files),
+        len(discovery.source_files),
+        "codebase index complete",
+        lines_processed=lines_processed,
+        symbols_discovered=sum(len(items) for items in symbol_index.name_index.values()),
+    )
+    return index
+
+
+def _emit_progress(
+    callback: ProgressCallback | None,
+    phase: str,
+    path: str,
+    files_discovered: int,
+    files_completed: int,
+    files_total: int | None,
+    detail: str,
+    *,
+    lines_processed: int = 0,
+    symbols_discovered: int = 0,
+) -> None:
+    if callback is not None:
+        callback(
+            ProgressEvent(
+                phase,
+                "delphi",
+                path,
+                files_discovered,
+                files_completed,
+                files_total,
+                lines_processed,
+                symbols_discovered,
+                0,
+                detail,
+            )
+        )
+
+
+class _MonotonicProgress:
+    def __init__(self, callback: ProgressCallback | None) -> None:
+        self._callback = callback
+        self._files_discovered = 0
+        self._files_completed = 0
+        self._files_total: int | None = None
+        self._lines_processed = 0
+        self._symbols_discovered = 0
+        self._cached_files = 0
+
+    def __call__(self, event: ProgressEvent) -> None:
+        self._files_discovered = max(self._files_discovered, event.files_discovered)
+        self._files_completed = max(self._files_completed, event.files_completed)
+        if event.files_total is not None:
+            self._files_total = max(self._files_total or 0, event.files_total)
+        self._lines_processed = max(self._lines_processed, event.lines_processed)
+        self._symbols_discovered = max(self._symbols_discovered, event.symbols_discovered)
+        self._cached_files = max(self._cached_files, event.cached_files)
+        if self._callback is not None:
+            self._callback(
+                replace(
+                    event,
+                    files_discovered=self._files_discovered,
+                    files_completed=self._files_completed,
+                    files_total=self._files_total,
+                    lines_processed=self._lines_processed,
+                    symbols_discovered=self._symbols_discovered,
+                    cached_files=self._cached_files,
+                )
+            )
 
 
 def render_layer(
