@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
 import json
@@ -330,15 +330,16 @@ def paginate_items(
         )
 
     offset = decode_cursor(cursor, revision, fingerprint) if cursor else 0
-    all_items = list(items)
+    all_items = items if isinstance(items, Sequence) else tuple(items)
     if offset > len(all_items):
         raise AgentProtocolError('malformed_cursor', 'Cursor is malformed.')
 
     selected: list[object] = []
     selected_chars = 2  # Compact JSON brackets around the selected list.
-    for item in all_items[offset:]:
+    for index in range(offset, len(all_items)):
         if len(selected) >= max_items:
             break
+        item = all_items[index]
         try:
             serialized = json.dumps(
                 item,

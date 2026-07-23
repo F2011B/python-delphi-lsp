@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from bisect import bisect_left, bisect_right
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from heapq import heappop, heappush
 import hashlib
@@ -406,6 +406,8 @@ class _SymbolEntry:
     unit_id: str
     unit_name: str
     qualified_name: str
+    normalized_qualified_name: str
+    search_names: tuple[str, ...]
     owner: str
     signature: str
     ordinal: int
@@ -428,6 +430,22 @@ class _SymbolEntry:
         }
 
 
+class _SymbolCardSequence(Sequence[dict[str, object]]):
+    def __init__(self, entries: Sequence[_SymbolEntry]) -> None:
+        self._entries = entries
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def __getitem__(
+        self,
+        index: int | slice,
+    ) -> dict[str, object] | list[dict[str, object]]:
+        if isinstance(index, slice):
+            return [entry.card() for entry in self._entries[index]]
+        return self._entries[index].card()
+
+
 @dataclass(frozen=True, slots=True)
 class _Registry:
     project_id: str
@@ -437,6 +455,7 @@ class _Registry:
     sources: _SourceStore
     ranked_queries: OrderedDict[str, tuple[_SymbolEntry, ...]]
     static_retained_bytes: int
+    max_card_chars: int
 
 
 class AgentContext:
@@ -519,7 +538,7 @@ class AgentContext:
                 )
             )
         if self._relation_index is not None:
-            retained += max(4096, len(self._registry.entries) * 512) if self._registry else 4096
+            retained += self._relation_index.estimated_cache_bytes
         if self._metrics is not None:
             retained += 4096 + len(self._metrics.units) * 1024
         return retained
@@ -575,6 +594,13 @@ class AgentContext:
             registry.ranked_queries[parsed.query] = ranked
             while len(registry.ranked_queries) > _RANKED_QUERY_CACHE_SIZE:
                 registry.ranked_queries.popitem(last=False)
+            if parsed.max_chars >= registry.max_card_chars:
+                return self._response(
+                    parsed,
+                    revision,
+                    _SymbolCardSequence(ranked),
+                    items_prepared=True,
+                )
             items = [entry.card() for entry in ranked]
             return self._response(parsed, revision, items)
         if parsed.action == "inspect":
@@ -945,16 +971,17 @@ class AgentContext:
         self,
         request: AgentRequest,
         revision: str,
-        items: list[dict[str, object]],
+        items: Sequence[dict[str, object]],
         *,
         target_id: str = "",
+        items_prepared: bool = False,
     ) -> AgentResponse:
         fingerprint = _request_fingerprint(
             request,
             project_id=self._workspace.active_project_id,
             target_id=target_id or request.target_id,
         )
-        prepared = _prepare_items(items, request.max_chars)
+        prepared = items if items_prepared else _prepare_items(items, request.max_chars)
         page, selected = paginate_items(
             prepared,
             revision,
@@ -1057,6 +1084,11 @@ def _build_registry(
     entries: list[_SymbolEntry] = []
     for raw in ordered:
         ordinal = ordinals[id(raw)]
+        normalized_qualified_name, search_names = _normalized_search_names(
+            raw.symbol.name,
+            raw.qualified_name,
+            raw.unit_name,
+        )
         entries.append(
             _SymbolEntry(
                 symbol=raw.symbol,
@@ -1065,6 +1097,8 @@ def _build_registry(
                 unit_id=raw.unit_id,
                 unit_name=raw.unit_name,
                 qualified_name=raw.qualified_name,
+                normalized_qualified_name=normalized_qualified_name,
+                search_names=search_names,
                 owner=raw.owner,
                 signature=raw.signature,
                 ordinal=ordinal,
@@ -1111,6 +1145,8 @@ def _build_registry(
                 unit_id=entry.unit_id,
                 unit_name=entry.unit_name,
                 qualified_name=entry.qualified_name,
+                normalized_qualified_name=entry.normalized_qualified_name,
+                search_names=entry.search_names,
                 owner=entry.owner,
                 signature=entry.signature,
                 ordinal=entry.ordinal,
@@ -1132,6 +1168,10 @@ def _build_registry(
             sources=sources,
             ranked_queries=OrderedDict(),
             static_retained_bytes=static_retained_bytes,
+            max_card_chars=max(
+                (_symbol_card_json_upper_bound(entry) for entry in entries_tuple),
+                default=2,
+            ),
         ),
         outline_batch.stats,
     )
@@ -1155,6 +1195,9 @@ def _estimate_registry_bytes(
             + sys.getsizeof(entry.unit_id)
             + sys.getsizeof(entry.unit_name)
             + sys.getsizeof(entry.qualified_name)
+            + sys.getsizeof(entry.normalized_qualified_name)
+            + sys.getsizeof(entry.search_names)
+            + sum(sys.getsizeof(name) for name in entry.search_names)
             + sys.getsizeof(entry.owner)
             + sys.getsizeof(entry.signature)
             + sys.getsizeof(entry.target_id)
@@ -1162,6 +1205,26 @@ def _estimate_registry_bytes(
         )
     retained += len(entries) * 96
     return retained
+
+
+def _symbol_card_json_upper_bound(entry: _SymbolEntry) -> int:
+    strings = (
+        entry.target_id,
+        entry.unit_id,
+        entry.symbol.name,
+        entry.qualified_name,
+        entry.symbol.kind.value,
+        entry.path,
+        entry.symbol.visibility.value,
+        entry.owner,
+        entry.symbol.type_ref.display_name(),
+    )
+    numeric_chars = len(str(entry.symbol.decl_range.start_line)) + len(
+        str(entry.symbol.decl_range.start_col)
+    )
+    # JSON string escaping expands one input character to at most six characters.
+    # The fixed allowance covers keys, quotes, separators, brackets, and numbers.
+    return 512 + 6 * sum(len(value) for value in strings) + numeric_chars
 
 
 def _stable_path_component(value: str) -> str:
@@ -2453,21 +2516,13 @@ def _ranked_entries(entries: tuple[_SymbolEntry, ...], query: str) -> list[_Symb
     normalized_query = _normalized(query.strip())
     ranked: list[tuple[int, tuple[object, ...], _SymbolEntry]] = []
     for entry in entries:
-        names = {
-            _normalized(entry.symbol.name),
-            _normalized(entry.qualified_name),
-        }
-        prefix = f"{_normalized(entry.unit_name)}."
-        normalized_qualified = _normalized(entry.qualified_name)
-        if normalized_qualified.startswith(prefix):
-            names.add(normalized_qualified[len(prefix):])
         if not normalized_query:
             rank = 3
-        elif any(name == normalized_query for name in names):
+        elif any(name == normalized_query for name in entry.search_names):
             rank = 0
-        elif any(name.startswith(normalized_query) for name in names):
+        elif any(name.startswith(normalized_query) for name in entry.search_names):
             rank = 1
-        elif any(normalized_query in name for name in names):
+        elif any(normalized_query in name for name in entry.search_names):
             rank = 2
         else:
             continue
@@ -2500,7 +2555,7 @@ def _raw_sort_key(raw: _RawSymbol) -> tuple[object, ...]:
 
 def _entry_sort_key(entry: _SymbolEntry) -> tuple[object, ...]:
     return (
-        _normalized(entry.qualified_name),
+        entry.normalized_qualified_name,
         entry.symbol.kind.value.casefold(),
         entry.path.casefold(),
         entry.path,
@@ -2513,6 +2568,24 @@ def _entry_sort_key(entry: _SymbolEntry) -> tuple[object, ...]:
 
 def _normalized(value: str) -> str:
     return unicodedata.normalize("NFC", value).casefold()
+
+
+def _normalized_search_names(
+    name: str,
+    qualified_name: str,
+    unit_name: str,
+) -> tuple[str, tuple[str, ...]]:
+    normalized_name = _normalized(name)
+    normalized_qualified = _normalized(qualified_name)
+    prefix = f"{_normalized(unit_name)}."
+    relative_name = (
+        normalized_qualified[len(prefix):]
+        if normalized_qualified.startswith(prefix)
+        else normalized_qualified
+    )
+    return normalized_qualified, tuple(
+        dict.fromkeys((normalized_name, normalized_qualified, relative_name))
+    )
 
 
 def _request_fingerprint(
@@ -2535,7 +2608,10 @@ def _request_fingerprint(
     return f"agent_request_v2_{hashlib.sha256(encoded).hexdigest()}"
 
 
-def _prepare_items(items: list[dict[str, object]], max_chars: int) -> list[dict[str, object]]:
+def _prepare_items(
+    items: Sequence[dict[str, object]],
+    max_chars: int,
+) -> list[dict[str, object]]:
     prepared: list[dict[str, object]] = []
     for item in items:
         if len(_compact_json(item)) + 2 <= max_chars:

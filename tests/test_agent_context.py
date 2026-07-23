@@ -249,6 +249,80 @@ def test_repeated_find_reuses_ranked_registry_entries(
     assert calls == 1
 
 
+def test_find_reuses_precomputed_normalized_symbol_names(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_source(
+        tmp_path / "NormalizedFind.pas",
+        """
+        unit NormalizedFind;
+        interface
+        type
+          TAlpha = class
+          end;
+        implementation
+        end.
+        """,
+    )
+    context = AgentContext.open(tmp_path)
+    context.handle({"action": "find", "query": "__build_registry__"})
+    calls = 0
+    real_normalized = agent_context_module._normalized
+
+    def counted_normalized(value: str) -> str:
+        nonlocal calls
+        calls += 1
+        return real_normalized(value)
+
+    monkeypatch.setattr(agent_context_module, "_normalized", counted_normalized)
+
+    response = context.handle({"action": "find", "query": "talpha"})
+
+    assert card_named(response, "TAlpha")["qualified_name"] == "NormalizedFind.TAlpha"
+    assert calls == 1
+
+
+def test_find_materializes_only_the_selected_symbol_cards(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    declarations = "\n".join(
+        f"  TGenerated{index:04d} = class end;"
+        for index in range(200)
+    )
+    write_source(
+        tmp_path / "LazyCards.pas",
+        f"""
+        unit LazyCards;
+        interface
+        type
+        {declarations}
+        implementation
+        end.
+        """,
+    )
+    context = AgentContext.open(tmp_path)
+    context.handle({"action": "find", "query": "__build_registry__"})
+    calls = 0
+    real_card = agent_context_module._SymbolEntry.card
+
+    def counted_card(entry: object) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return real_card(entry)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(agent_context_module._SymbolEntry, "card", counted_card)
+
+    response = context.handle(
+        {"action": "find", "query": "", "max_items": 2, "max_chars": 12_000}
+    )
+
+    assert response.page.returned == 2
+    assert response.page.total > response.page.returned
+    assert calls == response.page.returned
+
+
 def test_request_refreshes_the_selected_workspace_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -1,4 +1,5 @@
 import base64
+from collections.abc import Sequence
 import importlib
 import json
 import unicodedata
@@ -29,6 +30,19 @@ class OneShotItems:
             raise AssertionError('One-shot iterable was consumed more than once.')
         self.iterations += 1
         yield from self.items
+
+
+class TrackingSequence(Sequence[object]):
+    def __init__(self, items: list[object]) -> None:
+        self.items = items
+        self.accessed: list[int] = []
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __getitem__(self, index: int):
+        self.accessed.append(index)
+        return self.items[index]
 
 
 def test_schema_and_supported_values_are_versioned_and_deterministic() -> None:
@@ -504,6 +518,23 @@ def test_paginate_items_limits_count_and_continues_without_dropping_items() -> N
         'next_cursor': '',
     }
     assert first_items + second_items == items
+
+
+def test_paginate_items_does_not_materialize_an_indexable_sequence() -> None:
+    protocol = _protocol()
+    items = TrackingSequence([{"id": index} for index in range(10_000)])
+
+    page, selected = protocol.paginate_items(
+        items,
+        revision="revision-2",
+        fingerprint="find:lazy-sequence",
+        max_items=2,
+        max_chars=1000,
+    )
+
+    assert selected == [{"id": 0}, {"id": 1}]
+    assert page.total == 10_000
+    assert items.accessed == [0, 1]
 
 
 def test_paginate_items_uses_compact_json_character_budget() -> None:

@@ -4,6 +4,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 import re
+from typing import TypeVar
 import unicodedata
 
 from .agent_protocol import AgentProtocolError
@@ -47,6 +48,7 @@ _TYPE_KINDS = frozenset(
     }
 )
 _GroupKey = tuple[str, str, str, str]
+_AdjacencyValue = TypeVar("_AdjacencyValue")
 
 
 @dataclass(frozen=True)
@@ -147,7 +149,39 @@ class ProjectRelationIndex:
             self._build_graph(self._semantics)
             self._add_contains_edges(self._semantics)
             self._add_semantic_problems(self._semantics)
+        self._index_graph()
         self._problems = _dedupe_mappings(self._problems)
+
+    @property
+    def estimated_cache_bytes(self) -> int:
+        adjacency_maps = (
+            self._references_by_target,
+            self._calls_by_target,
+            self._calls_by_owner,
+            self._unit_edges_by_source,
+            self._unit_edges_by_target,
+            self._inherits_by_source,
+            self._implements_by_source,
+        )
+        adjacency_groups = sum(len(groups) for groups in adjacency_maps)
+        adjacency_slots = sum(
+            len(values)
+            for groups in adjacency_maps
+            for values in groups.values()
+        )
+        edge_bytes = (
+            len(self._references) * 384
+            + len(self._unit_edges) * 320
+            + (len(self._inherits) + len(self._implements)) * 288
+        )
+        return (
+            4096
+            + len(self._targets) * 512
+            + edge_bytes
+            + adjacency_groups * 192
+            + adjacency_slots * 8
+            + len(self._problems) * 512
+        )
 
     def trace(self, target_id: str, relation: str) -> list[dict[str, object]]:
         target = self._targets.get(target_id)
@@ -159,46 +193,38 @@ class ProjectRelationIndex:
         if relation == "references":
             items = [
                 self._relation_item(relation, record.owner_group or record.target_group, record.evidence)
-                for record in self._references
-                if record.target_group == group
+                for record in self._references_by_target.get(group, ())
             ]
         elif relation == "callers":
             items = [
                 self._relation_item(relation, record.owner_group, record.evidence)
-                for record in self._references
-                if record.kind == ReferenceKind.CALL
-                and record.target_group == group
-                and record.owner_group is not None
+                for record in self._calls_by_target.get(group, ())
+                if record.owner_group is not None
             ]
         elif relation == "callees":
             items = [
                 self._relation_item(relation, record.target_group, record.evidence)
-                for record in self._references
-                if record.kind == ReferenceKind.CALL and record.owner_group == group
+                for record in self._calls_by_owner.get(group, ())
             ]
         elif relation == "uses":
             items = [
                 self._relation_item(relation, edge.target_group, edge.evidence)
-                for edge in self._unit_edges
-                if edge.source_group == group
+                for edge in self._unit_edges_by_source.get(group, ())
             ]
         elif relation == "used_by":
             items = [
                 self._relation_item(relation, edge.source_group, edge.evidence)
-                for edge in self._unit_edges
-                if edge.target_group == group
+                for edge in self._unit_edges_by_target.get(group, ())
             ]
         elif relation == "inherits":
             items = [
                 self._relation_item(relation, edge.target_group, edge.evidence)
-                for edge in self._inherits
-                if edge.source_group == group
+                for edge in self._inherits_by_source.get(group, ())
             ]
         elif relation == "implements":
             items = [
                 self._relation_item(relation, edge.target_group, edge.evidence)
-                for edge in self._implements
-                if edge.source_group == group
+                for edge in self._implements_by_source.get(group, ())
             ]
         else:  # AgentRequest validation normally rejects this first.
             raise AgentProtocolError("invalid_relation", f"Unsupported relation value: {relation!r}.")
@@ -210,6 +236,39 @@ class ProjectRelationIndex:
         result.extend(relations)
         result.extend(self._problems)
         return result
+
+    def _index_graph(self) -> None:
+        references_by_target: dict[_GroupKey, list[_ReferenceRecord]] = {}
+        calls_by_target: dict[_GroupKey, list[_ReferenceRecord]] = {}
+        calls_by_owner: dict[_GroupKey, list[_ReferenceRecord]] = {}
+        for record in self._references:
+            references_by_target.setdefault(record.target_group, []).append(record)
+            if record.kind != ReferenceKind.CALL:
+                continue
+            calls_by_target.setdefault(record.target_group, []).append(record)
+            if record.owner_group is not None:
+                calls_by_owner.setdefault(record.owner_group, []).append(record)
+        self._references_by_target = _freeze_adjacency(references_by_target)
+        self._calls_by_target = _freeze_adjacency(calls_by_target)
+        self._calls_by_owner = _freeze_adjacency(calls_by_owner)
+
+        unit_edges_by_source: dict[_GroupKey, list[_UnitEdge]] = {}
+        unit_edges_by_target: dict[_GroupKey, list[_UnitEdge]] = {}
+        for edge in self._unit_edges:
+            unit_edges_by_source.setdefault(edge.source_group, []).append(edge)
+            unit_edges_by_target.setdefault(edge.target_group, []).append(edge)
+        self._unit_edges_by_source = _freeze_adjacency(unit_edges_by_source)
+        self._unit_edges_by_target = _freeze_adjacency(unit_edges_by_target)
+
+        inherits_by_source: dict[_GroupKey, list[_TypeEdge]] = {}
+        for edge in self._inherits:
+            inherits_by_source.setdefault(edge.source_group, []).append(edge)
+        self._inherits_by_source = _freeze_adjacency(inherits_by_source)
+
+        implements_by_source: dict[_GroupKey, list[_TypeEdge]] = {}
+        for edge in self._implements:
+            implements_by_source.setdefault(edge.source_group, []).append(edge)
+        self._implements_by_source = _freeze_adjacency(implements_by_source)
 
     def _build_graph(self, semantics: WorkspaceSemanticResult) -> None:
         for model in semantics.models.values():
@@ -845,6 +904,12 @@ def _relation_sort_key(item: Mapping[str, object]) -> tuple[object, ...]:
         str(evidence_mapping.get("kind", "")),
         str(item.get("target_id", "")),
     )
+
+
+def _freeze_adjacency(
+    groups: Mapping[_GroupKey, list[_AdjacencyValue]],
+) -> dict[_GroupKey, tuple[_AdjacencyValue, ...]]:
+    return {key: tuple(values) for key, values in groups.items()}
 
 
 def _dedupe_mappings(items: Iterable[Mapping[str, object]]) -> list[dict[str, object]]:

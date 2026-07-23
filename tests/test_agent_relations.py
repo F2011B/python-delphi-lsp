@@ -133,6 +133,56 @@ def test_true_references_callers_and_callees_ignore_text_and_bare_values(tmp_pat
     assert metadata_item(callers)["completeness"] == "sound_partial"
 
 
+def test_repeated_reference_traces_use_adjacency_indexes(tmp_path: Path) -> None:
+    write_source(
+        tmp_path / "IndexedRelations.pas",
+        """
+        unit IndexedRelations;
+        interface
+        procedure Target;
+        procedure Caller;
+        implementation
+        procedure Target;
+        begin
+        end;
+        procedure Caller;
+        begin
+          Target();
+        end;
+        end.
+        """,
+    )
+    context = AgentContext.open(tmp_path)
+    target = find_cards(context, "Target")[0]
+    caller = find_cards(context, "Caller")[-1]
+    expected_callers = context.handle(
+        {"action": "trace", "relation": "callers", "target_id": target["target_id"]}
+    )
+    expected_callees = context.handle(
+        {"action": "trace", "relation": "callees", "target_id": caller["target_id"]}
+    )
+    relation_index = context._relation_index
+    assert relation_index is not None
+    assert relation_index.estimated_cache_bytes >= 4096
+    assert context.estimated_cache_bytes >= relation_index.estimated_cache_bytes
+
+    class ScanGuard(list[object]):
+        def __iter__(self):
+            raise AssertionError("trace scanned the complete reference list")
+
+    relation_index._references = ScanGuard(relation_index._references)
+
+    callers = context.handle(
+        {"action": "trace", "relation": "callers", "target_id": target["target_id"]}
+    )
+    callees = context.handle(
+        {"action": "trace", "relation": "callees", "target_id": caller["target_id"]}
+    )
+
+    assert result_items(callers) == result_items(expected_callers)
+    assert result_items(callees) == result_items(expected_callees)
+
+
 def test_call_ownership_stops_at_unmapped_routines_and_program_bodies(tmp_path: Path) -> None:
     write_source(
         tmp_path / "Main.dpr",
