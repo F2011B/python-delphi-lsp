@@ -10,8 +10,30 @@ from pathlib import Path
 
 import pytest
 
+
+ROOT = Path(__file__).resolve().parents[1]
+
 from delphi_lsp.agent_layers import build_codebase_index, render_layer
 from delphi_lsp.project_indexer import ProjectIndexer
+
+
+def test_readme_documents_opencode_history_and_query_ergonomics() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "1.1.0" in readme
+    assert "1.1.1" in readme
+    assert "view per call" in readme
+    assert "2.0.0" in readme
+    assert "persistent session/root worker" in readme
+    assert "OpenCode worker stays separate from CLI daemon" in readme
+    assert "current plugin behavior is unchanged" in readme
+    assert "find TCustomer" in readme
+    assert "focus <target_id>" in readme
+    assert "inspect" in readme
+    assert "trace TCustomer" in readme
+    assert "metrics" in readme
+    assert "cache status --root PATH --format json" in readme
+    assert "JSON status" in readme
 
 
 def write_text(path: Path, text: str) -> None:

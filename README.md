@@ -133,14 +133,65 @@ problems; paths are not guessed.
 `delphi-lsp-agent` has these subcommands and options:
 
 ```text
+delphi-lsp-agent cache start --root PATH [--project-file FILE] [--max-memory 512M]
+                                  [--idle-timeout 1800]
+delphi-lsp-agent cache status --root PATH [--format text|json]
+delphi-lsp-agent cache stop --root PATH
 delphi-lsp-agent view --root PATH [--project-file FILE] --layer LAYER
                       [--query TEXT] [--format markdown|json] [--deep-projects]
 delphi-lsp-agent index --root PATH [--project-file FILE] [--out FILE]
+delphi-lsp-agent query --root PATH ACTION [VALUE]
+                      [--project-id FILE] [--detail summary|declaration|members|context|body|implementations]
+                      [--relation references|callers|callees|uses|used_by|inherits|implements|sound_partial]
+                      [--cursor TEXT] [--max-items INT] [--max-chars INT]
 delphi-lsp-agent skill install [--target PATH] [--force]
 delphi-lsp-agent opencode install [--target PATH] [--python PYTHON]
                                   [--force] [--write-agent|--write-config]
 delphi-lsp-agent worker --root PATH [--project-file FILE]
 ```
+
+The `cache` commands manage one daemon per canonical root. Use these:
+
+```bash
+delphi-lsp-agent cache start --root PATH
+delphi-lsp-agent cache status --root PATH
+delphi-lsp-agent cache stop --root PATH
+```
+
+`cache start` emits clean Protocol v2 JSON on stdout and prints runtime warnings on stderr.
+stdout clean Protocol v2 JSON payloads are expected for every cache/query response.
+warnings are emitted on stderr for all cache commands.
+`cache status --format json` prints JSON status to stdout and the same warning stream on stderr.
+
+```bash
+delphi-lsp-agent query --root PATH find TCustomer
+delphi-lsp-agent query --root PATH focus <target_id>
+delphi-lsp-agent query --root PATH inspect
+delphi-lsp-agent query --root PATH trace TCustomer
+delphi-lsp-agent query --root PATH metrics
+delphi-lsp-agent cache status --root PATH --format json
+```
+
+The cache daemon prewarmed navigation cache at startup so first `find` requests are
+fast. The cache retained-cache budget is `512 MiB` by default and tracks retained
+cache usage only, not a hard RSS/parse peak. warning at or above 80 percent
+is emitted on stderr.
+
+Eviction is ordered: auxiliary caches evicted first, navigation caches next.
+The eviction flow is: evict auxiliary caches, then navigation caches.
+If compaction removes navigable data, the daemon compact rebuilds navigation state
+while preserving focus state for the next request.
+
+The daemon tracks a 30-minute idle timeout; idle state shows in JSON status (`cache status`).
+`source revision` changes on source edits and invalidate reused request caches.
+Workspace state appears in status as `requests`, `warm_hits`, `rebuilds`, `invalidations`,
+`evictions`, and `cache_state`.
+
+Metadata is stored in `.delphi-lsp/agent-cache/daemon.json` with owner-only token and
+permissions (`daemon.json` mode 600 and parent 700). Do not copy or share this token
+outside the root workspace.
+do not copy or share this token outside process boundaries.
+do not share the token anywhere.
 
 `view --layer` accepts `overview`, `projects`, `units`, `unit`,
 `symbols`, `symbol`, `implementation`, `references`, `problems`, and
@@ -209,6 +260,11 @@ file remains entirely user-owned. The deprecated `--write-config` and
 The plugin maintains one worker per session/root, reusing focus and indexes.
 During compaction it restores the focus and summary into the new context.
 Transport failure, session deletion, and plugin disposal clean up the worker.
+
+OpenCode history: 1.1.0 and 1.1.1 used a spawned view per call model.
+Persistent session/root worker support first shipped in 2.0.0.
+This is the same persistent session/root worker boundary.
+The OpenCode worker stays separate from CLI daemon, and current plugin behavior is unchanged.
 
 A generated OpenCode agent starts with this Markdown frontmatter:
 
