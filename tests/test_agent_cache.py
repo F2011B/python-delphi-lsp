@@ -30,6 +30,16 @@ def test_estimate_deep_size_handles_cycles_dataclasses_and_slots() -> None:
     assert estimate_deep_size(value) > 0
 
 
+def test_estimate_deep_size_counts_opaque_objects_without_introspection() -> None:
+    class Opaque:
+        def __getattribute__(self, name: str) -> object:
+            if name == "__dict__":
+                raise RuntimeError("opaque object")
+            return super().__getattribute__(name)
+
+    assert estimate_deep_size(Opaque()) > 0
+
+
 def test_navigation_cache_eviction_preserves_selection_and_rebuilds(tmp_path: Path) -> None:
     write_source(
         tmp_path / "Main.dpr",

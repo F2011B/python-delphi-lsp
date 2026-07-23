@@ -4,7 +4,6 @@ from collections.abc import Collection, Mapping
 from dataclasses import fields, is_dataclass
 import sys
 from types import ModuleType
-from typing import Any
 
 
 def estimate_deep_size(value: object) -> int:
@@ -42,24 +41,29 @@ def _children(value: object) -> tuple[object, ...]:
     elif isinstance(value, Collection) and not isinstance(value, (str, bytes, bytearray)):
         children.extend(value)
 
-    if is_dataclass(value) and not isinstance(value, type):
-        for field in fields(value):
+    is_dataclass_instance = is_dataclass(value) and not isinstance(value, type)
+    if is_dataclass_instance:
+        try:
+            dataclass_fields = fields(value)
+        except Exception:
+            dataclass_fields = ()
+        for field in dataclass_fields:
             try:
                 children.append(getattr(value, field.name))
-            except (AttributeError, TypeError, ValueError):
+            except Exception:
                 continue
-
-    try:
-        instance_values: Any = vars(value)
-    except (TypeError, ValueError):
-        instance_values = None
-    if isinstance(instance_values, Mapping):
-        children.extend(instance_values.values())
+    else:
+        try:
+            instance_values = vars(value)
+        except Exception:
+            instance_values = None
+        if isinstance(instance_values, Mapping):
+            children.extend(instance_values.values())
 
     for slot in _slot_names(type(value)):
         try:
             children.append(getattr(value, slot))
-        except (AttributeError, TypeError, ValueError):
+        except Exception:
             continue
     return tuple(children)
 
@@ -67,11 +71,14 @@ def _children(value: object) -> tuple[object, ...]:
 def _slot_names(value_type: type[object]) -> tuple[str, ...]:
     names: list[str] = []
     for base in value_type.__mro__:
-        slots = getattr(base, "__slots__", ())
+        try:
+            slots = getattr(base, "__slots__", ())
+        except Exception:
+            continue
         if isinstance(slots, str):
             slots = (slots,)
         try:
             names.extend(name for name in slots if isinstance(name, str))
-        except TypeError:
+        except Exception:
             continue
     return tuple(names)
