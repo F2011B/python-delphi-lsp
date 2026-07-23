@@ -363,10 +363,14 @@ def _remove_incompatible_metadata_if_stale(root: str | Path) -> None:
         path.unlink()
 
 
+def _metadata_is_owned(metadata: CacheMetadata) -> bool:
+    current = _read_metadata(metadata.root)
+    return current is not None and current.pid == metadata.pid and hmac.compare_digest(current.token, metadata.token)
+
+
 def _remove_metadata_if_owned(metadata: CacheMetadata) -> None:
     path = _safe_metadata_path(metadata.root)
-    current = _read_metadata(metadata.root)
-    if current is not None and current.pid == metadata.pid and hmac.compare_digest(current.token, metadata.token):
+    if _metadata_is_owned(metadata):
         with contextlib.suppress(FileNotFoundError):
             path.unlink()
 
@@ -814,12 +818,18 @@ def stop_cache(root: str | Path) -> None:
         pass
     deadline = time.monotonic() + 3
     stopped = False
-    while _pid_alive(metadata.pid) and time.monotonic() < deadline:
+    while time.monotonic() < deadline:
+        if not _metadata_is_owned(metadata):
+            stopped = True
+            break
         if _reap_child_if_exited(metadata.pid):
             stopped = True
             break
+        if not _pid_alive(metadata.pid):
+            stopped = True
+            break
         time.sleep(0.05)
-    if not stopped and _pid_alive(metadata.pid):
+    if not stopped and _metadata_is_owned(metadata) and _pid_alive(metadata.pid):
         raise CacheClientError("stop_failed", "Cache daemon did not stop.")
     _remove_metadata_if_owned(metadata)
 

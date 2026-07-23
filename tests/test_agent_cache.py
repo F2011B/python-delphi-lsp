@@ -388,6 +388,41 @@ def test_child_reaping_is_portable_without_posix_waitpid(
     assert agent_cache._reap_child_if_exited(424242) is False
 
 
+def test_stop_accepts_owned_metadata_removal_when_pid_probe_stays_alive(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from delphi_lsp import agent_cache
+
+    metadata = agent_cache.CacheMetadata(
+        agent_cache.DAEMON_SCHEMA,
+        str(tmp_path.resolve()),
+        424242,
+        4242,
+        "x" * 32,
+        "test",
+        "",
+        1024 * 1024,
+        0,
+        10,
+        time.time(),
+    )
+    metadata_reads = iter((metadata, None, None))
+    monotonic_reads = iter((0.0, 1.0, 4.0))
+    monkeypatch.setattr(agent_cache, "_read_metadata", lambda _root: next(metadata_reads, None))
+    monkeypatch.setattr(agent_cache, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(agent_cache, "_reap_child_if_exited", lambda _pid: False)
+    monkeypatch.setattr(
+        agent_cache,
+        "_client_exchange",
+        lambda _metadata, _request: agent_cache.CacheClientResponse({}),
+    )
+    monkeypatch.setattr(agent_cache.time, "monotonic", lambda: next(monotonic_reads))
+    monkeypatch.setattr(agent_cache.time, "sleep", lambda _seconds: None)
+
+    agent_cache.stop_cache(tmp_path)
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX metadata permissions")
 def test_metadata_reader_rejects_symlink_and_unsafe_permissions(tmp_path: Path) -> None:
     from delphi_lsp.agent_cache import CacheClientError, cache_metadata_path, query_cache, start_cache, stop_cache
