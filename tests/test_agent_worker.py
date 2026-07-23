@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from delphi_lsp import agent_cli
+from delphi_lsp.agent_cache import DEFAULT_MAX_MEMORY_BYTES
 from delphi_lsp.agent_protocol import AgentProtocolError
 
 
@@ -61,6 +62,110 @@ def test_parser_adds_worker_without_changing_legacy_commands() -> None:
     assert view.command == "view"
     assert view.layer == "overview"
     assert metrics.layer == "metrics"
+
+
+def test_parser_adds_cache_lifecycle_and_ergonomic_query_commands() -> None:
+    parser = agent_cli.build_parser()
+
+    start = parser.parse_args(["cache", "start"])
+    status = parser.parse_args(["cache", "status", "--root", "workspace", "--format", "json"])
+    stop = parser.parse_args(["cache", "stop", "--root", "workspace"])
+    serve = parser.parse_args(["cache", "serve", "--root", "workspace", "--max-memory", "2M"])
+    query = parser.parse_args(
+        ["query", "--root", "workspace", "find", "TCustomer", "--project", "Main.dpr", "--max-items", "4"]
+    )
+
+    assert start.cache_command == "start"
+    assert start.root == Path(".")
+    assert start.max_memory == DEFAULT_MAX_MEMORY_BYTES
+    assert start.idle_timeout == 1800
+    assert status.format == "json"
+    assert stop.root == Path("workspace")
+    assert serve.max_memory == 2 * 1024**2
+    assert query.action == "find"
+    assert query.value == "TCustomer"
+    assert query.project == "Main.dpr"
+    assert query.max_items == 4
+
+
+def test_cache_cli_lifecycle_query_and_warning_streams(tmp_path: Path) -> None:
+    _write_source(
+        tmp_path / "Customer.pas",
+        """unit Customer;
+interface
+type
+  TCustomer = class
+  end;
+implementation
+end.
+""",
+    )
+    start = subprocess.run(
+        [sys.executable, "-m", "delphi_lsp.agent_cli", "cache", "start", "--root", str(tmp_path), "--max-memory", "1K"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    try:
+        started = json.loads(start.stdout)
+        assert start.returncode == 0
+        assert started["pid"] > 0
+        assert "Warning:" in start.stderr
+
+        query = subprocess.run(
+            [sys.executable, "-m", "delphi_lsp.agent_cli", "query", "--root", str(tmp_path), "find", "TCustomer"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        response = json.loads(query.stdout)
+        assert query.returncode == 0
+        assert any(item["name"] == "TCustomer" for item in response["result"])
+        assert "Warning:" in query.stderr
+
+        status = subprocess.run(
+            [sys.executable, "-m", "delphi_lsp.agent_cli", "cache", "status", "--root", str(tmp_path), "--format", "json"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        reported = json.loads(status.stdout)
+        assert status.returncode == 0
+        assert reported["pid"] == started["pid"]
+        assert reported["warning_threshold_percent"] == 80
+        assert "Warning:" in status.stderr
+
+        text_status = subprocess.run(
+            [sys.executable, "-m", "delphi_lsp.agent_cli", "cache", "status", "--root", str(tmp_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert text_status.returncode == 0
+        assert text_status.stdout.startswith(f"running pid={started['pid']} state=")
+        assert "Warning:" in text_status.stderr
+    finally:
+        stop = subprocess.run(
+            [sys.executable, "-m", "delphi_lsp.agent_cli", "cache", "stop", "--root", str(tmp_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    assert stop.returncode == 0
+    assert json.loads(stop.stdout) == {"stopped": True}
+
+
+def test_query_does_not_start_a_missing_cache_and_sanitizes_errors(tmp_path: Path) -> None:
+    completed = subprocess.run(
+        [sys.executable, "-m", "delphi_lsp.agent_cli", "query", "--root", str(tmp_path), "find", "TCustomer"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert completed.stdout == ""
+    assert completed.stderr == "cache_error:unavailable: Cache daemon is unavailable.\n"
 
 
 def test_worker_preserves_focus_across_requests_in_one_process(tmp_path: Path) -> None:
