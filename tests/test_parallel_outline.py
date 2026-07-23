@@ -38,6 +38,12 @@ def test_auto_workers_respect_cpu_tasks_and_cache_budget() -> None:
     assert resolve_worker_count(7, task_count=3, cpu_count=2, memory_budget_bytes=1) == 3
 
 
+def test_resolve_worker_count_rejects_programmatic_values_outside_supported_range() -> None:
+    for configured_workers in (-1, 33):
+        with pytest.raises(ValueError, match="workers"):
+            resolve_worker_count(configured_workers, task_count=2)
+
+
 def test_serial_outline_task_returns_model_text_and_counts(tmp_path: Path) -> None:
     source = tmp_path / "One.pas"
     _write_source(source, "One")
@@ -118,12 +124,7 @@ def test_parallel_spawn_results_are_ordinal_sorted(tmp_path: Path) -> None:
 class _PoolStartupFailure:
     def __init__(self, *args: object, **kwargs: object) -> None:
         del args, kwargs
-
-    def __enter__(self) -> object:
         raise OSError("pool unavailable")
-
-    def __exit__(self, *args: object) -> None:
-        return None
 
 
 def test_auto_mode_falls_back_to_serial_before_any_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -199,6 +200,9 @@ def test_parallel_callback_failure_cancels_pending_futures_and_propagates(
         def __exit__(self, *args: object) -> None:
             return None
 
+        def shutdown(self, *, wait: bool, cancel_futures: bool) -> None:
+            shutdown_calls.append((wait, cancel_futures))
+
         def submit(self, *_: object) -> FakeFuture:
             future = FakeFuture(result)
             futures.append(future)
@@ -206,6 +210,7 @@ def test_parallel_callback_failure_cancels_pending_futures_and_propagates(
 
     monkeypatch.setattr(parallel_outline, "ProcessPoolExecutor", FakeExecutor)
     monkeypatch.setattr(parallel_outline, "as_completed", lambda submitted: list(submitted))
+    shutdown_calls: list[tuple[bool, bool]] = []
 
     def fail_callback(_: OutlineResult) -> None:
         raise RuntimeError("callback failed")
@@ -219,3 +224,41 @@ def test_parallel_callback_failure_cancels_pending_futures_and_propagates(
 
     assert len(futures) == 2
     assert all(future.cancelled for future in futures)
+    assert shutdown_calls == [(False, True)]
+
+
+def test_successful_parallel_batch_waits_for_executor_shutdown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "One.pas"
+    _write_source(source, "One")
+    result = OutlineResult(0, str(source), "", None, 0, 0)
+    shutdown_calls: list[tuple[bool, bool]] = []
+
+    class FakeFuture:
+        def result(self) -> OutlineResult:
+            return result
+
+        def cancel(self) -> None:
+            raise AssertionError("successful futures must not be cancelled")
+
+    class FakeExecutor:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        def submit(self, *_: object) -> FakeFuture:
+            return FakeFuture()
+
+        def shutdown(self, *, wait: bool, cancel_futures: bool) -> None:
+            shutdown_calls.append((wait, cancel_futures))
+
+    monkeypatch.setattr(parallel_outline, "ProcessPoolExecutor", FakeExecutor)
+    monkeypatch.setattr(parallel_outline, "as_completed", lambda submitted: list(submitted))
+
+    batch = run_outline_tasks(
+        [OutlineTask(0, str(source), (), False), OutlineTask(1, str(source), (), False)],
+        configured_workers=2,
+    )
+
+    assert batch.stats.files_completed == 2
+    assert shutdown_calls == [(True, False)]

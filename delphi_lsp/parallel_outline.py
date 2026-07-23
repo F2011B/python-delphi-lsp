@@ -75,6 +75,8 @@ def resolve_worker_count(
     cpu_count: int | None = None,
     memory_budget_bytes: int | None = None,
 ) -> int:
+    if not 0 <= configured_workers <= 32:
+        raise ValueError("workers must be 'auto' or an integer from 1 through 32")
     if task_count <= 0:
         return 0
     if configured_workers:
@@ -137,24 +139,30 @@ def run_outline_tasks(
 
     accepted: list[OutlineResult] = []
     futures: dict[object, OutlineTask] = {}
+    executor: ProcessPoolExecutor | None = None
     try:
         context = multiprocessing.get_context("spawn")
-        with ProcessPoolExecutor(max_workers=effective_workers, mp_context=context) as executor:
-            futures = {executor.submit(_parse_outline_task, task): task for task in task_list}
-            for future in as_completed(futures):
-                result = future.result()
-                accepted.append(result)
-                if on_complete is not None:
-                    on_complete(result)
+        executor = ProcessPoolExecutor(max_workers=effective_workers, mp_context=context)
+        futures = {executor.submit(_parse_outline_task, task): task for task in task_list}
+        for future in as_completed(futures):
+            result = future.result()
+            accepted.append(result)
+            if on_complete is not None:
+                on_complete(result)
     except (OSError, BrokenProcessPool) as error:
         _cancel_futures(futures)
+        _shutdown_failed_executor(executor)
         if configured_workers == 0 and not accepted:
             results = _run_serial(task_list, on_complete)
             return _batch(configured_workers, 1, results, started, fallbacks=1)
         raise ParallelOutlineError(f"parallel outline execution failed: {error}") from error
     except BaseException:
         _cancel_futures(futures)
+        _shutdown_failed_executor(executor)
         raise
+
+    assert executor is not None
+    executor.shutdown(wait=True, cancel_futures=False)
 
     return _batch(configured_workers, effective_workers, accepted, started, fallbacks=0)
 
@@ -174,6 +182,15 @@ def _run_serial(
 def _cancel_futures(futures: dict[object, OutlineTask]) -> None:
     for future in futures:
         future.cancel()
+
+
+def _shutdown_failed_executor(executor: ProcessPoolExecutor | None) -> None:
+    if executor is None:
+        return
+    try:
+        executor.shutdown(wait=False, cancel_futures=True)
+    except BaseException:
+        pass
 
 
 def _batch(
