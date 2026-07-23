@@ -6,6 +6,7 @@ import pytest
 
 import delphi_lsp.parallel_outline as parallel_outline
 from delphi_lsp.parallel_outline import (
+    OutlineResult,
     OutlineTask,
     ParallelOutlineError,
     parse_worker_setting,
@@ -50,6 +51,54 @@ def test_serial_outline_task_returns_model_text_and_counts(tmp_path: Path) -> No
     assert batch.results[0].model.unit_scope.name == "One"
     assert batch.results[0].lines_processed == 5
     assert batch.results[0].symbols_discovered >= 1
+
+
+def test_missing_source_returns_read_error_with_os_detail(tmp_path: Path) -> None:
+    missing = tmp_path / "Missing.pas"
+
+    batch = run_outline_tasks([OutlineTask(0, str(missing), (), False)], configured_workers=1)
+
+    result = batch.results[0]
+    assert result.model is None
+    assert result.read_error
+    assert "No such file" in result.read_error
+
+
+def test_parser_failure_is_a_parallel_outline_error_with_source_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "One.pas"
+    _write_source(source, "One")
+
+    def fail_parser(*_: object, **__: object) -> object:
+        raise RuntimeError("parser exploded")
+
+    monkeypatch.setattr(parallel_outline, "build_outline_semantic_model", fail_parser)
+
+    with pytest.raises(ParallelOutlineError, match=str(source)):
+        run_outline_tasks([OutlineTask(0, str(source), (), False)], configured_workers=1)
+
+
+def test_effective_one_worker_never_constructs_a_process_pool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "One.pas"
+    _write_source(source, "One")
+
+    def fail_pool(*_: object, **__: object) -> object:
+        raise AssertionError("process pool must not be constructed")
+
+    monkeypatch.setattr(parallel_outline, "ProcessPoolExecutor", fail_pool)
+
+    batch = run_outline_tasks(
+        [OutlineTask(0, str(source), (), False), OutlineTask(1, str(source), (), False)],
+        configured_workers=0,
+        cpu_count=8,
+        memory_budget_bytes=128 * 1024**2,
+    )
+
+    assert batch.stats.effective_workers == 1
+    assert batch.stats.files_completed == 2
 
 
 def test_parallel_spawn_results_are_ordinal_sorted(tmp_path: Path) -> None:
@@ -118,3 +167,55 @@ def test_callback_failure_cancels_and_propagates(tmp_path: Path) -> None:
             configured_workers=2,
             on_complete=fail_callback,
         )
+
+
+def test_parallel_callback_failure_cancels_pending_futures_and_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "One.pas"
+    _write_source(source, "One")
+    result = OutlineResult(0, str(source), "", None, 0, 0)
+
+    class FakeFuture:
+        def __init__(self, value: OutlineResult) -> None:
+            self.value = value
+            self.cancelled = False
+
+        def result(self) -> OutlineResult:
+            return self.value
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+    futures: list[FakeFuture] = []
+
+    class FakeExecutor:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        def __enter__(self) -> "FakeExecutor":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def submit(self, *_: object) -> FakeFuture:
+            future = FakeFuture(result)
+            futures.append(future)
+            return future
+
+    monkeypatch.setattr(parallel_outline, "ProcessPoolExecutor", FakeExecutor)
+    monkeypatch.setattr(parallel_outline, "as_completed", lambda submitted: list(submitted))
+
+    def fail_callback(_: OutlineResult) -> None:
+        raise RuntimeError("callback failed")
+
+    with pytest.raises(RuntimeError, match="callback failed"):
+        run_outline_tasks(
+            [OutlineTask(0, str(source), (), False), OutlineTask(1, str(source), (), False)],
+            configured_workers=2,
+            on_complete=fail_callback,
+        )
+
+    assert len(futures) == 2
+    assert all(future.cancelled for future in futures)
