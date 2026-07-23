@@ -768,6 +768,11 @@ def test_fallback_workspace_deep_parses_each_selected_unit_once_and_reuses_graph
     monkeypatch.setattr(agent_relations, "DelphiParser", RecordingParser)
 
     uses = context.handle({"action": "trace", "relation": "uses", "target_id": a["target_id"]})
+    relation_index = context._relation_index
+    assert relation_index is not None
+    assert relation_index._semantics is None
+    assert [Path(path).name for path in parse_calls] == ["A.pas"]
+
     context.handle({"action": "trace", "relation": "used_by", "target_id": b["target_id"]})
 
     assert [item["name"] for item in relation_items(uses)] == ["B"]

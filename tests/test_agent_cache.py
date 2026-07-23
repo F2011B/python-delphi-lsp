@@ -651,6 +651,11 @@ def test_readme_documents_bounded_cache_daemon_commands_and_retention_contract()
     assert "prewarm_seconds" in readme
     assert "parallel_seconds" in readme
     assert "parallel_fallbacks" in readme
+    assert "content-addressed JSON" in readme
+    assert "OpenCode cache" in readme
+    assert "contains no pickle" in readme
+    assert "navigation_disk_hits" in readme
+    assert "navigation_disk_misses" in readme
 
 def write_source(path: Path, source: str) -> None:
     path.write_text(textwrap.dedent(source).strip() + "\n", encoding="utf-8")

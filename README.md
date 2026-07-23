@@ -217,6 +217,13 @@ to measure it. If an automatic pool fails before accepting a result, one
 automatic serial fallback is attempted; explicit worker counts fail instead of
 silently changing the requested configuration.
 
+Detached navigation shards are also stored as versioned, content-addressed JSON
+under `.delphi-lsp/agent-cache/navigation-v1`. A restarted CLI or OpenCode cache
+daemon reuses unchanged units without parsing them again. Source content,
+conditional defines, or a shard-schema change produces a cache miss; malformed
+or incompatible JSON is ignored and rebuilt. The disk cache contains no pickle
+payloads and does not count against the retained-RAM budget.
+
 Cache prewarming builds the navigation registry directly without constructing
 an empty-query result, symbol cards, pagination, or JSON payloads. Up to sixteen
 recent ranked queries are retained in a small LRU so alternating CLI and
@@ -236,7 +243,8 @@ The daemon tracks a 30-minute idle timeout; idle state shows in JSON status (`ca
 Workspace state appears in status as `requests`, `warm_hits`, `rebuilds`, `invalidations`,
 `evictions`, and `cache_state`. Parallel prewarm status adds
 `workers_configured`, `workers_effective`, `parallel_files_completed`,
-`prewarm_seconds`, `parallel_seconds`, and `parallel_fallbacks`.
+`prewarm_seconds`, `parallel_seconds`, `parallel_fallbacks`,
+`navigation_disk_hits`, and `navigation_disk_misses`.
 
 Metadata is stored in `.delphi-lsp/agent-cache/daemon.json` with owner-only token and
 permissions (`daemon.json` mode 600 and parent 700). Do not copy or share this token

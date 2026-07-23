@@ -280,6 +280,18 @@ def _safe_metadata_path(root: str | Path, *, create: bool = False) -> Path:
     return result
 
 
+def _safe_navigation_cache_path(root: str | Path, *, create: bool = False) -> Path:
+    parent = _safe_metadata_path(root, create=create).parent
+    result = parent / "navigation-v1"
+    if result.exists() and result.is_symlink():
+        raise CacheClientError("unsafe_metadata", "Navigation cache path is unsafe.")
+    if create:
+        result.mkdir(mode=0o700, exist_ok=True)
+        if os.name != "nt":
+            os.chmod(result, 0o700)
+    return result
+
+
 def _metadata_mapping(metadata: CacheMetadata) -> dict[str, object]:
     return {field.name: getattr(metadata, field.name) for field in fields(metadata)}
 
@@ -549,6 +561,10 @@ class _CacheService:
             workers=metadata.workers,
             worker_memory_budget_bytes=metadata.max_memory_bytes,
             revision_check_interval_seconds=_CACHE_REVISION_CHECK_INTERVAL_SECONDS,
+            navigation_cache_dir=_safe_navigation_cache_path(
+                metadata.root,
+                create=True,
+            ),
         )
         self.budget = CacheBudget(metadata.max_memory_bytes)
         self.stats = CacheStats()
@@ -648,6 +664,8 @@ class _CacheService:
             "prewarm_seconds": self.prewarm_seconds,
             "parallel_seconds": self.context.parallel_stats.elapsed_seconds,
             "parallel_fallbacks": self.stats.parallel_fallbacks,
+            "navigation_disk_hits": self.context.navigation_disk_hits,
+            "navigation_disk_misses": self.context.navigation_disk_misses,
             "idle_timeout": self.metadata.idle_timeout, "idle_remaining": max(0.0, self.metadata.idle_timeout - idle),
             "workspace_revision": self.last_revision,
         }

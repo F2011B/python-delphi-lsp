@@ -323,6 +323,152 @@ def test_find_materializes_only_the_selected_symbol_cards(
     assert calls == response.page.returned
 
 
+def test_navigation_registry_retains_flat_symbol_records(tmp_path: Path) -> None:
+    write_source(
+        tmp_path / "FlatRegistry.pas",
+        """
+        unit FlatRegistry;
+        interface
+        type
+          TFlat = class
+          public
+            procedure Run;
+          end;
+        implementation
+        end.
+        """,
+    )
+    context = AgentContext.open(tmp_path)
+    context.prewarm_navigation()
+    registry = context._registry
+
+    assert registry is not None
+    assert registry.entries
+    assert all(not hasattr(entry, "symbol") for entry in registry.entries)
+    assert card_named(context.handle({"action": "find", "query": "TFlat"}), "TFlat")
+
+
+def test_navigation_shards_are_reused_across_context_process_lifetimes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_source(
+        tmp_path / "PersistentShard.pas",
+        """
+        unit PersistentShard;
+        interface
+        type
+          TPersisted = class
+          end;
+        implementation
+        end.
+        """,
+    )
+    cache_dir = tmp_path / ".delphi-lsp" / "agent-cache" / "navigation-v1"
+    first = AgentContext.open(
+        tmp_path,
+        workers=1,
+        navigation_cache_dir=cache_dir,
+    )
+
+    first.prewarm_navigation()
+    first_cards = result_items(first.handle({"action": "find", "query": "TPersisted"}))
+
+    assert first.navigation_disk_hits == 0
+    assert first.navigation_disk_misses == 1
+    assert list(cache_dir.rglob("*.json"))
+
+    def unexpected_parse(_task: object):
+        raise AssertionError("persistent navigation shard was reparsed")
+
+    monkeypatch.setattr(agent_context_module, "_parse_navigation_task", unexpected_parse)
+    second = AgentContext.open(
+        tmp_path,
+        workers=1,
+        navigation_cache_dir=cache_dir,
+    )
+
+    second.prewarm_navigation()
+    second_cards = result_items(second.handle({"action": "find", "query": "TPersisted"}))
+
+    assert second_cards == first_cards
+    assert second.navigation_disk_hits == 1
+    assert second.navigation_disk_misses == 0
+    assert second.parallel_stats.files_completed == 1
+
+
+def test_navigation_shards_miss_after_source_changes_or_corruption(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_path = tmp_path / "ChangingShard.pas"
+    write_source(
+        source_path,
+        """
+        unit ChangingShard;
+        interface
+        type
+          TOld = class
+          end;
+        implementation
+        end.
+        """,
+    )
+    cache_dir = tmp_path / ".delphi-lsp" / "agent-cache" / "navigation-v1"
+    AgentContext.open(
+        tmp_path,
+        workers=1,
+        navigation_cache_dir=cache_dir,
+    ).prewarm_navigation()
+
+    write_source(
+        source_path,
+        """
+        unit ChangingShard;
+        interface
+        type
+          TNew = class
+          end;
+        implementation
+        end.
+        """,
+    )
+    real_parse = agent_context_module._parse_navigation_task
+    calls = 0
+
+    def counted_parse(task: object):
+        nonlocal calls
+        calls += 1
+        return real_parse(task)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(agent_context_module, "_parse_navigation_task", counted_parse)
+    changed = AgentContext.open(
+        tmp_path,
+        workers=1,
+        navigation_cache_dir=cache_dir,
+    )
+    changed.prewarm_navigation()
+
+    assert card_named(changed.handle({"action": "find", "query": "TNew"}), "TNew")
+    assert changed.navigation_disk_hits == 0
+    assert changed.navigation_disk_misses == 1
+    assert calls == 1
+
+    shard = max(cache_dir.rglob("*.json"), key=lambda path: path.stat().st_mtime_ns)
+    shard.write_text("{broken", encoding="utf-8")
+    rebuilt = AgentContext.open(
+        tmp_path,
+        workers=1,
+        navigation_cache_dir=cache_dir,
+    )
+    rebuilt.prewarm_navigation()
+
+    assert card_named(rebuilt.handle({"action": "find", "query": "TNew"}), "TNew")
+    assert rebuilt.navigation_disk_hits == 0
+    assert rebuilt.navigation_disk_misses == 1
+    assert calls == 2
+
+
 def test_request_refreshes_the_selected_workspace_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1621,10 +1767,8 @@ def test_navigation_worker_returns_compact_symbols_without_source_or_model(
     assert result.text == ""
     assert result.model is None
     assert result.read_error == ""
-    assert any(raw.symbol.name == "TCompactWorker" for raw in result.raw_symbols)
-    assert len({id(raw.symbol.scope) for raw in result.raw_symbols}) == 1
-    assert all(not raw.symbol.scope.symbols for raw in result.raw_symbols)
-    assert all(raw.symbol.member_scope is None for raw in result.raw_symbols)
+    assert any(raw.name == "TCompactWorker" for raw in result.raw_symbols)
+    assert all(not hasattr(raw, "symbol") for raw in result.raw_symbols)
 
 
 def test_find_reuses_a_small_lru_of_ranked_queries(
@@ -1717,23 +1861,18 @@ def test_routine_local_filter_uses_a_sorted_container_sweep(
     containers = [
         SimpleNamespace(
             parent_qualified_name="",
-            symbol=SimpleNamespace(
-                kind=agent_context_module.SymbolKind.PROCEDURE,
-                decl_range=SimpleNamespace(start_line=index * 10, start_col=1),
-            ),
+            kind=agent_context_module.SymbolKind.PROCEDURE,
+            line=index * 10,
+            column=1,
         )
         for index in range(container_count)
     ]
     non_routines = [
         SimpleNamespace(
             parent_qualified_name="",
-            symbol=SimpleNamespace(
-                kind=agent_context_module.SymbolKind.VARIABLE,
-                decl_range=SimpleNamespace(
-                    start_line=100_000 + index,
-                    start_col=1,
-                ),
-            ),
+            kind=agent_context_module.SymbolKind.VARIABLE,
+            line=100_000 + index,
+            column=1,
         )
         for index in range(container_count)
     ]

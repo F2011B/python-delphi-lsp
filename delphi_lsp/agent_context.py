@@ -26,10 +26,17 @@ from .agent_relations import ProjectRelationIndex, RelationTarget
 from .agent_workspace import AgentUnit, AgentWorkspace, unit_display_path, unit_source_path, unit_target_id
 from .consts import AttributeName, SyntaxNodeType
 from .lsp_server import build_outline_semantic_model, multiline_string_block_end
+from .metrics import ProjectMetrics
+from .navigation_cache import NavigationShardStore, navigation_cache_key
 from .nodes import CompoundSyntaxNode, SyntaxNode
 from .parser import DelphiParser
-from .semantic import NamedTypeRef, Scope, ScopeKind, Symbol, SymbolKind
-from .metrics import ProjectMetrics
+from .semantic import (
+    Scope,
+    ScopeKind,
+    Symbol,
+    SymbolKind,
+    Visibility,
+)
 from .parallel_outline import (
     ParallelBuildStats,
     ParallelOutlineError,
@@ -99,6 +106,7 @@ _CALLING_CONVENTIONS = frozenset(
 )
 _SOURCE_CHUNK_CHARS = 6000
 _RANKED_QUERY_CACHE_SIZE = 16
+_RANKED_QUERY_CACHE_MAX_ENTRIES = 50_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,7 +287,12 @@ class _SourceStore:
 
 @dataclass(frozen=True, slots=True)
 class _RawSymbol:
-    symbol: Symbol
+    name: str
+    kind: SymbolKind
+    line: int
+    column: int
+    visibility: Visibility
+    type_name: str
     source_path: Path
     path: str
     unit_id: str
@@ -301,6 +314,7 @@ class _NavigationTask:
     unit_has_error: bool
     defines: tuple[str, ...]
     include_paths: tuple[str, ...]
+    cache_key: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -313,6 +327,7 @@ class _NavigationResult:
     symbols_discovered: int
     read_error: str
     raw_symbols: tuple[_RawSymbol, ...]
+    cache_key: str = ""
 
 
 def _parse_navigation_task(task: _NavigationTask) -> _NavigationResult:
@@ -329,6 +344,7 @@ def _parse_navigation_task(task: _NavigationTask) -> _NavigationResult:
             0,
             str(error),
             (),
+            "",
         )
     try:
         model = build_outline_semantic_model(
@@ -350,10 +366,7 @@ def _parse_navigation_task(task: _NavigationTask) -> _NavigationResult:
             has_error=task.unit_has_error,
         )
         symbols = _collect_raw_symbols(model.unit_scope, unit, source_path, document)
-        raw_symbols = _detach_raw_symbols(
-            _exclude_routine_locals(symbols, document),
-            task.unit_name,
-        )
+        raw_symbols = tuple(_exclude_routine_locals(symbols, document))
     except Exception as error:
         raise ParallelOutlineError(
             f"failed to build navigation shard for {task.source_path}: {error}"
@@ -367,47 +380,113 @@ def _parse_navigation_task(task: _NavigationTask) -> _NavigationResult:
         len(raw_symbols),
         "",
         raw_symbols,
+        navigation_cache_key(text, task.defines) if task.cache_key else "",
     )
 
 
-def _detach_raw_symbols(
-    raw_symbols: list[_RawSymbol],
-    unit_name: str,
-) -> tuple[_RawSymbol, ...]:
-    detached_scope = Scope(kind=ScopeKind.UNIT, name=unit_name)
-    detached: list[_RawSymbol] = []
-    for raw in raw_symbols:
-        symbol = raw.symbol
-        flat_symbol = Symbol(
-            name=symbol.name,
-            kind=symbol.kind,
-            decl_range=symbol.decl_range,
-            name_range=symbol.name_range,
-            scope=detached_scope,
-            visibility=symbol.visibility,
-            type_ref=NamedTypeRef(symbol.type_ref.display_name()),
-            modifiers=set(symbol.modifiers),
-            attributes=dict(symbol.attributes),
-            doc=symbol.doc,
-            base_types=tuple(
-                NamedTypeRef(base_type.display_name())
-                for base_type in symbol.base_types
-            ),
+def _navigation_shard_payload(result: _NavigationResult) -> dict[str, object]:
+    unit_name = result.raw_symbols[0].unit_name if result.raw_symbols else ""
+    symbols: list[dict[str, object]] = []
+    for raw in result.raw_symbols:
+        symbols.append(
+            {
+                "name": raw.name,
+                "kind": raw.kind.value,
+                "line": raw.line,
+                "column": raw.column,
+                "visibility": raw.visibility.value,
+                "type": raw.type_name,
+                "qualified_name": raw.qualified_name,
+                "owner": raw.owner,
+                "parent_qualified_name": raw.parent_qualified_name,
+                "signature": raw.signature,
+            }
         )
-        detached.append(replace(raw, symbol=flat_symbol))
-    return tuple(detached)
+    return {
+        "lines_processed": result.lines_processed,
+        "unit_name": unit_name,
+        "symbols": symbols,
+    }
+
+
+def _navigation_result_from_shard(
+    task: _NavigationTask,
+    payload: Mapping[str, object],
+) -> _NavigationResult | None:
+    try:
+        lines_processed = _required_int(payload.get("lines_processed"))
+        unit_name = _required_string(payload.get("unit_name"))
+        records = payload.get("symbols")
+        if not isinstance(records, list):
+            return None
+        unit_id = make_target_id("unit", task.display_path, task.unit_name)
+        source_path = Path(task.source_path)
+        raw_symbols: list[_RawSymbol] = []
+        for value in records:
+            if not isinstance(value, Mapping):
+                return None
+            raw_symbols.append(
+                _RawSymbol(
+                    name=_required_string(value.get("name")),
+                    kind=SymbolKind(_required_string(value.get("kind"))),
+                    line=_required_int(value.get("line")),
+                    column=_required_int(value.get("column")),
+                    visibility=Visibility(_required_string(value.get("visibility"))),
+                    type_name=_required_string(value.get("type")),
+                    source_path=source_path,
+                    path=task.display_path,
+                    unit_id=unit_id,
+                    unit_name=unit_name or task.unit_name,
+                    qualified_name=_required_string(value.get("qualified_name")),
+                    owner=_required_string(value.get("owner")),
+                    parent_qualified_name=_required_string(
+                        value.get("parent_qualified_name")
+                    ),
+                    signature=_required_string(value.get("signature")),
+                )
+            )
+    except (TypeError, ValueError):
+        return None
+    return _NavigationResult(
+        ordinal=task.ordinal,
+        source_path=task.source_path,
+        text="",
+        model=None,
+        lines_processed=lines_processed,
+        symbols_discovered=len(raw_symbols),
+        read_error="",
+        raw_symbols=tuple(raw_symbols),
+    )
+
+
+def _required_string(value: object) -> str:
+    if not isinstance(value, str):
+        raise TypeError("navigation string is malformed")
+    return value
+
+
+def _required_int(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("navigation integer is malformed")
+    return value
 
 
 @dataclass(frozen=True, slots=True)
 class _SymbolEntry:
-    symbol: Symbol
+    name: str
+    kind: SymbolKind
+    line: int
+    column: int
+    visibility: Visibility
+    type_name: str
     source_path: Path
     path: str
     unit_id: str
     unit_name: str
     qualified_name: str
+    normalized_name: str
     normalized_qualified_name: str
-    search_names: tuple[str, ...]
+    relative_name_offset: int
     owner: str
     signature: str
     ordinal: int
@@ -418,15 +497,15 @@ class _SymbolEntry:
         return {
             "target_id": self.target_id,
             "unit_id": self.unit_id,
-            "name": self.symbol.name,
+            "name": self.name,
             "qualified_name": self.qualified_name,
-            "kind": self.symbol.kind.value,
+            "kind": self.kind.value,
             "path": self.path,
-            "line": self.symbol.decl_range.start_line,
-            "column": self.symbol.decl_range.start_col,
-            "visibility": self.symbol.visibility.value,
+            "line": self.line,
+            "column": self.column,
+            "visibility": self.visibility.value,
             "owner": self.owner,
-            "type": self.symbol.type_ref.display_name(),
+            "type": self.type_name,
         }
 
 
@@ -466,6 +545,7 @@ class AgentContext:
         workers: int = 0,
         worker_memory_budget_bytes: int | None = None,
         revision_check_interval_seconds: float = 0.0,
+        navigation_cache_dir: str | Path | None = None,
     ) -> None:
         self._workspace = workspace
         self._workers = workers
@@ -478,6 +558,13 @@ class AgentContext:
             time.monotonic() if self._revision_check_interval_seconds > 0.0 else 0.0
         )
         self._parallel_stats = ParallelBuildStats(0, 0, 0, 0.0, 0)
+        self._navigation_store = (
+            NavigationShardStore(navigation_cache_dir)
+            if navigation_cache_dir is not None
+            else None
+        )
+        self._navigation_disk_hits = 0
+        self._navigation_disk_misses = 0
         project_id = workspace.active_project_id
         self._focus = Focus(project_id=project_id) if project_id else Focus()
         self._last_revision = workspace.current_revision
@@ -495,12 +582,14 @@ class AgentContext:
         workers: int = 0,
         worker_memory_budget_bytes: int | None = None,
         revision_check_interval_seconds: float = 0.0,
+        navigation_cache_dir: str | Path | None = None,
     ) -> AgentContext:
         return cls(
             AgentWorkspace.open(root, project_file=project_file),
             workers=workers,
             worker_memory_budget_bytes=worker_memory_budget_bytes,
             revision_check_interval_seconds=revision_check_interval_seconds,
+            navigation_cache_dir=navigation_cache_dir,
         )
 
     @property
@@ -514,6 +603,14 @@ class AgentContext:
     @property
     def parallel_stats(self) -> ParallelBuildStats:
         return self._parallel_stats
+
+    @property
+    def navigation_disk_hits(self) -> int:
+        return self._navigation_disk_hits
+
+    @property
+    def navigation_disk_misses(self) -> int:
+        return self._navigation_disk_misses
 
     def cache_roots(self) -> tuple[object, ...]:
         return (
@@ -572,7 +669,7 @@ class AgentContext:
                 raise AgentProtocolError("relation_required", "Trace requires a relation.")
             registry = self._require_registry(revision)
             entry = self._resolve_target(registry, parsed.target_id)
-            relation_index = self._require_relation_index(registry)
+            relation_index = self._require_relation_index(registry, parsed.relation)
             items = relation_index.trace(entry.target_id, parsed.relation)
             return self._response(parsed, revision, items, target_id=entry.target_id)
         if parsed.action == "open":
@@ -590,10 +687,15 @@ class AgentContext:
             registry = self._require_registry(revision)
             ranked = registry.ranked_queries.pop(parsed.query, None)
             if ranked is None:
-                ranked = tuple(_ranked_entries(registry.entries, parsed.query))
-            registry.ranked_queries[parsed.query] = ranked
-            while len(registry.ranked_queries) > _RANKED_QUERY_CACHE_SIZE:
-                registry.ranked_queries.popitem(last=False)
+                ranked = (
+                    registry.entries
+                    if not parsed.query.strip()
+                    else tuple(_ranked_entries(registry.entries, parsed.query))
+                )
+            if len(ranked) <= _RANKED_QUERY_CACHE_MAX_ENTRIES:
+                registry.ranked_queries[parsed.query] = ranked
+                while len(registry.ranked_queries) > _RANKED_QUERY_CACHE_SIZE:
+                    registry.ranked_queries.popitem(last=False)
             if parsed.max_chars >= registry.max_card_chars:
                 return self._response(
                     parsed,
@@ -798,7 +900,11 @@ class AgentContext:
         self._require_selected_project()
         if self._metrics is not None and self._metrics_revision == revision:
             return self._metrics
-        self._metrics = build_workspace_metrics(self._workspace)
+        self._metrics = build_workspace_metrics(
+            self._workspace,
+            workers=self._workers,
+            worker_memory_budget_bytes=self._worker_memory_budget_bytes,
+        )
         self._metrics_revision = revision
         return self._metrics
 
@@ -810,12 +916,18 @@ class AgentContext:
             and self._registry.revision == revision
         ):
             return self._registry
-        self._registry, self._parallel_stats = _build_registry(
+        (
+            self._registry,
+            self._parallel_stats,
+            self._navigation_disk_hits,
+            self._navigation_disk_misses,
+        ) = _build_registry(
             self._workspace,
             project_id,
             revision,
             workers=self._workers,
             worker_memory_budget_bytes=self._worker_memory_budget_bytes,
+            navigation_store=self._navigation_store,
         )
         if self._focus.target_id:
             focused_entry = self._registry.by_target.get(self._focus.target_id)
@@ -829,11 +941,20 @@ class AgentContext:
                 )
         return self._registry
 
-    def _require_relation_index(self, registry: _Registry) -> ProjectRelationIndex:
+    def _require_relation_index(
+        self,
+        registry: _Registry,
+        relation: str,
+    ) -> ProjectRelationIndex:
+        requires_complete_targets = relation not in {"uses", "used_by"}
         if (
             self._relation_index is not None
             and self._relation_index.project_id == registry.project_id
             and self._relation_index.revision == registry.revision
+            and (
+                not requires_complete_targets
+                or self._relation_index.targets_complete
+            )
         ):
             return self._relation_index
         targets = tuple(
@@ -843,21 +964,26 @@ class AgentContext:
                 path=entry.path,
                 unit_id=entry.unit_id,
                 unit_name=entry.unit_name,
-                name=entry.symbol.name,
+                name=entry.name,
                 qualified_name=entry.qualified_name,
-                kind=entry.symbol.kind.value,
+                kind=entry.kind.value,
                 signature=entry.signature,
-                line=entry.symbol.decl_range.start_line,
-                column=entry.symbol.decl_range.start_col,
-                card=entry.card(),
+                line=entry.line,
+                column=entry.column,
+                card={},
+                visibility=entry.visibility.value,
+                type_name=entry.type_name,
+                owner=entry.owner,
             )
             for entry in registry.entries
+            if requires_complete_targets or entry.kind == SymbolKind.UNIT
         )
         self._relation_index = ProjectRelationIndex(
             self._workspace,
             registry.project_id,
             registry.revision,
             targets,
+            targets_complete=requires_complete_targets,
         )
         return self._relation_index
 
@@ -1013,7 +1139,9 @@ def _build_registry(
     *,
     workers: int = 0,
     worker_memory_budget_bytes: int | None = None,
-) -> tuple[_Registry, ParallelBuildStats]:
+    navigation_store: NavigationShardStore | None = None,
+) -> tuple[_Registry, ParallelBuildStats, int, int]:
+    build_started = time.perf_counter()
     raw_symbols: list[_RawSymbol] = []
     units = tuple(workspace.units)
     source_specs = {
@@ -1025,6 +1153,20 @@ def _build_registry(
         )
         for unit in units
     }
+    tasks = tuple(
+        _NavigationTask(
+            ordinal,
+            str(unit_source_path(workspace.root, unit)),
+            unit_display_path(workspace.root, unit),
+            unit.name,
+            unit.path,
+            unit.unit_id,
+            unit.has_error,
+            workspace.defines,
+            workspace.include_paths,
+        )
+        for ordinal, unit in enumerate(units)
+    )
 
     def consume_result(result: _NavigationResult) -> None:
         if result.read_error:
@@ -1034,35 +1176,61 @@ def _build_registry(
                 "source_unavailable",
                 f"Could not read selected source {display_path}.",
             )
+        if navigation_store is not None and result.cache_key:
+            try:
+                navigation_store.store(
+                    result.cache_key,
+                    _navigation_shard_payload(result),
+                )
+            except (OSError, TypeError, ValueError):
+                pass
         raw_symbols.extend(result.raw_symbols)
 
-    outline_batch = run_outline_tasks(
-        (
-            _NavigationTask(
-                ordinal,
-                str(unit_source_path(workspace.root, unit)),
-                unit_display_path(workspace.root, unit),
-                unit.name,
-                unit.path,
-                unit.unit_id,
-                unit.has_error,
-                workspace.defines,
-                workspace.include_paths,
+    disk_hits = 0
+    disk_misses = 0
+    pending_tasks: list[_NavigationTask] = []
+    if navigation_store is None:
+        pending_tasks.extend(tasks)
+    else:
+        for task in tasks:
+            try:
+                text = read_source_text(Path(task.source_path))
+                cache_key = navigation_cache_key(text, task.defines)
+                payload = navigation_store.load(cache_key)
+            except (OSError, UnicodeError, ValueError):
+                cache_key = ""
+                payload = None
+            cached = (
+                _navigation_result_from_shard(task, payload)
+                if payload is not None
+                else None
             )
-            for ordinal, unit in enumerate(units)
-        ),
+            if cached is None:
+                disk_misses += 1
+                pending_tasks.append(replace(task, cache_key=cache_key or "miss"))
+                continue
+            disk_hits += 1
+            consume_result(cached)
+
+    outline_batch = run_outline_tasks(
+        pending_tasks,
         configured_workers=workers,
         memory_budget_bytes=worker_memory_budget_bytes,
         on_complete=consume_result,
         retain_results=False,
         task_runner=_parse_navigation_task,
     )
+    parallel_stats = replace(
+        outline_batch.stats,
+        files_completed=len(tasks),
+        elapsed_seconds=time.perf_counter() - build_started,
+    )
 
     ordered = sorted(raw_symbols, key=_raw_sort_key)
     overload_groups: dict[tuple[str, str, str, str], list[_RawSymbol]] = {}
     for raw in raw_symbols:
         identity = (
-            raw.symbol.kind.value.casefold(),
+            raw.kind.value.casefold(),
             raw.path.casefold(),
             _normalized(raw.qualified_name),
             _normalized(raw.signature),
@@ -1073,89 +1241,81 @@ def _build_registry(
         overload_order = sorted(
             group,
             key=lambda raw: (
-                raw.symbol.decl_range.start_line,
-                raw.symbol.decl_range.start_col,
+                raw.line,
+                raw.column,
                 _raw_sort_key(raw),
             ),
         )
         for ordinal, raw in enumerate(overload_order):
             ordinals[id(raw)] = ordinal
 
+    shared_strings: dict[str, str] = {}
+
+    def shared(value: str) -> str:
+        return shared_strings.setdefault(value, value)
+
+    target_ids = {
+        id(raw): make_target_id(
+            raw.kind.value,
+            raw.path,
+            _target_identity_name(raw),
+            ordinals[id(raw)],
+        )
+        for raw in raw_symbols
+    }
+    parent_ids: dict[str, str] = {}
+    for raw in raw_symbols:
+        if raw.kind in {
+            SymbolKind.CLASS,
+            SymbolKind.RECORD,
+            SymbolKind.INTERFACE,
+            SymbolKind.TYPE,
+        }:
+            parent_ids.setdefault(
+                _normalized(raw.qualified_name),
+                target_ids[id(raw)],
+            )
+
     entries: list[_SymbolEntry] = []
     for raw in ordered:
         ordinal = ordinals[id(raw)]
-        normalized_qualified_name, search_names = _normalized_search_names(
-            raw.symbol.name,
+        (
+            normalized_name,
+            normalized_qualified_name,
+            relative_name_offset,
+        ) = _normalized_search_fields(
+            raw.name,
             raw.qualified_name,
             raw.unit_name,
         )
         entries.append(
             _SymbolEntry(
-                symbol=raw.symbol,
+                name=shared(raw.name),
+                kind=raw.kind,
+                line=raw.line,
+                column=raw.column,
+                visibility=raw.visibility,
+                type_name=shared(raw.type_name),
                 source_path=raw.source_path,
-                path=raw.path,
-                unit_id=raw.unit_id,
-                unit_name=raw.unit_name,
-                qualified_name=raw.qualified_name,
-                normalized_qualified_name=normalized_qualified_name,
-                search_names=search_names,
-                owner=raw.owner,
-                signature=raw.signature,
+                path=shared(raw.path),
+                unit_id=shared(raw.unit_id),
+                unit_name=shared(raw.unit_name),
+                qualified_name=shared(raw.qualified_name),
+                normalized_name=shared(normalized_name),
+                normalized_qualified_name=shared(normalized_qualified_name),
+                relative_name_offset=relative_name_offset,
+                owner=shared(raw.owner),
+                signature=shared(raw.signature),
                 ordinal=ordinal,
-                target_id=make_target_id(
-                    raw.symbol.kind.value,
-                    raw.path,
-                    _target_identity_name(raw),
-                    ordinal,
+                target_id=target_ids[id(raw)],
+                parent_target_id=parent_ids.get(
+                    _normalized(raw.parent_qualified_name),
+                    "",
                 ),
             )
         )
 
-    parent_ids: dict[str, str] = {}
-    for entry in entries:
-        if entry.symbol.kind in {SymbolKind.CLASS, SymbolKind.RECORD, SymbolKind.INTERFACE, SymbolKind.TYPE}:
-            parent_ids.setdefault(_normalized(entry.qualified_name), entry.target_id)
-    raw_by_position = {
-        (
-            raw.path,
-            raw.symbol.decl_range.start_line,
-            raw.symbol.decl_range.start_col,
-            raw.qualified_name,
-            raw.symbol.kind,
-        ): raw
-        for raw in raw_symbols
-    }
-    with_parents: list[_SymbolEntry] = []
-    for entry in entries:
-        raw = raw_by_position[
-            (
-                entry.path,
-                entry.symbol.decl_range.start_line,
-                entry.symbol.decl_range.start_col,
-                entry.qualified_name,
-                entry.symbol.kind,
-            )
-        ]
-        parent_target_id = parent_ids.get(_normalized(raw.parent_qualified_name), "")
-        with_parents.append(
-            _SymbolEntry(
-                symbol=entry.symbol,
-                source_path=entry.source_path,
-                path=entry.path,
-                unit_id=entry.unit_id,
-                unit_name=entry.unit_name,
-                qualified_name=entry.qualified_name,
-                normalized_qualified_name=entry.normalized_qualified_name,
-                search_names=entry.search_names,
-                owner=entry.owner,
-                signature=entry.signature,
-                ordinal=entry.ordinal,
-                target_id=entry.target_id,
-                parent_target_id=parent_target_id,
-            )
-        )
-
-    entries_tuple = tuple(sorted(with_parents, key=_entry_sort_key))
+    entries_tuple = tuple(sorted(entries, key=_entry_sort_key))
     source_cache_bytes = _source_cache_budget(worker_memory_budget_bytes)
     sources = _SourceStore(source_specs, max_loaded_bytes=source_cache_bytes)
     static_retained_bytes = _estimate_registry_bytes(entries_tuple, sources)
@@ -1173,7 +1333,9 @@ def _build_registry(
                 default=2,
             ),
         ),
-        outline_batch.stats,
+        parallel_stats,
+        disk_hits,
+        disk_misses,
     )
 
 
@@ -1187,22 +1349,30 @@ def _estimate_registry_bytes(
     entries: tuple[_SymbolEntry, ...],
     sources: _SourceStore,
 ) -> int:
-    retained = 4096 + sources.metadata_bytes
+    retained = 4096 + sources.metadata_bytes + sys.getsizeof(entries)
+    seen_values: set[int] = set()
     for entry in entries:
-        retained += (
-            1536
-            + sys.getsizeof(entry.path)
-            + sys.getsizeof(entry.unit_id)
-            + sys.getsizeof(entry.unit_name)
-            + sys.getsizeof(entry.qualified_name)
-            + sys.getsizeof(entry.normalized_qualified_name)
-            + sys.getsizeof(entry.search_names)
-            + sum(sys.getsizeof(name) for name in entry.search_names)
-            + sys.getsizeof(entry.owner)
-            + sys.getsizeof(entry.signature)
-            + sys.getsizeof(entry.target_id)
-            + sys.getsizeof(entry.parent_target_id)
-        )
+        retained += 384 + sys.getsizeof(entry)
+        for value in (
+            entry.source_path,
+            entry.name,
+            entry.type_name,
+            entry.path,
+            entry.unit_id,
+            entry.unit_name,
+            entry.qualified_name,
+            entry.normalized_name,
+            entry.normalized_qualified_name,
+            entry.owner,
+            entry.signature,
+            entry.target_id,
+            entry.parent_target_id,
+        ):
+            identifier = id(value)
+            if identifier in seen_values:
+                continue
+            seen_values.add(identifier)
+            retained += sys.getsizeof(value)
     retained += len(entries) * 96
     return retained
 
@@ -1211,17 +1381,15 @@ def _symbol_card_json_upper_bound(entry: _SymbolEntry) -> int:
     strings = (
         entry.target_id,
         entry.unit_id,
-        entry.symbol.name,
+        entry.name,
         entry.qualified_name,
-        entry.symbol.kind.value,
+        entry.kind.value,
         entry.path,
-        entry.symbol.visibility.value,
+        entry.visibility.value,
         entry.owner,
-        entry.symbol.type_ref.display_name(),
+        entry.type_name,
     )
-    numeric_chars = len(str(entry.symbol.decl_range.start_line)) + len(
-        str(entry.symbol.decl_range.start_col)
-    )
+    numeric_chars = len(str(entry.line)) + len(str(entry.column))
     # JSON string escaping expands one input character to at most six characters.
     # The fixed allowance covers keys, quotes, separators, brackets, and numbers.
     return 512 + 6 * sum(len(value) for value in strings) + numeric_chars
@@ -1272,7 +1440,7 @@ def _sanitize_workspace_path(value: str, root: Path, namespace: str) -> str:
 
 
 def _target_identity_name(raw: _RawSymbol) -> str:
-    if raw.symbol.kind in _ROUTINE_KINDS:
+    if raw.kind in _ROUTINE_KINDS:
         return f"{raw.qualified_name}\x1f{_normalized(raw.signature)}"
     return raw.qualified_name
 
@@ -1301,7 +1469,12 @@ def _collect_raw_symbols(
             owner = qualified_name.rsplit(".", 1)[0]
         collected.append(
             _RawSymbol(
-                symbol=symbol,
+                name=symbol.name,
+                kind=symbol.kind,
+                line=symbol.decl_range.start_line,
+                column=symbol.decl_range.start_col,
+                visibility=symbol.visibility,
+                type_name=symbol.type_ref.display_name(),
                 source_path=source_path,
                 path=document.display_path,
                 unit_id=unit_id,
@@ -1322,7 +1495,12 @@ def _collect_raw_symbols(
             member_qualified_name = f"{qualified_name}.{member_name}"
             collected.append(
                 _RawSymbol(
-                    symbol=member,
+                    name=member.name,
+                    kind=member.kind,
+                    line=member.decl_range.start_line,
+                    column=member.decl_range.start_col,
+                    visibility=member.visibility,
+                    type_name=member.type_ref.display_name(),
                     source_path=source_path,
                     path=document.display_path,
                     unit_id=unit_id,
@@ -1660,7 +1838,7 @@ def _exclude_routine_locals(
 ) -> list[_RawSymbol]:
     containers: list[tuple[int, int, _RawSymbol]] = []
     for raw in symbols:
-        if raw.parent_qualified_name or raw.symbol.kind not in _ROUTINE_KINDS:
+        if raw.parent_qualified_name or raw.kind not in _ROUTINE_KINDS:
             continue
         span = _raw_routine_span(raw, document)
         if span is not None:
@@ -1672,8 +1850,8 @@ def _exclude_routine_locals(
     positioned = sorted(
         (
             document.offset(
-                raw.symbol.decl_range.start_line,
-                raw.symbol.decl_range.start_col,
+                raw.line,
+                raw.column,
             ),
             order,
             raw,
@@ -1712,9 +1890,9 @@ def _raw_routine_span(
     raw: _RawSymbol,
     document: _SourceDocument,
 ) -> tuple[int, int] | None:
-    if raw.symbol.kind not in _ROUTINE_KINDS or raw.parent_qualified_name:
+    if raw.kind not in _ROUTINE_KINDS or raw.parent_qualified_name:
         return None
-    line = raw.symbol.decl_range.start_line
+    line = raw.line
     if document.unit_kind == "unit" and (
         not document.implementation_line or line < document.implementation_line
     ):
@@ -1728,7 +1906,7 @@ def _body_entry_and_span(
     entry: _SymbolEntry,
 ) -> tuple[_SymbolEntry, tuple[int, int] | None]:
     candidates = [entry]
-    if entry.symbol.kind in _ROUTINE_KINDS:
+    if entry.kind in _ROUTINE_KINDS:
         candidates.extend(_matching_counterparts(registry, entry))
     for candidate in candidates:
         document = registry.sources[candidate.source_path]
@@ -1746,7 +1924,7 @@ def _matching_counterparts(
         candidate
         for candidate in registry.entries
         if candidate.target_id != entry.target_id
-        and candidate.symbol.kind == entry.symbol.kind
+        and candidate.kind == entry.kind
         and _normalized(candidate.qualified_name) == _normalized(entry.qualified_name)
         and candidate.signature == entry.signature
     ]
@@ -1756,16 +1934,16 @@ def _entry_body_span(
     entry: _SymbolEntry,
     document: _SourceDocument,
 ) -> tuple[int, int] | None:
-    if entry.symbol.kind in _TYPE_KINDS:
+    if entry.kind in _TYPE_KINDS:
         if _is_forward_type(document, entry):
             return None
         span = _type_span(document, entry)
         if span is not None and not document.contains_directive(*span):
             return span
         return _full_parser_span(document, entry)
-    if entry.symbol.kind not in _ROUTINE_KINDS or entry.parent_target_id:
+    if entry.kind not in _ROUTINE_KINDS or entry.parent_target_id:
         return None
-    line = entry.symbol.decl_range.start_line
+    line = entry.line
     if document.unit_kind == "unit" and (
         not document.implementation_line or line < document.implementation_line
     ):
@@ -1790,10 +1968,10 @@ def _full_parser_span(
 
     expected_type = (
         SyntaxNodeType.ntMethod
-        if entry.symbol.kind in _ROUTINE_KINDS
+        if entry.kind in _ROUTINE_KINDS
         else SyntaxNodeType.ntTypeDecl
     )
-    expected_line = entry.symbol.decl_range.start_line
+    expected_line = entry.line
     candidates: list[tuple[int, int]] = []
     for node in _walk_syntax_nodes(result.root):
         if node.typ != expected_type or not isinstance(node, CompoundSyntaxNode):
@@ -1882,9 +2060,9 @@ def _declaration_span(
     document: _SourceDocument,
     entry: _SymbolEntry,
 ) -> tuple[int, int]:
-    line = entry.symbol.decl_range.start_line
+    line = entry.line
     start = _declaration_start(document, line)
-    if entry.symbol.kind in _TYPE_KINDS:
+    if entry.kind in _TYPE_KINDS:
         full_span, direct_structured = _type_declaration_layout(document, entry)
         if direct_structured:
             return start, document.line_end(line)
@@ -1893,7 +2071,7 @@ def _declaration_span(
         return start, document.line_end(line)
 
     token_index = document.first_token_index(start)
-    if entry.symbol.kind in _ROUTINE_KINDS:
+    if entry.kind in _ROUTINE_KINDS:
         routine_index = _routine_keyword_index(document.tokens, token_index)
         if routine_index is not None:
             declaration_end = _routine_declaration_end_index(document.tokens, routine_index)
@@ -1922,7 +2100,7 @@ def _type_span(
 
 
 def _is_forward_type(document: _SourceDocument, entry: _SymbolEntry) -> bool:
-    start = _declaration_start(document, entry.symbol.decl_range.start_line)
+    start = _declaration_start(document, entry.line)
     token_index = document.first_token_index(start)
     equals_index = _next_token_value(document.tokens, token_index, "=")
     if equals_index is None:
@@ -1939,7 +2117,7 @@ def _type_declaration_layout(
     document: _SourceDocument,
     entry: _SymbolEntry,
 ) -> tuple[tuple[int, int] | None, bool]:
-    start = _declaration_start(document, entry.symbol.decl_range.start_line)
+    start = _declaration_start(document, entry.line)
     token_index = document.first_token_index(start)
     equals_index = _next_token_value(document.tokens, token_index, "=")
     if equals_index is None:
@@ -2516,13 +2694,29 @@ def _ranked_entries(entries: tuple[_SymbolEntry, ...], query: str) -> list[_Symb
     normalized_query = _normalized(query.strip())
     ranked: list[tuple[int, tuple[object, ...], _SymbolEntry]] = []
     for entry in entries:
+        normalized_qualified = entry.normalized_qualified_name
+        relative_offset = entry.relative_name_offset
         if not normalized_query:
             rank = 3
-        elif any(name == normalized_query for name in entry.search_names):
+        elif (
+            entry.normalized_name == normalized_query
+            or normalized_qualified == normalized_query
+            or (
+                len(normalized_qualified) - relative_offset == len(normalized_query)
+                and normalized_qualified.endswith(normalized_query)
+            )
+        ):
             rank = 0
-        elif any(name.startswith(normalized_query) for name in entry.search_names):
+        elif (
+            entry.normalized_name.startswith(normalized_query)
+            or normalized_qualified.startswith(normalized_query)
+            or normalized_qualified.startswith(normalized_query, relative_offset)
+        ):
             rank = 1
-        elif any(normalized_query in name for name in entry.search_names):
+        elif (
+            normalized_query in entry.normalized_name
+            or normalized_query in normalized_qualified
+        ):
             rank = 2
         else:
             continue
@@ -2545,9 +2739,9 @@ def _raw_sort_key(raw: _RawSymbol) -> tuple[object, ...]:
     return (
         raw.path.casefold(),
         raw.path,
-        raw.symbol.decl_range.start_line,
-        raw.symbol.decl_range.start_col,
-        raw.symbol.kind.value.casefold(),
+        raw.line,
+        raw.column,
+        raw.kind.value.casefold(),
         _normalized(raw.qualified_name),
         raw.qualified_name,
     )
@@ -2556,11 +2750,11 @@ def _raw_sort_key(raw: _RawSymbol) -> tuple[object, ...]:
 def _entry_sort_key(entry: _SymbolEntry) -> tuple[object, ...]:
     return (
         entry.normalized_qualified_name,
-        entry.symbol.kind.value.casefold(),
+        entry.kind.value.casefold(),
         entry.path.casefold(),
         entry.path,
-        entry.symbol.decl_range.start_line,
-        entry.symbol.decl_range.start_col,
+        entry.line,
+        entry.column,
         entry.ordinal,
         entry.target_id,
     )
@@ -2570,22 +2764,20 @@ def _normalized(value: str) -> str:
     return unicodedata.normalize("NFC", value).casefold()
 
 
-def _normalized_search_names(
+def _normalized_search_fields(
     name: str,
     qualified_name: str,
     unit_name: str,
-) -> tuple[str, tuple[str, ...]]:
+) -> tuple[str, str, int]:
     normalized_name = _normalized(name)
     normalized_qualified = _normalized(qualified_name)
     prefix = f"{_normalized(unit_name)}."
-    relative_name = (
-        normalized_qualified[len(prefix):]
+    relative_name_offset = (
+        len(prefix)
         if normalized_qualified.startswith(prefix)
-        else normalized_qualified
+        else 0
     )
-    return normalized_qualified, tuple(
-        dict.fromkeys((normalized_name, normalized_qualified, relative_name))
-    )
+    return normalized_name, normalized_qualified, relative_name_offset
 
 
 def _request_fingerprint(

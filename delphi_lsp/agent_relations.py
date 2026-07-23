@@ -65,6 +65,9 @@ class RelationTarget:
     line: int
     column: int
     card: Mapping[str, object]
+    visibility: str = ""
+    type_name: str = ""
+    owner: str = ""
 
 
 @dataclass(frozen=True)
@@ -98,9 +101,13 @@ class ProjectRelationIndex:
         project_id: str,
         revision: str,
         targets: Sequence[RelationTarget],
+        *,
+        targets_complete: bool = True,
     ) -> None:
         self.project_id = project_id
         self.revision = revision
+        self.targets_complete = targets_complete
+        self._workspace = workspace
         self._root = workspace.root
         self._targets = {target.target_id: target for target in targets}
         self._target_groups = {
@@ -134,10 +141,9 @@ class ProjectRelationIndex:
             )
             self._identity_targets.setdefault(identity, []).append(target)
 
-        roots, load_problems = _load_project_roots(workspace)
-        self._roots = roots
-        self._problems = list(load_problems)
-        self._semantics = build_workspace_semantics_from_roots(roots) if roots else None
+        self._roots: dict[str, SyntaxNode] = {}
+        self._problems: list[dict[str, object]] = []
+        self._semantics: WorkspaceSemanticResult | None = None
         self._symbol_targets: dict[int, RelationTarget | None] = {}
         self._references: list[_ReferenceRecord] = []
         self._unit_edges: list[_UnitEdge] = []
@@ -145,12 +151,9 @@ class ProjectRelationIndex:
         self._implements: list[_TypeEdge] = []
         self._unresolved_references = 0
         self._ambiguous_references = 0
-        if self._semantics is not None:
-            self._build_graph(self._semantics)
-            self._add_contains_edges(self._semantics)
-            self._add_semantic_problems(self._semantics)
+        self._deep_graph_ready = False
+        self._unit_sources_loaded: set[_GroupKey] = set()
         self._index_graph()
-        self._problems = _dedupe_mappings(self._problems)
 
     @property
     def estimated_cache_bytes(self) -> int:
@@ -189,6 +192,23 @@ class ProjectRelationIndex:
             raise AgentProtocolError("target_not_found", f"Target not found: {target_id}.")
         self._validate_applicability(target, relation)
         group = self._target_groups[target_id]
+        active_project = self._workspace.active_project
+        lightweight_units = (
+            active_project is not None
+            and active_project.kind == "workspace"
+        )
+        if relation == "uses" and lightweight_units:
+            self._ensure_unit_graph((group,))
+        elif relation == "used_by" and lightweight_units:
+            self._ensure_unit_graph(
+                tuple(
+                    candidate_group
+                    for candidate_group, candidates in self._groups.items()
+                    if candidates and candidates[0].kind == SymbolKind.UNIT.value
+                )
+            )
+        else:
+            self._ensure_deep_graph()
 
         if relation == "references":
             items = [
@@ -236,6 +256,150 @@ class ProjectRelationIndex:
         result.extend(relations)
         result.extend(self._problems)
         return result
+
+    def _ensure_unit_graph(self, groups: Sequence[_GroupKey]) -> None:
+        if self._deep_graph_ready:
+            return
+        for group in groups:
+            if group in self._unit_sources_loaded:
+                continue
+            self._unit_sources_loaded.add(group)
+            candidates = self._groups.get(group)
+            if not candidates:
+                continue
+            source = candidates[0]
+            try:
+                text = read_source_text(Path(source.source_path))
+                parsed = DelphiParser(
+                    include_paths=self._workspace.include_paths,
+                    defines=self._workspace.defines,
+                    mode=(
+                        ParserMode.TOLERANT
+                        if len(self._workspace.units) >= 256
+                        else ParserMode.STRICT
+                    ),
+                ).parse(
+                    text,
+                    source.source_path,
+                    build_semantic=False,
+                )
+            except Exception as error:
+                self._problems.append(
+                    {
+                        "item_type": "relation_problem",
+                        "kind": "cant_parse_file",
+                        "message": _safe_problem_message(
+                            f"{type(error).__name__}: {error}",
+                            self._root,
+                            (
+                                source.source_path,
+                                getattr(error, "filename", None),
+                                getattr(error, "filename2", None),
+                            ),
+                        ),
+                        "path": source.path,
+                    }
+                )
+                continue
+            if parsed.problems:
+                first = parsed.problems[0]
+                self._problems.append(
+                    {
+                        "item_type": "relation_problem",
+                        "kind": "partial_parse",
+                        "message": (
+                            f"Partial DelphiAST parse at {first.line}:{first.column}: "
+                            f"{first.message}"
+                        ),
+                        "path": source.path,
+                    }
+                )
+            self._add_lightweight_unit_edges(source, parsed.root)
+        self._index_graph()
+        self._problems = _dedupe_mappings(self._problems)
+
+    def _add_lightweight_unit_edges(
+        self,
+        source: RelationTarget,
+        root: SyntaxNode,
+    ) -> None:
+        source_group = _target_group(source)
+        unit_targets = {
+            _normalized(target.unit_name or target.name): target
+            for target in self._targets.values()
+            if target.kind == SymbolKind.UNIT.value
+        }
+        pending = [root]
+        while pending:
+            node = pending.pop()
+            pending.extend(reversed(node.child_nodes))
+            if node.typ not in {
+                SyntaxNodeType.ntUses,
+                SyntaxNodeType.ntContains,
+                SyntaxNodeType.ntRequires,
+            }:
+                continue
+            for child in node.child_nodes:
+                if child.typ != SyntaxNodeType.ntUnit:
+                    continue
+                name = child.get_attribute(AttributeName.anName).strip()
+                target = unit_targets.get(_normalized(name))
+                if target is None:
+                    self._unresolved_references += 1
+                    self._problems.append(
+                        {
+                            "item_type": "relation_problem",
+                            "kind": "unresolved_unit",
+                            "message": f"Unit not found: {name}",
+                            "path": source.path,
+                            "line": child.line,
+                            "column": child.col,
+                        }
+                    )
+                    continue
+                evidence = {
+                    "path": source.path,
+                    "line": child.line,
+                    "column": child.col,
+                    "kind": (
+                        "contains"
+                        if node.typ == SyntaxNodeType.ntContains
+                        else "uses"
+                    ),
+                }
+                self._unit_edges.append(
+                    _UnitEdge(
+                        source_group=source_group,
+                        target_group=_target_group(target),
+                        evidence=evidence,
+                    )
+                )
+
+    def _ensure_deep_graph(self) -> None:
+        if self._deep_graph_ready:
+            return
+        roots, load_problems = _load_project_roots(self._workspace)
+        self._roots = roots
+        self._problems = list(load_problems)
+        self._semantics = (
+            build_workspace_semantics_from_roots(roots)
+            if roots
+            else None
+        )
+        self._symbol_targets.clear()
+        self._references.clear()
+        self._unit_edges.clear()
+        self._inherits.clear()
+        self._implements.clear()
+        self._unresolved_references = 0
+        self._ambiguous_references = 0
+        if self._semantics is not None:
+            self._build_graph(self._semantics)
+            self._add_contains_edges(self._semantics)
+            self._add_semantic_problems(self._semantics)
+        self._deep_graph_ready = True
+        self._index_graph()
+        self._problems = _dedupe_mappings(self._problems)
 
     def _index_graph(self) -> None:
         references_by_target: dict[_GroupKey, list[_ReferenceRecord]] = {}
@@ -464,10 +628,27 @@ class ProjectRelationIndex:
         if not candidates:
             return None
         target = candidates[0]
+        card = (
+            dict(target.card)
+            if target.card
+            else {
+                "target_id": target.target_id,
+                "unit_id": target.unit_id,
+                "name": target.name,
+                "qualified_name": target.qualified_name,
+                "kind": target.kind,
+                "path": target.path,
+                "line": target.line,
+                "column": target.column,
+                "visibility": target.visibility,
+                "owner": target.owner,
+                "type": target.type_name,
+            }
+        )
         return {
             "item_type": "relation",
             "relation": relation,
-            **dict(target.card),
+            **card,
             "evidence": dict(evidence),
         }
 
