@@ -658,7 +658,7 @@ class AgentContext:
         return revision
 
     def invalidate_revision_cache(self) -> None:
-        self._last_revision_check_at = 0.0
+        self._last_revision_check_at = float("-inf")
 
     def handle(self, request: AgentRequest | Mapping[str, object]) -> AgentResponse:
         parsed = _validated_request(request)

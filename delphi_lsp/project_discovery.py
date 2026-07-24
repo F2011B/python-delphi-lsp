@@ -75,7 +75,11 @@ def discover_delphi_project(
     on_progress: ProgressCallback | None = None,
 ) -> DelphiProjectDiscovery:
     root_path = Path(root).expanduser().resolve()
-    project_path = Path(project_file).expanduser().resolve() if project_file is not None else None
+    project_path = Path(project_file).expanduser() if project_file is not None else None
+    if project_path is not None:
+        if not project_path.is_absolute():
+            project_path = root_path / project_path
+        project_path = project_path.resolve()
     discovery = DelphiProjectDiscovery(root=str(root_path))
     _emit_progress(on_progress, "discovery", str(root_path), 0, 0, None, "project discovery started")
 

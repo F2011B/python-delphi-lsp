@@ -26,6 +26,90 @@ from delphi_lsp.agent_context import AgentContext
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_workspace_change_watcher_invalidates_revision_cache(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from delphi_lsp import agent_cache
+
+    stop = threading.Event()
+    invalidations: list[None] = []
+
+    def changed(*_args, **_kwargs):
+        yield {(1, str(tmp_path / "Changed.pas"))}
+        stop.set()
+
+    monkeypatch.setattr(agent_cache, "watch", changed)
+
+    agent_cache.watch_workspace_changes(
+        tmp_path,
+        stop_event=stop,
+        on_change=lambda: invalidations.append(None),
+    )
+
+    assert invalidations == [None]
+
+
+def test_workspace_change_watcher_invalidates_when_backend_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from delphi_lsp import agent_cache
+
+    def failed_watch(*_args, **_kwargs):
+        raise OSError("watch backend unavailable")
+
+    invalidations: list[None] = []
+    monkeypatch.setattr(agent_cache, "watch", failed_watch)
+
+    agent_cache.watch_workspace_changes(
+        tmp_path,
+        stop_event=threading.Event(),
+        on_change=lambda: invalidations.append(None),
+    )
+
+    assert invalidations == [None]
+
+
+def test_current_process_rss_dispatches_platform_measurements(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from delphi_lsp import agent_cache
+
+    monkeypatch.setattr(agent_cache.sys, "platform", "darwin")
+    monkeypatch.setattr(agent_cache, "_darwin_process_rss_bytes", lambda: 123)
+    assert agent_cache.current_process_rss_bytes() == 123
+
+    monkeypatch.setattr(agent_cache.sys, "platform", "linux")
+    monkeypatch.setattr(
+        agent_cache.Path,
+        "read_text",
+        lambda _path, **_options: "100 12 0 0 0 0 0",
+    )
+    monkeypatch.setattr(agent_cache.os, "sysconf", lambda _name: 4096)
+    assert agent_cache.current_process_rss_bytes() == 12 * 4096
+
+    monkeypatch.setattr(agent_cache.sys, "platform", "win32")
+    monkeypatch.setattr(agent_cache.os, "name", "nt")
+    monkeypatch.setattr(agent_cache, "_windows_process_rss_bytes", lambda: 456)
+    assert agent_cache.current_process_rss_bytes() == 456
+
+
+def test_current_process_rss_returns_zero_when_measurement_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from delphi_lsp import agent_cache
+
+    monkeypatch.setattr(agent_cache.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        agent_cache,
+        "_darwin_process_rss_bytes",
+        lambda: (_ for _ in ()).throw(RuntimeError("unavailable")),
+    )
+
+    assert agent_cache.current_process_rss_bytes() == 0
+
+
 def test_cache_daemon_lifecycle_reuses_one_authenticated_process(tmp_path: Path) -> None:
     from delphi_lsp.agent_cache import cache_metadata_path, cache_status, query_cache, start_cache, stop_cache
 
@@ -411,7 +495,48 @@ def test_cache_service_uses_constant_time_accounting_instead_of_deep_graph_walk(
     response = service.request({"action": "find", "query": "TIndexed"})
 
     assert any(item["name"] == "TIndexed" for item in response.payload["result"])
-    assert service.last_budget.retained_bytes == service.context.estimated_cache_bytes
+    assert service.last_budget.retained_bytes >= service.context.estimated_cache_bytes
+
+
+def test_cache_service_accounts_for_unestimated_process_rss(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from delphi_lsp import agent_cache
+    from delphi_lsp.agent_cache import CacheMetadata, _CacheService
+
+    write_source(tmp_path / "Demo.dpr", "program Demo; begin end.")
+    monkeypatch.setattr(agent_cache, "current_process_rss_bytes", lambda: 1_000)
+    metadata = CacheMetadata(
+        2,
+        str(tmp_path.resolve()),
+        os.getpid(),
+        1,
+        "x" * 32,
+        "test",
+        "",
+        10_000,
+        1,
+        10,
+        time.time(),
+    )
+    service = _CacheService(metadata)
+    monkeypatch.setattr(
+        type(service.context),
+        "estimated_cache_bytes",
+        property(lambda _context: 100),
+    )
+    monkeypatch.setattr(agent_cache, "current_process_rss_bytes", lambda: 9_500)
+
+    assert service._measure_retained_bytes() == 8_500
+    result = service.budget.enforce(
+        measure=service._measure_retained_bytes,
+        evict_auxiliary=lambda: None,
+        evict_navigation=lambda: None,
+    )
+    assert result.utilization_percent == 85.0
+    assert result.warning_active is True
+    assert result.warning_triggered is True
 
 
 def test_cache_prewarm_builds_registry_without_running_a_find_response(

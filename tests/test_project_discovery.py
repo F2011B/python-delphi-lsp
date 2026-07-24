@@ -183,6 +183,26 @@ def test_discovery_can_skip_workspace_source_scan(tmp_path: Path) -> None:
     assert discovery.unit_paths == {}
 
 
+def test_relative_project_file_is_resolved_from_workspace_root(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    write_text(workspace / "Main.dpr", "program Main; begin end.")
+    monkeypatch.chdir(elsewhere)
+
+    discovery = discover_delphi_project(
+        workspace,
+        project_file=Path("Main.dpr"),
+        scan_workspace_sources=False,
+    )
+
+    assert discovery.project_files == [str((workspace / "Main.dpr").resolve())]
+    assert discovery.problems == []
+
+
 def test_discovery_records_deterministic_path_and_define_origins(tmp_path: Path) -> None:
     write_text(
         tmp_path / "Main.dpr",

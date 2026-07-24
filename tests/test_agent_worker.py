@@ -8,6 +8,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -90,6 +91,215 @@ def test_worker_parallel_output_is_deterministic(tmp_path: Path) -> None:
     assert parallel.stderr == b""
 
 
+def test_worker_context_uses_persistent_navigation_cache(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+    sentinel = object()
+
+    def open_context(root, project_file, **options):
+        captured["root"] = root
+        captured["project_file"] = project_file
+        captured["options"] = options
+        return sentinel
+
+    monkeypatch.setattr(agent_cli.AgentContext, "open", open_context)
+    monkeypatch.setattr(
+        agent_cli,
+        "navigation_cache_path",
+        lambda root, create: Path(root) / "persistent-navigation",
+    )
+
+    context = agent_cli._open_worker_context(tmp_path, Path("Main.dpr"), 3)
+
+    assert context is sentinel
+    assert captured == {
+        "root": tmp_path,
+        "project_file": Path("Main.dpr"),
+        "options": {
+            "workers": 3,
+            "revision_check_interval_seconds": 30.0,
+            "navigation_cache_dir": tmp_path / "persistent-navigation",
+        },
+    }
+
+
+def test_worker_context_falls_back_when_cache_directory_is_not_writable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+    sentinel = object()
+
+    def open_context(root, project_file, **options):
+        captured["root"] = root
+        captured["project_file"] = project_file
+        captured["options"] = options
+        return sentinel
+
+    def fail_cache_path(_root, *, create):
+        assert create is True
+        raise PermissionError("read-only workspace")
+
+    monkeypatch.setattr(agent_cli.AgentContext, "open", open_context)
+    monkeypatch.setattr(agent_cli, "navigation_cache_path", fail_cache_path)
+
+    context = agent_cli._open_worker_context(tmp_path, None, 0)
+
+    assert context is sentinel
+    assert captured["options"] == {
+        "workers": 0,
+        "revision_check_interval_seconds": 30.0,
+        "navigation_cache_dir": None,
+    }
+
+
+def test_worker_context_falls_back_from_unsafe_cache_metadata(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+    sentinel = object()
+
+    def open_context(_root, _project_file, **options):
+        captured["options"] = options
+        return sentinel
+
+    def fail_cache_path(_root, *, create):
+        assert create is True
+        raise agent_cli.CacheClientError(
+            "unsafe_metadata",
+            "Cache metadata path is unsafe.",
+        )
+
+    monkeypatch.setattr(agent_cli.AgentContext, "open", open_context)
+    monkeypatch.setattr(agent_cli, "navigation_cache_path", fail_cache_path)
+
+    context = agent_cli._open_worker_context(tmp_path, None, 0)
+
+    assert context is sentinel
+    assert captured["options"] == {
+        "workers": 0,
+        "revision_check_interval_seconds": 30.0,
+        "navigation_cache_dir": None,
+    }
+
+
+def test_worker_materializes_reusable_navigation_shards(tmp_path: Path) -> None:
+    _write_source(
+        tmp_path / "Main.pas",
+        """unit Main;
+interface
+type
+  TPersistentWorker = class
+  end;
+implementation
+end.
+""",
+    )
+
+    completed = _worker(
+        tmp_path,
+        b'{"action":"find","query":"TPersistentWorker"}\n',
+    )
+
+    shards = tuple(
+        (tmp_path / ".delphi-lsp" / "agent-cache" / "navigation-v1").glob(
+            "*/*.json"
+        )
+    )
+    assert completed.returncode == 0
+    assert shards
+    assert completed.stderr == b""
+
+
+def test_worker_watcher_refreshes_cached_navigation_after_source_change(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "Main.pas"
+    _write_source(
+        source,
+        """unit Main;
+interface
+type
+  TOriginalWorker = class
+  end;
+implementation
+end.
+""",
+    )
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "delphi_lsp.agent_cli",
+            "worker",
+            "--root",
+            str(tmp_path),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    assert process.stderr is not None
+    try:
+        process.stdin.write(
+            b'{"action":"find","query":"TOriginalWorker"}\n'
+        )
+        process.stdin.flush()
+        original = json.loads(process.stdout.readline())
+        assert any(item["name"] == "TOriginalWorker" for item in original["result"])
+
+        time.sleep(1.0)
+        _write_source(
+            source,
+            """unit Main;
+interface
+type
+  TChangedWorker = class
+  end;
+implementation
+end.
+""",
+        )
+        deadline = time.monotonic() + 5.0
+        changed: dict[str, object] = {}
+        while time.monotonic() < deadline:
+            process.stdin.write(
+                b'{"action":"find","query":"TChangedWorker"}\n'
+            )
+            process.stdin.flush()
+            changed = json.loads(process.stdout.readline())
+            if any(
+                item["name"] == "TChangedWorker"
+                for item in changed["result"]
+            ):
+                break
+            time.sleep(0.05)
+
+        process.stdin.close()
+        assert process.wait(timeout=5) == 0
+        stderr = process.stderr.read()
+        assert any(
+            item["name"] == "TChangedWorker"
+            for item in changed["result"]
+        ), stderr.decode("utf-8", "replace")
+        assert stderr == b""
+    finally:
+        if not process.stdin.closed:
+            process.stdin.close()
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+
+
 def test_parser_adds_cache_lifecycle_and_ergonomic_query_commands() -> None:
     parser = agent_cli.build_parser()
 
@@ -146,9 +356,21 @@ def test_parser_adds_cache_lifecycle_and_ergonomic_query_commands() -> None:
         parser.parse_args(["cache", "serve", "--root", "workspace"])
 
 
-def test_query_maps_project_id_value_and_protocol_defaults(monkeypatch, capsys) -> None:
+def test_query_maps_project_id_value_and_protocol_defaults(
+    monkeypatch,
+    capsys,
+    tmp_path: Path,
+) -> None:
     args = agent_cli.build_parser().parse_args(
-        ["query", "--root", "workspace", "find", "TCustomer", "--project-id", "Main.dpr"]
+        [
+            "query",
+            "--root",
+            str(tmp_path),
+            "find",
+            "TCustomer",
+            "--project-id",
+            "Main.dpr",
+        ]
     )
     captured: dict[str, object] = {}
 
@@ -161,7 +383,7 @@ def test_query_maps_project_id_value_and_protocol_defaults(monkeypatch, capsys) 
 
     assert agent_cli._query(args) == 0
     assert captured == {
-        "root": Path("workspace"),
+        "root": tmp_path.resolve(),
         "request": {
             "action": "find",
             "query": "TCustomer",
@@ -220,7 +442,7 @@ end.
         assert status.returncode == 0
         assert reported["pid"] == started["pid"]
         assert reported["warning_threshold_percent"] == 80
-        assert status.stderr == ""
+        assert "Warning:" in status.stderr
 
         text_status = subprocess.run(
             [sys.executable, "-m", "delphi_lsp.agent_cli", "cache", "status", "--root", str(tmp_path)],
@@ -230,7 +452,7 @@ end.
         )
         assert text_status.returncode == 0
         assert text_status.stdout.startswith(f"running pid={started['pid']} state=")
-        assert text_status.stderr == ""
+        assert "Warning:" in text_status.stderr
     finally:
         stop = subprocess.run(
             [sys.executable, "-m", "delphi_lsp.agent_cli", "cache", "stop", "--root", str(tmp_path)],
@@ -240,7 +462,7 @@ end.
         )
     assert stop.returncode == 0
     assert json.loads(stop.stdout) == {"stopped": True}
-    assert stop.stderr == ""
+    assert "Warning:" in stop.stderr
 
 
 def test_query_does_not_start_a_missing_cache_and_sanitizes_errors(tmp_path: Path) -> None:

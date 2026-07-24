@@ -45,6 +45,88 @@ _WATCHED_SUFFIXES = frozenset(
 )
 
 
+def current_process_rss_bytes() -> int:
+    """Return the current resident set size, or zero when unavailable."""
+    try:
+        if sys.platform == "darwin":
+            return _darwin_process_rss_bytes()
+        if sys.platform.startswith("linux"):
+            statm = Path("/proc/self/statm").read_text(encoding="ascii").split()
+            return int(statm[1]) * int(os.sysconf("SC_PAGE_SIZE"))
+        if os.name == "nt":
+            return _windows_process_rss_bytes()
+    except Exception:
+        pass
+    return 0
+
+
+def _darwin_process_rss_bytes() -> int:
+    import ctypes
+
+    class TimeValue(ctypes.Structure):
+        _fields_ = [("seconds", ctypes.c_int), ("microseconds", ctypes.c_int)]
+
+    class MachTaskBasicInfo(ctypes.Structure):
+        _fields_ = [
+            ("virtual_size", ctypes.c_uint64),
+            ("resident_size", ctypes.c_uint64),
+            ("resident_size_max", ctypes.c_uint64),
+            ("user_time", TimeValue),
+            ("system_time", TimeValue),
+            ("policy", ctypes.c_int),
+            ("suspend_count", ctypes.c_int),
+        ]
+
+    library = ctypes.CDLL(None)
+    library.mach_task_self.restype = ctypes.c_uint
+    library.task_info.argtypes = (
+        ctypes.c_uint,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_uint),
+    )
+    library.task_info.restype = ctypes.c_int
+    info = MachTaskBasicInfo()
+    count = ctypes.c_uint(ctypes.sizeof(info) // ctypes.sizeof(ctypes.c_int))
+    result = library.task_info(
+        library.mach_task_self(),
+        20,
+        ctypes.byref(info),
+        ctypes.byref(count),
+    )
+    return int(info.resident_size) if result == 0 else 0
+
+
+def _windows_process_rss_bytes() -> int:
+    import ctypes
+    from ctypes import wintypes
+
+    class ProcessMemoryCounters(ctypes.Structure):
+        _fields_ = [
+            ("cb", wintypes.DWORD),
+            ("PageFaultCount", wintypes.DWORD),
+            ("PeakWorkingSetSize", ctypes.c_size_t),
+            ("WorkingSetSize", ctypes.c_size_t),
+            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+            ("PagefileUsage", ctypes.c_size_t),
+            ("PeakPagefileUsage", ctypes.c_size_t),
+        ]
+
+    counters = ProcessMemoryCounters()
+    counters.cb = ctypes.sizeof(counters)
+    process = ctypes.windll.kernel32.GetCurrentProcess()
+    if not ctypes.windll.psapi.GetProcessMemoryInfo(
+        process,
+        ctypes.byref(counters),
+        counters.cb,
+    ):
+        return 0
+    return int(counters.WorkingSetSize)
+
+
 def estimate_deep_size(value: object) -> int:
     """Estimate the memory retained by an owned object graph.
 
@@ -290,6 +372,11 @@ def _safe_navigation_cache_path(root: str | Path, *, create: bool = False) -> Pa
         if os.name != "nt":
             os.chmod(result, 0o700)
     return result
+
+
+def navigation_cache_path(root: str | Path, *, create: bool = False) -> Path:
+    """Return the validated persistent navigation-cache directory."""
+    return _safe_navigation_cache_path(root, create=create)
 
 
 def _metadata_mapping(metadata: CacheMetadata) -> dict[str, object]:
@@ -555,13 +642,14 @@ def _read_startup_tail(diagnostics: object, *, max_bytes: int = _STARTUP_DIAGNOS
 class _CacheService:
     def __init__(self, metadata: CacheMetadata) -> None:
         self.metadata = metadata
+        self._rss_baseline_bytes = current_process_rss_bytes()
         self.context = AgentContext.open(
             metadata.root,
             metadata.project_file or None,
             workers=metadata.workers,
             worker_memory_budget_bytes=metadata.max_memory_bytes,
             revision_check_interval_seconds=_CACHE_REVISION_CHECK_INTERVAL_SECONDS,
-            navigation_cache_dir=_safe_navigation_cache_path(
+            navigation_cache_dir=navigation_cache_path(
                 metadata.root,
                 create=True,
             ),
@@ -577,6 +665,15 @@ class _CacheService:
         self.prewarm_seconds = 0.0
         self.shutdown = threading.Event()
 
+    def _measure_retained_bytes(self) -> int:
+        process_rss = current_process_rss_bytes()
+        process_growth = (
+            max(0, process_rss - self._rss_baseline_bytes)
+            if process_rss > 0 and self._rss_baseline_bytes > 0
+            else 0
+        )
+        return max(self.context.estimated_cache_bytes, process_growth)
+
     def prewarm(self) -> None:
         started = time.monotonic()
         try:
@@ -587,7 +684,7 @@ class _CacheService:
                 raise
             self.cache_state = "ready"
         self.last_budget = self.budget.enforce(
-            measure=lambda: self.context.estimated_cache_bytes,
+            measure=self._measure_retained_bytes,
             evict_auxiliary=self.context.evict_auxiliary_caches,
             evict_navigation=self.context.evict_navigation_caches,
         )
@@ -628,7 +725,7 @@ class _CacheService:
             if before != after:
                 self.stats.invalidations += 1
             self.last_budget = self.budget.enforce(
-                measure=lambda: self.context.estimated_cache_bytes,
+                measure=self._measure_retained_bytes,
                 evict_auxiliary=self.context.evict_auxiliary_caches,
                 evict_navigation=self.context.evict_navigation_caches,
             )
@@ -675,21 +772,34 @@ def _watch_filter(_change: object, path: str) -> bool:
     return Path(path).suffix.casefold() in _WATCHED_SUFFIXES
 
 
-def _watch_workspace(service: _CacheService) -> None:
+def watch_workspace_changes(
+    root: str | Path,
+    *,
+    stop_event: threading.Event,
+    on_change: Callable[[], None],
+) -> None:
     try:
         for changes in watch(
-            service.metadata.root,
+            root,
             watch_filter=_watch_filter,
-            stop_event=service.shutdown,
+            stop_event=stop_event,
             debounce=50,
             step=20,
             recursive=True,
             raise_interrupt=False,
         ):
             if changes:
-                service.context.invalidate_revision_cache()
+                on_change()
     except (OSError, RuntimeError):
-        service.context.invalidate_revision_cache()
+        on_change()
+
+
+def _watch_workspace(service: _CacheService) -> None:
+    watch_workspace_changes(
+        service.metadata.root,
+        stop_event=service.shutdown,
+        on_change=service.context.invalidate_revision_cache,
+    )
 
 
 def _serve_connection(connection: socket.socket, service: _CacheService) -> None:
@@ -867,6 +977,8 @@ def start_cache(
 ) -> CacheMetadata:
     if type(workers) is not int or not 0 <= workers <= 32:
         raise ValueError("workers must be auto or an integer from 1 through 32.")
+    if type(idle_timeout) is not int or idle_timeout <= 0:
+        raise ValueError("idle_timeout must be greater than zero.")
     if not math.isfinite(startup_timeout) or startup_timeout <= 0:
         raise ValueError("startup_timeout must be greater than zero.")
     with _start_lock(root, startup_timeout):
@@ -930,7 +1042,7 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument("--project-file", default="")
     serve.add_argument("--max-memory", type=int, default=DEFAULT_MAX_MEMORY_BYTES)
     serve.add_argument("--workers", type=int, default=0)
-    serve.add_argument("--idle-timeout", type=int, default=DEFAULT_IDLE_TIMEOUT)
+    serve.add_argument("--idle-timeout", type=_positive_integer, default=DEFAULT_IDLE_TIMEOUT)
     args = parser.parse_args(argv)
     if args.command == "serve":
         run_cache_daemon(
@@ -941,6 +1053,13 @@ def main(argv: list[str] | None = None) -> int:
             idle_timeout=args.idle_timeout,
         )
     return 0
+
+
+def _positive_integer(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be greater than zero")
+    return parsed
 
 
 if __name__ == "__main__":
