@@ -45,6 +45,8 @@ _WATCHER_READY_POLL_MILLISECONDS = 50
 _WATCHED_SUFFIXES = frozenset(
     {".pas", ".pp", ".inc", ".dpr", ".dpk", ".dproj", ".cfg"}
 )
+_PROCESS_START_LOCKS_GUARD = threading.Lock()
+_PROCESS_START_LOCKS: dict[str, tuple[threading.Lock, int]] = {}
 
 
 def current_process_rss_bytes() -> int:
@@ -580,6 +582,30 @@ def _start_lock(root: str | Path, timeout: float):
             pass
 
 
+@contextlib.contextmanager
+def _process_start_lock(root: str | Path):
+    canonical = str(Path(root).resolve())
+    with _PROCESS_START_LOCKS_GUARD:
+        lock, users = _PROCESS_START_LOCKS.get(
+            canonical,
+            (threading.Lock(), 0),
+        )
+        _PROCESS_START_LOCKS[canonical] = (lock, users + 1)
+    try:
+        with lock:
+            yield
+    finally:
+        with _PROCESS_START_LOCKS_GUARD:
+            current_lock, current_users = _PROCESS_START_LOCKS[canonical]
+            if current_users == 1:
+                del _PROCESS_START_LOCKS[canonical]
+            else:
+                _PROCESS_START_LOCKS[canonical] = (
+                    current_lock,
+                    current_users - 1,
+                )
+
+
 def _client_exchange(metadata: CacheMetadata, request: dict[str, object]) -> CacheClientResponse:
     try:
         with socket.create_connection(("127.0.0.1", metadata.port), timeout=2) as connection:
@@ -969,10 +995,7 @@ def run_cache_daemon(
         service.start_prewarm()
         while (
             not service.shutdown.is_set()
-            and (
-                service.cache_state == "warming"
-                or time.monotonic() - service.last_activity < idle_timeout
-            )
+            and time.monotonic() - service.last_activity < idle_timeout
         ):
             try:
                 connection, _ = listener.accept()
@@ -1114,15 +1137,16 @@ def start_cache(
         raise ValueError("idle_timeout must be greater than zero.")
     if not math.isfinite(startup_timeout) or startup_timeout <= 0:
         raise ValueError("startup_timeout must be greater than zero.")
-    with _start_lock(root, startup_timeout):
-        return _start_cache_unlocked(
-            root,
-            project_file=project_file,
-            max_memory_bytes=max_memory_bytes,
-            workers=workers,
-            idle_timeout=idle_timeout,
-            startup_timeout=startup_timeout,
-        )
+    with _process_start_lock(root):
+        with _start_lock(root, startup_timeout):
+            return _start_cache_unlocked(
+                root,
+                project_file=project_file,
+                max_memory_bytes=max_memory_bytes,
+                workers=workers,
+                idle_timeout=idle_timeout,
+                startup_timeout=startup_timeout,
+            )
 
 
 def query_cache(root: str | Path, request: dict[str, object]) -> CacheClientResponse:

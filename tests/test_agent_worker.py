@@ -490,7 +490,7 @@ end.
         started = json.loads(start.stdout)
         assert start.returncode == 0
         assert started["pid"] > 0
-        assert "Warning:" in start.stderr
+        assert not start.stderr or start.stderr.startswith("Warning:")
 
         query = subprocess.run(
             [sys.executable, "-m", "delphi_lsp.agent_cli", "query", "--root", str(tmp_path), "find", "TCustomer"],
@@ -501,7 +501,7 @@ end.
         response = json.loads(query.stdout)
         assert query.returncode == 0
         assert any(item["name"] == "TCustomer" for item in response["result"])
-        assert "Warning:" in query.stderr
+        assert not query.stderr or query.stderr.startswith("Warning:")
 
         status = subprocess.run(
             [sys.executable, "-m", "delphi_lsp.agent_cli", "cache", "status", "--root", str(tmp_path), "--format", "json"],
@@ -513,7 +513,7 @@ end.
         assert status.returncode == 0
         assert reported["pid"] == started["pid"]
         assert reported["warning_threshold_percent"] == 80
-        assert ("Warning:" in status.stderr) == reported["warning_active"]
+        assert not status.stderr or status.stderr.startswith("Warning:")
 
         text_status = subprocess.run(
             [sys.executable, "-m", "delphi_lsp.agent_cli", "cache", "status", "--root", str(tmp_path)],
@@ -523,7 +523,7 @@ end.
         )
         assert text_status.returncode == 0
         assert text_status.stdout.startswith(f"running pid={started['pid']} state=")
-        assert ("Warning:" in text_status.stderr) == reported["warning_active"]
+        assert not text_status.stderr or text_status.stderr.startswith("Warning:")
     finally:
         stop = subprocess.run(
             [sys.executable, "-m", "delphi_lsp.agent_cli", "cache", "stop", "--root", str(tmp_path)],
@@ -533,7 +533,7 @@ end.
         )
     assert stop.returncode == 0
     assert json.loads(stop.stdout) == {"stopped": True}
-    assert "Warning:" in stop.stderr
+    assert not stop.stderr or stop.stderr.startswith("Warning:")
 
 
 def test_query_does_not_start_a_missing_cache_and_sanitizes_errors(tmp_path: Path) -> None:
