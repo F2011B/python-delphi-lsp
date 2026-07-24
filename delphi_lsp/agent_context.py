@@ -21,6 +21,8 @@ from .agent_protocol import (
     make_target_id,
     paginate_items,
 )
+from .agent_cpg import CpgSubgraph, CpgTarget
+from .agent_cpg_builder import build_cpg_subgraph
 from .agent_metrics import build_workspace_metrics, project_metric_item, unit_metric_item
 from .agent_relations import ProjectRelationIndex, RelationTarget
 from .agent_workspace import AgentUnit, AgentWorkspace, unit_display_path, unit_source_path, unit_target_id
@@ -30,6 +32,7 @@ from .metrics import ProjectMetrics
 from .navigation_cache import NavigationShardStore, navigation_cache_key
 from .nodes import CompoundSyntaxNode, SyntaxNode
 from .parser import DelphiParser
+from .parser_backend import ParserMode
 from .semantic import (
     Scope,
     ScopeKind,
@@ -537,6 +540,53 @@ class _Registry:
     max_card_chars: int
 
 
+class _CpgCandidates(Mapping[str, tuple[CpgTarget, ...]]):
+    def __init__(self, entries: Sequence[_SymbolEntry]) -> None:
+        self._entries = entries
+        self._resolved: dict[str, tuple[CpgTarget, ...]] = {}
+
+    def __getitem__(self, name: str) -> tuple[CpgTarget, ...]:
+        key = _normalized(name)
+        cached = self._resolved.get(key)
+        if cached is not None:
+            return cached
+        resolved = tuple(
+            _cpg_target(entry)
+            for entry in self._entries
+            if entry.kind in _ROUTINE_KINDS
+            and (
+                entry.normalized_name == key
+                or entry.normalized_qualified_name == key
+            )
+        )
+        self._resolved[key] = resolved
+        return resolved
+
+    def __iter__(self):
+        return iter(self._resolved)
+
+    def __len__(self) -> int:
+        return len(self._resolved)
+
+
+def _cpg_target(entry: _SymbolEntry) -> CpgTarget:
+    return CpgTarget(
+        target_id=entry.target_id,
+        source_path=str(entry.source_path),
+        path=entry.path,
+        unit_id=entry.unit_id,
+        name=entry.name,
+        qualified_name=entry.qualified_name,
+        kind=entry.kind.value,
+        line=entry.line,
+        column=entry.column,
+        visibility=entry.visibility.value,
+        type_name=entry.type_name,
+        owner=entry.owner,
+        parent_target_id=entry.parent_target_id,
+    )
+
+
 class AgentContext:
     def __init__(
         self,
@@ -572,6 +622,20 @@ class AgentContext:
         self._relation_index: ProjectRelationIndex | None = None
         self._metrics: ProjectMetrics | None = None
         self._metrics_revision = ""
+        cpg_budget_base = (
+            worker_memory_budget_bytes
+            if worker_memory_budget_bytes is not None
+            else 512 * 1024**2
+        )
+        self._cpg_cache_limit = min(
+            128 * 1024**2,
+            max(1, cpg_budget_base // 5),
+        )
+        self._cpg_cache: OrderedDict[
+            tuple[str, str, str, str, int],
+            CpgSubgraph,
+        ] = OrderedDict()
+        self._cpg_cache_bytes = 0
 
     @classmethod
     def open(
@@ -612,12 +676,21 @@ class AgentContext:
     def navigation_disk_misses(self) -> int:
         return self._navigation_disk_misses
 
+    @property
+    def cpg_cache_entries(self) -> int:
+        return len(self._cpg_cache)
+
+    @property
+    def cpg_cache_bytes(self) -> int:
+        return self._cpg_cache_bytes
+
     def cache_roots(self) -> tuple[object, ...]:
         return (
             *self._workspace.cache_roots(),
             self._registry,
             self._relation_index,
             self._metrics,
+            tuple(self._cpg_cache.values()),
         )
 
     @property
@@ -638,12 +711,14 @@ class AgentContext:
             retained += self._relation_index.estimated_cache_bytes
         if self._metrics is not None:
             retained += 4096 + len(self._metrics.units) * 1024
+        retained += self._cpg_cache_bytes
         return retained
 
     def evict_auxiliary_caches(self) -> None:
         self._relation_index = None
         self._metrics = None
         self._metrics_revision = ""
+        self._clear_cpg_cache()
         if self._registry is not None:
             self._registry.sources.clear_loaded()
 
@@ -664,6 +739,16 @@ class AgentContext:
         parsed = _validated_request(request)
         revision = self._refresh_workspace(parsed.project_id)
 
+        if parsed.action == "cpg":
+            registry = self._require_registry(revision)
+            entry = self._resolve_target(registry, parsed.target_id)
+            graph = self._require_cpg_subgraph(registry, entry, parsed)
+            return self._response(
+                parsed,
+                revision,
+                graph.to_items(),
+                target_id=entry.target_id,
+            )
         if parsed.action == "trace":
             if parsed.relation is None:
                 raise AgentProtocolError("relation_required", "Trace requires a relation.")
@@ -741,16 +826,91 @@ class AgentContext:
             self._relation_index = None
             self._metrics = None
             self._metrics_revision = ""
+            self._clear_cpg_cache()
             self._focus = Focus(project_id=current_project_id) if current_project_id else Focus()
         elif revision != self._last_revision:
             self._registry = None
             self._relation_index = None
             self._metrics = None
             self._metrics_revision = ""
+            self._clear_cpg_cache()
         elif self._focus.project_id != current_project_id:
             self._focus = Focus(project_id=current_project_id) if current_project_id else Focus()
         self._last_revision = revision
         return revision
+
+    def _clear_cpg_cache(self) -> None:
+        self._cpg_cache.clear()
+        self._cpg_cache_bytes = 0
+
+    def _require_cpg_subgraph(
+        self,
+        registry: _Registry,
+        entry: _SymbolEntry,
+        request: AgentRequest,
+    ) -> CpgSubgraph:
+        if entry.kind not in _TYPE_KINDS | _ROUTINE_KINDS | {SymbolKind.UNIT}:
+            raise AgentProtocolError(
+                "cpg_not_applicable",
+                f"CPG does not apply to {entry.kind.value} target {entry.target_id}.",
+            )
+        key = (
+            registry.revision,
+            entry.target_id,
+            request.graph,
+            request.direction,
+            request.depth,
+        )
+        cached = self._cpg_cache.pop(key, None)
+        if cached is not None:
+            self._cpg_cache[key] = cached
+            return cached
+        try:
+            document = registry.sources[entry.source_path]
+            parsed = DelphiParser(
+                defines=document.defines,
+                include_paths=document.include_paths,
+                mode=(
+                    ParserMode.TOLERANT
+                    if len(self._workspace.units) >= 256
+                    else ParserMode.STRICT
+                ),
+            ).parse(
+                document.text,
+                str(entry.source_path),
+                build_semantic=False,
+            )
+            graph = build_cpg_subgraph(
+                target=_cpg_target(entry),
+                syntax_root=parsed.root,
+                candidates=_CpgCandidates(registry.entries),
+                graph=request.graph,
+                direction=request.direction,
+                depth=request.depth,
+            )
+        except AgentProtocolError:
+            raise
+        except (OSError, UnicodeError, KeyError):
+            raise AgentProtocolError(
+                "source_unavailable",
+                f"Could not read selected source {entry.path}.",
+            ) from None
+        except Exception:
+            raise AgentProtocolError(
+                "cpg_build_failed",
+                "Could not build the selected CPG subgraph.",
+            ) from None
+        if graph.retained_bytes <= self._cpg_cache_limit:
+            while (
+                self._cpg_cache
+                and self._cpg_cache_bytes + graph.retained_bytes
+                > self._cpg_cache_limit
+            ):
+                _, evicted = self._cpg_cache.popitem(last=False)
+                self._cpg_cache_bytes -= evicted.retained_bytes
+            self._cpg_cache[key] = graph
+            self._cpg_cache_bytes += graph.retained_bytes
+        return graph
 
     def _open_items(self) -> list[dict[str, object]]:
         active_project_id = self._workspace.active_project_id
@@ -2790,7 +2950,10 @@ def _request_fingerprint(
 ) -> str:
     payload = {
         "action": request.action,
+        "depth": request.depth,
         "detail": request.detail,
+        "direction": request.direction,
+        "graph": request.graph,
         "max_chars": request.max_chars,
         "max_items": request.max_items,
         "project_id": project_id,
@@ -2799,7 +2962,7 @@ def _request_fingerprint(
         "target_id": target_id,
     }
     encoded = _compact_json(payload).encode("utf-8")
-    return f"agent_request_v2_{hashlib.sha256(encoded).hexdigest()}"
+    return f"agent_request_v3_{hashlib.sha256(encoded).hexdigest()}"
 
 
 def _prepare_items(

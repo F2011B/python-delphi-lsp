@@ -41,6 +41,134 @@ def assert_budget(response: AgentResponse, max_chars: int) -> None:
     assert response.context.chars <= max_chars
 
 
+def _cpg_context(tmp_path: Path) -> tuple[AgentContext, str]:
+    write_source(
+        tmp_path / "UnitA.pas",
+        """
+        unit UnitA;
+        interface
+        type
+          TThing = class
+            procedure Run;
+          end;
+        implementation
+        procedure TThing.Run;
+        var
+          Value: Integer;
+        begin
+          Value := 1;
+          if Value > 0 then
+            Notify(Value);
+        end;
+        end.
+        """,
+    )
+    context = AgentContext.open(
+        tmp_path,
+        workers=1,
+        worker_memory_budget_bytes=64 * 1024**2,
+    )
+    target = card_named(context.handle({"action": "find", "query": "TThing.Run"}), "Run")
+    return context, str(target["target_id"])
+
+
+def test_cpg_action_builds_and_reuses_one_bounded_subgraph(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context, target_id = _cpg_context(tmp_path)
+    assert context.cpg_cache_entries == 0
+    assert context.cpg_cache_bytes == 0
+    before = context.estimated_cache_bytes
+
+    first = context.handle(
+        {
+            "action": "cpg",
+            "target_id": target_id,
+            "graph": "full",
+            "direction": "out",
+            "depth": 16,
+            "max_items": 50,
+            "max_chars": 40000,
+        }
+    )
+
+    assert result_items(first)[0]["item_type"] == "cpg_metadata"
+    assert context.cpg_cache_entries == 1
+    assert context.cpg_cache_bytes > 0
+    assert context.estimated_cache_bytes > before
+    monkeypatch.setattr(
+        agent_context_module,
+        "build_cpg_subgraph",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("cached CPG was rebuilt")
+        ),
+    )
+
+    second = context.handle(
+        {
+            "action": "cpg",
+            "target_id": target_id,
+            "graph": "full",
+            "direction": "out",
+            "depth": 16,
+            "max_items": 50,
+            "max_chars": 40000,
+        }
+    )
+
+    assert second.result == first.result
+    context.evict_auxiliary_caches()
+    assert context.cpg_cache_entries == 0
+    assert context.cpg_cache_bytes == 0
+
+
+def test_navigation_prewarm_does_not_construct_cpg_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context, _ = _cpg_context(tmp_path)
+    monkeypatch.setattr(
+        agent_context_module,
+        "build_cpg_subgraph",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("CPG entered navigation prewarm")
+        ),
+    )
+
+    context.prewarm_navigation()
+
+    assert context.cpg_cache_entries == 0
+    assert context.cpg_cache_bytes == 0
+
+
+def test_cpg_query_parses_only_the_target_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context, target_id = _cpg_context(tmp_path)
+    parsed_files: list[str] = []
+    real_parse = agent_context_module.DelphiParser.parse
+
+    def record_parse(self, text, file_name, **options):  # noqa: ANN001
+        parsed_files.append(str(file_name))
+        return real_parse(self, text, file_name, **options)
+
+    monkeypatch.setattr(agent_context_module.DelphiParser, "parse", record_parse)
+
+    context.handle(
+        {
+            "action": "cpg",
+            "target_id": target_id,
+            "graph": "ast",
+            "direction": "out",
+            "depth": 16,
+        }
+    )
+
+    assert parsed_files == [str(tmp_path / "UnitA.pas")]
+
+
 def test_open_exposes_read_only_workspace_and_complete_response_envelope(tmp_path: Path) -> None:
     write_source(tmp_path / "Main.dpr", "program Main; begin end.")
 

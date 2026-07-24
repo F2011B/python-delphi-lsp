@@ -131,7 +131,7 @@ def test_cache_daemon_lifecycle_reuses_one_authenticated_process(tmp_path: Path)
         second = start_cache(tmp_path, max_memory_bytes=512 * 1024**2, workers=2, startup_timeout=30)
         assert first.pid == second.pid
         response = query_cache(tmp_path, {"action": "open"})
-        assert response.payload["schema"] == 2
+        assert response.payload["schema"] == 3
         status = cache_status(tmp_path)
         assert status["pid"] == first.pid
         assert status["workers_configured"] == 2
@@ -502,7 +502,7 @@ def test_partial_client_disconnect_does_not_stop_daemon(tmp_path: Path) -> None:
         metadata = start_cache(tmp_path)
         with socket.create_connection(("127.0.0.1", metadata.port)) as connection:
             connection.sendall(b'{"token":"partial"')
-        assert query_cache(tmp_path, {"action": "open"}).payload["schema"] == 2
+        assert query_cache(tmp_path, {"action": "open"}).payload["schema"] == 3
         assert cache_status(tmp_path)["pid"] == metadata.pid
     finally:
         stop_cache(tmp_path)
@@ -647,6 +647,8 @@ def test_multiple_projects_prewarm_repository_navigation_cache(
     assert service.context.navigation_cache_is_warm
     assert service.cache_state == "warm"
     assert service.status()["current_bytes"] > 0
+    assert service.status()["cpg_cache_entries"] == 0
+    assert service.status()["cpg_cache_bytes"] == 0
     result = service.request(
         {"action": "find", "query": "RepositoryCache"}
     ).payload["result"]
@@ -904,7 +906,7 @@ def test_metadata_reader_rejects_symlink_and_unsafe_permissions(tmp_path: Path) 
             query_cache(tmp_path, {"action": "open"})
         path.unlink()
         target.replace(path)
-        assert query_cache(tmp_path, {"action": "open"}).payload["schema"] == 2
+        assert query_cache(tmp_path, {"action": "open"}).payload["schema"] == 3
     finally:
         stop_cache(tmp_path)
 
@@ -924,7 +926,7 @@ def test_cache_daemon_rejects_invalid_auth_without_dying(tmp_path: Path) -> None
             query_cache(tmp_path, {"action": "find", "query": "Demo"})
         raw["token"] = metadata.token
         path.write_text(json.dumps(raw), encoding="utf-8")
-        assert query_cache(tmp_path, {"action": "find", "query": "Demo"}).payload["schema"] == 2
+        assert query_cache(tmp_path, {"action": "find", "query": "Demo"}).payload["schema"] == 3
     finally:
         stop_cache(tmp_path)
 

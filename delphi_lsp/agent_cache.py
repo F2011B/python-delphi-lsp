@@ -802,6 +802,8 @@ class _CacheService:
             "parallel_fallbacks": self.stats.parallel_fallbacks,
             "navigation_disk_hits": self.context.navigation_disk_hits,
             "navigation_disk_misses": self.context.navigation_disk_misses,
+            "cpg_cache_entries": self.context.cpg_cache_entries,
+            "cpg_cache_bytes": self.context.cpg_cache_bytes,
             "idle_timeout": self.metadata.idle_timeout, "idle_remaining": max(0.0, self.metadata.idle_timeout - idle),
             "workspace_revision": self.last_revision,
         }
