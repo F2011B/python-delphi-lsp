@@ -326,6 +326,21 @@ def test_parser_adds_cache_lifecycle_and_ergonomic_query_commands() -> None:
     query = parser.parse_args(
         ["query", "--root", "workspace", "find", "TCustomer", "--project-id", "Main.dpr", "--max-items", "4"]
     )
+    cpg = parser.parse_args(
+        [
+            "query",
+            "--root",
+            "workspace",
+            "cpg",
+            "target_v2_run",
+            "--graph",
+            "cfg",
+            "--direction",
+            "both",
+            "--depth",
+            "8",
+        ]
+    )
     defaults = parser.parse_args(["query", "open"])
 
     assert start.cache_command == "start"
@@ -345,6 +360,11 @@ def test_parser_adds_cache_lifecycle_and_ergonomic_query_commands() -> None:
     assert query.value == "TCustomer"
     assert query.project_id == "Main.dpr"
     assert query.max_items == 4
+    assert cpg.action == "cpg"
+    assert cpg.value == "target_v2_run"
+    assert cpg.graph == "cfg"
+    assert cpg.direction == "both"
+    assert cpg.depth == 8
     assert defaults.value == ""
     assert defaults.project_id == ""
     assert defaults.detail == "summary"
@@ -352,6 +372,9 @@ def test_parser_adds_cache_lifecycle_and_ergonomic_query_commands() -> None:
     assert defaults.cursor == ""
     assert defaults.max_items == 12
     assert defaults.max_chars == 12000
+    assert defaults.graph == "full"
+    assert defaults.direction == "out"
+    assert defaults.depth == 4
     with pytest.raises(SystemExit):
         parser.parse_args(["cache", "serve", "--root", "workspace"])
 
@@ -377,7 +400,7 @@ def test_query_maps_project_id_value_and_protocol_defaults(
     def query(root: Path, request: dict[str, object]) -> SimpleNamespace:
         captured["root"] = root
         captured["request"] = request
-        return SimpleNamespace(payload={"schema": 2}, warning="")
+        return SimpleNamespace(payload={"schema": 3}, warning="")
 
     monkeypatch.setattr(agent_cli, "query_cache", query)
 
@@ -392,9 +415,57 @@ def test_query_maps_project_id_value_and_protocol_defaults(
             "cursor": "",
             "max_items": 12,
             "max_chars": 12000,
+            "graph": "full",
+            "direction": "out",
+            "depth": 4,
         },
     }
-    assert capsys.readouterr().out == '{"schema":2}\n'
+    assert capsys.readouterr().out == '{"schema":3}\n'
+
+
+def test_query_maps_cpg_target_and_graph_fields(
+    monkeypatch,
+    capsys,
+    tmp_path: Path,
+) -> None:
+    args = agent_cli.build_parser().parse_args(
+        [
+            "query",
+            "--root",
+            str(tmp_path),
+            "cpg",
+            "target_v2_run",
+            "--graph",
+            "full",
+            "--direction",
+            "out",
+            "--depth",
+            "12",
+        ]
+    )
+    captured: dict[str, object] = {}
+
+    def query(root: Path, request: dict[str, object]) -> SimpleNamespace:
+        captured["root"] = root
+        captured["request"] = request
+        return SimpleNamespace(payload={"schema": 3}, warning="")
+
+    monkeypatch.setattr(agent_cli, "query_cache", query)
+
+    assert agent_cli._query(args) == 0
+    assert captured["request"] == {
+        "action": "cpg",
+        "target_id": "target_v2_run",
+        "project_id": "",
+        "detail": "summary",
+        "cursor": "",
+        "max_items": 12,
+        "max_chars": 12000,
+        "graph": "full",
+        "direction": "out",
+        "depth": 12,
+    }
+    assert capsys.readouterr().out == '{"schema":3}\n'
 
 
 def test_cache_cli_lifecycle_query_and_warning_streams(tmp_path: Path) -> None:
@@ -540,7 +611,7 @@ end.
 
     assert focused["focus"]["target_id"] == target_id
     assert inspected["focus"]["target_id"] == target_id
-    assert inspected["schema"] == 2
+    assert inspected["schema"] == 3
     assert stderr == b""
 
 
@@ -554,15 +625,15 @@ def test_worker_survives_malformed_json_and_protocol_errors(tmp_path: Path) -> N
     responses = _lines(completed)
 
     assert completed.returncode == 0
-    assert responses[0] == {"schema": 2, "error": {"code": "invalid_json", "message": "Invalid JSON request."}}
+    assert responses[0] == {"schema": 3, "error": {"code": "invalid_json", "message": "Invalid JSON request."}}
     assert responses[1] == {
-        "schema": 2,
+        "schema": 3,
         "error": {
             "code": "invalid_action",
             "message": "Unsupported action value: 'jump'.",
         },
     }
-    assert responses[2]["schema"] == 2
+    assert responses[2]["schema"] == 3
     assert completed.stderr == b""
 
 
@@ -583,7 +654,7 @@ def test_worker_ignores_blank_lf_records_and_emits_exact_success_shape(tmp_path:
         "page",
         "context",
     }
-    assert response["schema"] == 2
+    assert response["schema"] == 3
     assert completed.stderr == b""
 
 
@@ -663,7 +734,7 @@ def test_worker_accepts_crlf_and_unicode_requests(tmp_path: Path) -> None:
     completed = _worker(tmp_path, '{"action":"open","query":"Grüße"}\r\n'.encode("utf-8"))
 
     assert completed.returncode == 0
-    assert _lines(completed)[0]["schema"] == 2
+    assert _lines(completed)[0]["schema"] == 3
     assert completed.stderr == b""
 
 
@@ -695,8 +766,8 @@ def test_worker_drains_oversize_record_then_serves_later_request(tmp_path: Path)
     responses = _lines(completed)
 
     assert completed.returncode == 0
-    assert responses[0] == {"schema": 2, "error": {"code": "request_too_large", "message": "Request exceeds the 1 MiB limit."}}
-    assert responses[1]["schema"] == 2
+    assert responses[0] == {"schema": 3, "error": {"code": "request_too_large", "message": "Request exceeds the 1 MiB limit."}}
+    assert responses[1]["schema"] == 3
     assert completed.stderr == b""
 
 
@@ -724,7 +795,7 @@ def test_worker_reports_unterminated_oversize_record_before_newline(tmp_path: Pa
             pytest.fail("worker did not report an unterminated oversized record before newline")
 
         assert json.loads(oversized) == {
-            "schema": 2,
+            "schema": 3,
             "error": {
                 "code": "request_too_large",
                 "message": "Request exceeds the 1 MiB limit.",
@@ -736,7 +807,7 @@ def test_worker_reports_unterminated_oversize_record_before_newline(tmp_path: Pa
         recovered = json.loads(process.stdout.readline())
         process.stdin.close()
 
-        assert recovered["schema"] == 2
+        assert recovered["schema"] == 3
         assert process.wait(timeout=5) == 0
         assert process.stderr.read() == b""
         assert process.stdout.readline() == b""
@@ -843,8 +914,8 @@ def test_worker_reports_invalid_encoding_and_hides_internal_failures() -> None:
     )
 
     assert [json.loads(line) for line in output.getvalue().splitlines()] == [
-        {"schema": 2, "error": {"code": "invalid_encoding", "message": "Invalid UTF-8 request."}},
-        {"schema": 2, "error": {"code": "internal_error", "message": "Internal request error."}},
+        {"schema": 3, "error": {"code": "invalid_encoding", "message": "Invalid UTF-8 request."}},
+        {"schema": 3, "error": {"code": "internal_error", "message": "Internal request error."}},
     ]
     assert errors.getvalue() == "RuntimeError\n"
 
@@ -852,7 +923,7 @@ def test_worker_reports_invalid_encoding_and_hides_internal_failures() -> None:
 def test_worker_treats_output_oserror_as_transport_failure_without_logging() -> None:
     class StaticResponse:
         def to_mapping(self) -> dict[str, object]:
-            return {"schema": 2, "result": []}
+            return {"schema": 3, "result": []}
 
     class StaticContext:
         def handle(self, request: object) -> StaticResponse:
@@ -897,7 +968,7 @@ def test_worker_redacts_source_unavailable_protocol_details() -> None:
     )
 
     assert json.loads(output.getvalue()) == {
-        "schema": 2,
+        "schema": 3,
         "error": {
             "code": "source_unavailable",
             "message": "Selected source is unavailable.",
@@ -911,7 +982,7 @@ def test_worker_redacts_source_unavailable_protocol_details() -> None:
 def test_worker_flushes_after_every_nonblank_record() -> None:
     class StaticResponse:
         def to_mapping(self) -> dict[str, object]:
-            return {"schema": 2, "result": []}
+            return {"schema": 3, "result": []}
 
     class StaticContext:
         def handle(self, request: object) -> StaticResponse:

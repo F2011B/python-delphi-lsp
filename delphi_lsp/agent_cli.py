@@ -24,7 +24,15 @@ from .agent_cache import (
     watch_workspace_changes,
 )
 from .agent_layers import build_codebase_index, layer_payload, render_layer
-from .agent_protocol import AgentProtocolError, SUPPORTED_ACTIONS, SUPPORTED_DETAILS, SUPPORTED_RELATIONS
+from .agent_protocol import (
+    SCHEMA_VERSION,
+    AgentProtocolError,
+    SUPPORTED_ACTIONS,
+    SUPPORTED_DETAILS,
+    SUPPORTED_DIRECTIONS,
+    SUPPORTED_GRAPHS,
+    SUPPORTED_RELATIONS,
+)
 from .agent_templates import install_opencode_support, install_skill
 from .parallel_outline import ParallelOutlineError, parse_worker_setting
 
@@ -108,13 +116,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     opencode_install.set_defaults(func=_opencode_install)
 
-    worker = subcommands.add_parser("worker", help="Serve Protocol v2 NDJSON requests.")
+    worker = subcommands.add_parser("worker", help="Serve Protocol v3 NDJSON requests.")
     worker.add_argument("--root", type=Path, required=True)
     worker.add_argument("--project-file", type=Path)
     worker.add_argument("--workers", type=parse_worker_setting, default=0)
     worker.set_defaults(func=_worker)
 
-    cache = subcommands.add_parser("cache", help="Manage the shared Protocol v2 cache daemon.")
+    cache = subcommands.add_parser("cache", help="Manage the shared Protocol v3 cache daemon.")
     cache_commands = cache.add_subparsers(dest="cache_command", required=True)
     cache_start = cache_commands.add_parser("start", help="Start the cache daemon if needed.")
     _add_cache_start_arguments(cache_start)
@@ -141,6 +149,9 @@ def build_parser() -> argparse.ArgumentParser:
     query.add_argument("--project-id", default="")
     query.add_argument("--detail", choices=SUPPORTED_DETAILS, default="summary")
     query.add_argument("--relation", choices=SUPPORTED_RELATIONS)
+    query.add_argument("--graph", choices=SUPPORTED_GRAPHS, default="full")
+    query.add_argument("--direction", choices=SUPPORTED_DIRECTIONS, default="out")
+    query.add_argument("--depth", type=_cpg_depth, default=4)
     query.add_argument("--cursor", default="")
     query.add_argument("--max-items", type=_max_items, default=12)
     query.add_argument("--max-chars", type=_max_chars, default=12000)
@@ -176,6 +187,13 @@ def _positive_integer(value: str) -> int:
     parsed = int(value)
     if parsed <= 0:
         raise argparse.ArgumentTypeError("value must be greater than zero")
+    return parsed
+
+
+def _cpg_depth(value: str) -> int:
+    parsed = int(value)
+    if not 1 <= parsed <= 16:
+        raise argparse.ArgumentTypeError("depth must be between 1 and 16")
     return parsed
 
 
@@ -430,13 +448,23 @@ def _query(args: argparse.Namespace) -> int:
     if args.value:
         if args.action in {"find", "metrics"}:
             request["query"] = args.value
-        elif args.action in {"focus", "inspect", "trace"}:
+        elif args.action in {"focus", "inspect", "trace", "cpg"}:
             request["target_id"] = args.value
         else:
             sys.stderr.write(f"cache_error:invalid_request: {args.action} does not accept a value.\n")
             sys.stderr.flush()
             return 1
-    for argument, field in (("project_id", "project_id"), ("detail", "detail"), ("relation", "relation"), ("cursor", "cursor"), ("max_items", "max_items"), ("max_chars", "max_chars")):
+    for argument, field in (
+        ("project_id", "project_id"),
+        ("detail", "detail"),
+        ("relation", "relation"),
+        ("graph", "graph"),
+        ("direction", "direction"),
+        ("depth", "depth"),
+        ("cursor", "cursor"),
+        ("max_items", "max_items"),
+        ("max_chars", "max_chars"),
+    ):
         value = getattr(args, argument)
         if value is not None:
             request[field] = value
@@ -521,7 +549,7 @@ def _serve_worker(context: AgentContext, input_stream: BinaryIO, output_stream: 
             message = _worker_error("internal_error", _INTERNAL_ERROR_MESSAGE)
         _write_worker_message(output_stream, message)
 def _worker_error(code: str, message: str) -> dict[str, object]:
-    return {"schema": 2, "error": {"code": code, "message": message}}
+    return {"schema": SCHEMA_VERSION, "error": {"code": code, "message": message}}
 
 
 def _write_worker_message(output_stream: BinaryIO, message: object) -> None:
