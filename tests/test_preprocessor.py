@@ -1,10 +1,66 @@
 import unittest
+from unittest import mock
 
+import delphi_lsp.preprocessor as preprocessor
 from delphi_lsp.parser import parse
-from delphi_lsp.preprocessor import PreprocessorOptions
+from delphi_lsp.preprocessor import Preprocessor, PreprocessorOptions
 
 
 class PreprocessorTests(unittest.TestCase):
+    def test_preprocessor_emits_long_active_spans_without_per_character_appends(self) -> None:
+        source = 'unit U;\n' + ('Value := Value + 1;\n' * 10_000) + 'end.'
+        calls = 0
+        original = preprocessor._OutputBuffer.append_char
+
+        def counted(*args: object, **kwargs: object) -> None:
+            nonlocal calls
+            calls += 1
+            original(*args, **kwargs)
+
+        with mock.patch.object(preprocessor._OutputBuffer, 'append_char', counted):
+            result = Preprocessor().process(source, 'U.pas')
+
+        self.assertEqual(result.text, source)
+        self.assertLess(calls, source.count('\n') * 4)
+
+    def test_preprocessor_preserves_nested_inactive_span_lines_and_source_map(self) -> None:
+        source = (
+            'unit U;\r\n'
+            '{$IFDEF OUTER}\r\n'
+            'active\r\n'
+            '{$IFDEF INNER}\r\n'
+            'nested\r\n'
+            '{$ELSE}\r\n'
+            'alternate\r\n'
+            '{$ENDIF}\r\n'
+            '{$ELSE}\r\n'
+            'inactive\r\n'
+            '{$ENDIF}\r\n'
+            'end.\r\n'
+        )
+
+        result = Preprocessor(defines=('OUTER',)).process(source, 'U.pas')
+
+        expected = (
+            'unit U;\n'
+            '              \n'
+            'active\n'
+            '              \n'
+            '      \n'
+            '       \n'
+            'alternate\n'
+            '        \n'
+            '       \n'
+            '        \n'
+            '        \n'
+            'end.\n'
+        )
+        self.assertEqual(result.text, expected)
+        self.assertEqual(
+            [(entry.file_name, entry.line, entry.col_offset) for entry in result.source_map],
+            [('U.pas', line, 0) for line in range(1, 13)],
+        )
+
     def test_ifopt_long_form(self) -> None:
         text = '''
 unit IfOptLongDemo;

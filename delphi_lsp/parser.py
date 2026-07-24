@@ -1,13 +1,21 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Callable, Iterable, Optional
 
 from .comment_builder import build_comment_nodes
+from .consts import AttributeName
 from .grammar import build_grammar
 from .lark_builder import build_syntax_tree
 from .nodes import SyntaxNode
+from .parser_backend import (
+    ParserBackend,
+    ParserMode,
+    normalize_backend,
+    normalize_mode,
+    parse_delphiast_syntax_tree,
+)
 from .preprocessor import IncludeLoader, PreprocessedSource, Preprocessor, PreprocessorOptions
 from .semantic import SymbolIndex
 from .semantic_builder import SemanticBuilder, SemanticModel
@@ -21,6 +29,7 @@ class ParseResult:
     comments: list
     preprocessed: PreprocessedSource
     semantic: Optional[SemanticModel] = None
+    problems: list = field(default_factory=list)
 
 
 class DelphiParser:
@@ -33,6 +42,9 @@ class DelphiParser:
         preprocessor_options: Optional[PreprocessorOptions] = None,
         interface_only: bool = False,
         on_handle_string: StringTransform | None = None,
+        backend: ParserBackend | str = ParserBackend.DELPHIAST,
+        mode: ParserMode | str = ParserMode.STRICT,
+        legacy_fallback_max_chars: int = 32 * 1024,
     ) -> None:
         self._include_paths = list(include_paths)
         self._defines = list(defines)
@@ -40,6 +52,17 @@ class DelphiParser:
         self._preprocessor_options = preprocessor_options
         self._interface_only = interface_only
         self._on_handle_string = on_handle_string
+        self._backend = normalize_backend(backend)
+        self._mode = normalize_mode(mode)
+        self._legacy_fallback_max_chars = max(0, legacy_fallback_max_chars)
+
+    @property
+    def backend(self) -> ParserBackend:
+        return self._backend
+
+    @property
+    def mode(self) -> ParserMode:
+        return self._mode
 
     def parse(
         self,
@@ -64,11 +87,38 @@ class DelphiParser:
         )
         preprocessed = preprocessor.process(text, file_name)
         parse_text = self._to_interface_only(preprocessed.text) if effective_interface_only else preprocessed.text
-        tree = self._parse_lark(parse_text)
-        root = build_syntax_tree(tree, file_name, string_transform=effective_string_hook)
+        if self._backend is ParserBackend.LARK:
+            tree = self._parse_lark(parse_text)
+            root = build_syntax_tree(tree, file_name, string_transform=effective_string_hook)
+            problems = []
+        else:
+            output = parse_delphiast_syntax_tree(parse_text, file_name)
+            root = output.root
+            problems = output.problems
+            if (
+                self._mode is ParserMode.STRICT
+                and len(parse_text) <= self._legacy_fallback_max_chars
+            ):
+                tree = self._parse_lark(parse_text)
+                root = build_syntax_tree(
+                    tree,
+                    file_name,
+                    string_transform=effective_string_hook,
+                )
+                problems = []
+            if effective_string_hook is not None:
+                name = root.get_attribute(AttributeName.anName)
+                if name:
+                    root.set_attribute(AttributeName.anName, effective_string_hook(name))
         comments = build_comment_nodes(preprocessed.comments)
         semantic = SemanticBuilder().build(root, index=index) if build_semantic else None
-        return ParseResult(root=root, comments=comments, preprocessed=preprocessed, semantic=semantic)
+        return ParseResult(
+            root=root,
+            comments=comments,
+            preprocessed=preprocessed,
+            semantic=semantic,
+            problems=problems,
+        )
 
     def _parse_lark(self, text: str):
         parser = _get_lark_parser()

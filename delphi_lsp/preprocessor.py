@@ -2,12 +2,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import re
 from typing import Callable, Iterable, Optional
 
 from .source_reader import read_source_text
 
 
 IncludeLoader = Callable[[str, str], Optional[tuple[str, str]]]
+
+
+_NON_NEWLINE = re.compile(r'[^\n]')
+_SPECIAL_MARKER = re.compile(r"'|//|\{|\(\*")
+
+
+def _blank_preserving_newlines(text: str) -> str:
+    return _NON_NEWLINE.sub(' ', text)
 
 
 @dataclass(frozen=True)
@@ -105,27 +114,49 @@ class _FileContext:
 
 class _OutputBuffer:
     def __init__(self) -> None:
-        self._lines: list[str] = ['']
+        self._chunks: list[str] = []
         self._line_map: list[SourceMapEntry] = []
+        self._needs_mapping = True
 
     @property
     def text(self) -> str:
-        return '\n'.join(self._lines)
+        return ''.join(self._chunks)
 
     @property
     def line_map(self) -> list[SourceMapEntry]:
         return self._line_map
 
     def append_char(self, ch: str, file_name: str, line: int) -> None:
-        self._ensure_mapping(file_name, line)
-        if ch == '\n':
-            self._lines.append('')
-        else:
-            self._lines[-1] += ch
+        self.append_span(ch, file_name, line, active=True)
 
-    def _ensure_mapping(self, file_name: str, line: int) -> None:
-        if len(self._line_map) < len(self._lines):
-            self._line_map.append(SourceMapEntry(file_name=file_name, line=line, col_offset=0))
+    def append_span(
+        self,
+        text: str,
+        file_name: str,
+        line: int,
+        *,
+        active: bool,
+    ) -> None:
+        if not text:
+            return
+        emitted = text if active else _blank_preserving_newlines(text)
+        self._chunks.append(emitted)
+        current_line = line
+        start = 0
+        if self._needs_mapping:
+            self._line_map.append(SourceMapEntry(file_name=file_name, line=current_line))
+        while True:
+            newline = emitted.find('\n', start)
+            if newline < 0:
+                self._needs_mapping = False
+                return
+            current_line += 1
+            start = newline + 1
+            if start < len(emitted):
+                self._line_map.append(SourceMapEntry(file_name=file_name, line=current_line))
+            else:
+                self._needs_mapping = True
+                return
 
 
 class Preprocessor:
@@ -186,6 +217,20 @@ class Preprocessor:
                 contexts.pop()
                 if include_stack:
                     include_stack.pop()
+                continue
+
+            marker_match = _SPECIAL_MARKER.search(ctx.text, ctx.index)
+            next_special = marker_match.start() if marker_match is not None else len(ctx.text)
+            if next_special > ctx.index:
+                start_line = ctx.line
+                ordinary = ctx.advance(next_special - ctx.index)
+                self._emit_text(
+                    output,
+                    ordinary,
+                    ctx.file_name,
+                    start_line,
+                    active=self._is_active(),
+                )
                 continue
 
             ch = ctx.peek()
@@ -299,16 +344,7 @@ class Preprocessor:
         *,
         active: bool,
     ) -> None:
-        current_line = line
-        for ch in text:
-            if ch == '\n':
-                output.append_char('\n', file_name, current_line)
-                current_line += 1
-            else:
-                if active:
-                    output.append_char(ch, file_name, current_line)
-                else:
-                    output.append_char(' ', file_name, current_line)
+        output.append_span(text, file_name, line, active=active)
 
     def _is_active(self) -> bool:
         if not self._conditional_stack:

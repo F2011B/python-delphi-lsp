@@ -1,0 +1,121 @@
+from __future__ import annotations
+
+from time import perf_counter
+
+from delphi_lsp.consts import AttributeName, SyntaxNodeType
+from delphi_lsp.delphiast_parser import DelphiAstParser
+from delphi_lsp.nodes import ValuedSyntaxNode
+
+
+SOURCE = """
+unit FastDemo;
+
+interface
+
+uses SysUtils, Generics.Collections;
+
+type
+  TMode = (mdOff, mdOn);
+  TWorker = class(TObject)
+  private
+    FCount: Integer;
+  public
+    procedure Run(const Values: array of Integer);
+  end;
+
+const
+  DefaultCount = 3;
+
+var
+  GlobalCount: Integer;
+
+implementation
+
+procedure TWorker.Run(const Values: array of Integer);
+var
+  Index: Integer;
+begin
+  for Index := 0 to DefaultCount do
+    if Values[Index] > 0 then
+      GlobalCount := GlobalCount + Values[Index];
+end;
+
+end.
+"""
+
+
+def walk(node):
+    yield node
+    for child in node.child_nodes:
+        yield from walk(child)
+
+
+def test_structural_parser_builds_unit_sections_and_dependencies() -> None:
+    result = DelphiAstParser(SOURCE, "FastDemo.pas").parse()
+
+    assert result.root.get_attribute(AttributeName.anName) == "FastDemo"
+    assert result.root.find_node(SyntaxNodeType.ntInterface) is not None
+    assert result.root.find_node(SyntaxNodeType.ntImplementation) is not None
+    uses = next(node for node in walk(result.root) if node.typ == SyntaxNodeType.ntUses)
+    assert [
+        child.get_attribute(AttributeName.anName)
+        for child in uses.child_nodes
+        if child.typ == SyntaxNodeType.ntUnit
+    ] == ["SysUtils", "Generics.Collections"]
+
+
+def test_structural_parser_builds_declarations_and_type_members() -> None:
+    result = DelphiAstParser(SOURCE, "FastDemo.pas").parse()
+    nodes = list(walk(result.root))
+
+    declarations = {
+        node.get_attribute(AttributeName.anName): node
+        for node in nodes
+        if node.typ == SyntaxNodeType.ntTypeDecl
+    }
+    assert set(declarations) >= {"TMode", "TWorker"}
+    worker_type = declarations["TWorker"].find_node(SyntaxNodeType.ntType)
+    assert worker_type is not None
+    assert worker_type.get_attribute(AttributeName.anType) == "class"
+    assert any(node.typ == SyntaxNodeType.ntField for node in walk(worker_type))
+    assert any(
+        node.typ == SyntaxNodeType.ntMethod
+        and node.get_attribute(AttributeName.anName) == "Run"
+        for node in walk(worker_type)
+    )
+    assert any(
+        isinstance(node, ValuedSyntaxNode) and node.value == "GlobalCount"
+        for node in nodes
+    )
+
+
+def test_structural_parser_builds_routines_blocks_and_control_flow() -> None:
+    result = DelphiAstParser(SOURCE, "FastDemo.pas").parse()
+    nodes = list(walk(result.root))
+
+    implementation_run = next(
+        node
+        for node in nodes
+        if node.typ == SyntaxNodeType.ntMethod
+        and node.get_attribute(AttributeName.anName) == "TWorker.Run"
+        and node.find_node(SyntaxNodeType.ntStatements) is not None
+    )
+    parameters = implementation_run.find_node(SyntaxNodeType.ntParameters)
+    assert parameters is not None
+    assert any(node.typ == SyntaxNodeType.ntParameter for node in parameters.child_nodes)
+    assert any(node.typ == SyntaxNodeType.ntFor for node in walk(implementation_run))
+    assert any(node.typ == SyntaxNodeType.ntIf for node in walk(implementation_run))
+    assert any(node.typ == SyntaxNodeType.ntAssign for node in walk(implementation_run))
+
+
+def test_tolerant_parser_recovers_and_always_makes_progress() -> None:
+    source = "unit Broken; interface type TFoo = class ??? public X: Integer; end implementation begin @@@ end."
+    started = perf_counter()
+
+    result = DelphiAstParser(source, "Broken.pas").parse()
+
+    assert perf_counter() - started < 0.5
+    assert result.root.get_attribute(AttributeName.anName) == "Broken"
+    assert result.problems
+    assert all(problem.line >= 1 and problem.column >= 1 for problem in result.problems)
+

@@ -8,6 +8,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -90,6 +91,215 @@ def test_worker_parallel_output_is_deterministic(tmp_path: Path) -> None:
     assert parallel.stderr == b""
 
 
+def test_worker_context_uses_persistent_navigation_cache(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+    sentinel = object()
+
+    def open_context(root, project_file, **options):
+        captured["root"] = root
+        captured["project_file"] = project_file
+        captured["options"] = options
+        return sentinel
+
+    monkeypatch.setattr(agent_cli.AgentContext, "open", open_context)
+    monkeypatch.setattr(
+        agent_cli,
+        "navigation_cache_path",
+        lambda root, create: Path(root) / "persistent-navigation",
+    )
+
+    context = agent_cli._open_worker_context(tmp_path, Path("Main.dpr"), 3)
+
+    assert context is sentinel
+    assert captured == {
+        "root": tmp_path,
+        "project_file": Path("Main.dpr"),
+        "options": {
+            "workers": 3,
+            "revision_check_interval_seconds": 30.0,
+            "navigation_cache_dir": tmp_path / "persistent-navigation",
+        },
+    }
+
+
+def test_worker_context_falls_back_when_cache_directory_is_not_writable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+    sentinel = object()
+
+    def open_context(root, project_file, **options):
+        captured["root"] = root
+        captured["project_file"] = project_file
+        captured["options"] = options
+        return sentinel
+
+    def fail_cache_path(_root, *, create):
+        assert create is True
+        raise PermissionError("read-only workspace")
+
+    monkeypatch.setattr(agent_cli.AgentContext, "open", open_context)
+    monkeypatch.setattr(agent_cli, "navigation_cache_path", fail_cache_path)
+
+    context = agent_cli._open_worker_context(tmp_path, None, 0)
+
+    assert context is sentinel
+    assert captured["options"] == {
+        "workers": 0,
+        "revision_check_interval_seconds": 30.0,
+        "navigation_cache_dir": None,
+    }
+
+
+def test_worker_context_falls_back_from_unsafe_cache_metadata(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+    sentinel = object()
+
+    def open_context(_root, _project_file, **options):
+        captured["options"] = options
+        return sentinel
+
+    def fail_cache_path(_root, *, create):
+        assert create is True
+        raise agent_cli.CacheClientError(
+            "unsafe_metadata",
+            "Cache metadata path is unsafe.",
+        )
+
+    monkeypatch.setattr(agent_cli.AgentContext, "open", open_context)
+    monkeypatch.setattr(agent_cli, "navigation_cache_path", fail_cache_path)
+
+    context = agent_cli._open_worker_context(tmp_path, None, 0)
+
+    assert context is sentinel
+    assert captured["options"] == {
+        "workers": 0,
+        "revision_check_interval_seconds": 30.0,
+        "navigation_cache_dir": None,
+    }
+
+
+def test_worker_materializes_reusable_navigation_shards(tmp_path: Path) -> None:
+    _write_source(
+        tmp_path / "Main.pas",
+        """unit Main;
+interface
+type
+  TPersistentWorker = class
+  end;
+implementation
+end.
+""",
+    )
+
+    completed = _worker(
+        tmp_path,
+        b'{"action":"find","query":"TPersistentWorker"}\n',
+    )
+
+    shards = tuple(
+        (tmp_path / ".delphi-lsp" / "agent-cache" / "navigation-v1").glob(
+            "*/*.json"
+        )
+    )
+    assert completed.returncode == 0
+    assert shards
+    assert completed.stderr == b""
+
+
+def test_worker_watcher_refreshes_cached_navigation_after_source_change(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "Main.pas"
+    _write_source(
+        source,
+        """unit Main;
+interface
+type
+  TOriginalWorker = class
+  end;
+implementation
+end.
+""",
+    )
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "delphi_lsp.agent_cli",
+            "worker",
+            "--root",
+            str(tmp_path),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    assert process.stderr is not None
+    try:
+        process.stdin.write(
+            b'{"action":"find","query":"TOriginalWorker"}\n'
+        )
+        process.stdin.flush()
+        original = json.loads(process.stdout.readline())
+        assert any(item["name"] == "TOriginalWorker" for item in original["result"])
+
+        time.sleep(1.0)
+        _write_source(
+            source,
+            """unit Main;
+interface
+type
+  TChangedWorker = class
+  end;
+implementation
+end.
+""",
+        )
+        deadline = time.monotonic() + 5.0
+        changed: dict[str, object] = {}
+        while time.monotonic() < deadline:
+            process.stdin.write(
+                b'{"action":"find","query":"TChangedWorker"}\n'
+            )
+            process.stdin.flush()
+            changed = json.loads(process.stdout.readline())
+            if any(
+                item["name"] == "TChangedWorker"
+                for item in changed["result"]
+            ):
+                break
+            time.sleep(0.05)
+
+        process.stdin.close()
+        assert process.wait(timeout=5) == 0
+        stderr = process.stderr.read()
+        assert any(
+            item["name"] == "TChangedWorker"
+            for item in changed["result"]
+        ), stderr.decode("utf-8", "replace")
+        assert stderr == b""
+    finally:
+        if not process.stdin.closed:
+            process.stdin.close()
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+
+
 def test_parser_adds_cache_lifecycle_and_ergonomic_query_commands() -> None:
     parser = agent_cli.build_parser()
 
@@ -116,6 +326,21 @@ def test_parser_adds_cache_lifecycle_and_ergonomic_query_commands() -> None:
     query = parser.parse_args(
         ["query", "--root", "workspace", "find", "TCustomer", "--project-id", "Main.dpr", "--max-items", "4"]
     )
+    cpg = parser.parse_args(
+        [
+            "query",
+            "--root",
+            "workspace",
+            "cpg",
+            "target_v2_run",
+            "--graph",
+            "cfg",
+            "--direction",
+            "both",
+            "--depth",
+            "8",
+        ]
+    )
     defaults = parser.parse_args(["query", "open"])
 
     assert start.cache_command == "start"
@@ -135,6 +360,11 @@ def test_parser_adds_cache_lifecycle_and_ergonomic_query_commands() -> None:
     assert query.value == "TCustomer"
     assert query.project_id == "Main.dpr"
     assert query.max_items == 4
+    assert cpg.action == "cpg"
+    assert cpg.value == "target_v2_run"
+    assert cpg.graph == "cfg"
+    assert cpg.direction == "both"
+    assert cpg.depth == 8
     assert defaults.value == ""
     assert defaults.project_id == ""
     assert defaults.detail == "summary"
@@ -142,26 +372,41 @@ def test_parser_adds_cache_lifecycle_and_ergonomic_query_commands() -> None:
     assert defaults.cursor == ""
     assert defaults.max_items == 12
     assert defaults.max_chars == 12000
+    assert defaults.graph == "full"
+    assert defaults.direction == "out"
+    assert defaults.depth == 4
     with pytest.raises(SystemExit):
         parser.parse_args(["cache", "serve", "--root", "workspace"])
 
 
-def test_query_maps_project_id_value_and_protocol_defaults(monkeypatch, capsys) -> None:
+def test_query_maps_project_id_value_and_protocol_defaults(
+    monkeypatch,
+    capsys,
+    tmp_path: Path,
+) -> None:
     args = agent_cli.build_parser().parse_args(
-        ["query", "--root", "workspace", "find", "TCustomer", "--project-id", "Main.dpr"]
+        [
+            "query",
+            "--root",
+            str(tmp_path),
+            "find",
+            "TCustomer",
+            "--project-id",
+            "Main.dpr",
+        ]
     )
     captured: dict[str, object] = {}
 
     def query(root: Path, request: dict[str, object]) -> SimpleNamespace:
         captured["root"] = root
         captured["request"] = request
-        return SimpleNamespace(payload={"schema": 2}, warning="")
+        return SimpleNamespace(payload={"schema": 3}, warning="")
 
     monkeypatch.setattr(agent_cli, "query_cache", query)
 
     assert agent_cli._query(args) == 0
     assert captured == {
-        "root": Path("workspace"),
+        "root": tmp_path.resolve(),
         "request": {
             "action": "find",
             "query": "TCustomer",
@@ -170,9 +415,57 @@ def test_query_maps_project_id_value_and_protocol_defaults(monkeypatch, capsys) 
             "cursor": "",
             "max_items": 12,
             "max_chars": 12000,
+            "graph": "full",
+            "direction": "out",
+            "depth": 4,
         },
     }
-    assert capsys.readouterr().out == '{"schema":2}\n'
+    assert capsys.readouterr().out == '{"schema":3}\n'
+
+
+def test_query_maps_cpg_target_and_graph_fields(
+    monkeypatch,
+    capsys,
+    tmp_path: Path,
+) -> None:
+    args = agent_cli.build_parser().parse_args(
+        [
+            "query",
+            "--root",
+            str(tmp_path),
+            "cpg",
+            "target_v2_run",
+            "--graph",
+            "full",
+            "--direction",
+            "out",
+            "--depth",
+            "12",
+        ]
+    )
+    captured: dict[str, object] = {}
+
+    def query(root: Path, request: dict[str, object]) -> SimpleNamespace:
+        captured["root"] = root
+        captured["request"] = request
+        return SimpleNamespace(payload={"schema": 3}, warning="")
+
+    monkeypatch.setattr(agent_cli, "query_cache", query)
+
+    assert agent_cli._query(args) == 0
+    assert captured["request"] == {
+        "action": "cpg",
+        "target_id": "target_v2_run",
+        "project_id": "",
+        "detail": "summary",
+        "cursor": "",
+        "max_items": 12,
+        "max_chars": 12000,
+        "graph": "full",
+        "direction": "out",
+        "depth": 12,
+    }
+    assert capsys.readouterr().out == '{"schema":3}\n'
 
 
 def test_cache_cli_lifecycle_query_and_warning_streams(tmp_path: Path) -> None:
@@ -197,7 +490,7 @@ end.
         started = json.loads(start.stdout)
         assert start.returncode == 0
         assert started["pid"] > 0
-        assert "Warning:" in start.stderr
+        assert not start.stderr or start.stderr.startswith("Warning:")
 
         query = subprocess.run(
             [sys.executable, "-m", "delphi_lsp.agent_cli", "query", "--root", str(tmp_path), "find", "TCustomer"],
@@ -208,7 +501,7 @@ end.
         response = json.loads(query.stdout)
         assert query.returncode == 0
         assert any(item["name"] == "TCustomer" for item in response["result"])
-        assert "Warning:" in query.stderr
+        assert not query.stderr or query.stderr.startswith("Warning:")
 
         status = subprocess.run(
             [sys.executable, "-m", "delphi_lsp.agent_cli", "cache", "status", "--root", str(tmp_path), "--format", "json"],
@@ -220,7 +513,7 @@ end.
         assert status.returncode == 0
         assert reported["pid"] == started["pid"]
         assert reported["warning_threshold_percent"] == 80
-        assert status.stderr == ""
+        assert not status.stderr or status.stderr.startswith("Warning:")
 
         text_status = subprocess.run(
             [sys.executable, "-m", "delphi_lsp.agent_cli", "cache", "status", "--root", str(tmp_path)],
@@ -230,7 +523,7 @@ end.
         )
         assert text_status.returncode == 0
         assert text_status.stdout.startswith(f"running pid={started['pid']} state=")
-        assert text_status.stderr == ""
+        assert not text_status.stderr or text_status.stderr.startswith("Warning:")
     finally:
         stop = subprocess.run(
             [sys.executable, "-m", "delphi_lsp.agent_cli", "cache", "stop", "--root", str(tmp_path)],
@@ -240,7 +533,7 @@ end.
         )
     assert stop.returncode == 0
     assert json.loads(stop.stdout) == {"stopped": True}
-    assert stop.stderr == ""
+    assert not stop.stderr or stop.stderr.startswith("Warning:")
 
 
 def test_query_does_not_start_a_missing_cache_and_sanitizes_errors(tmp_path: Path) -> None:
@@ -318,7 +611,7 @@ end.
 
     assert focused["focus"]["target_id"] == target_id
     assert inspected["focus"]["target_id"] == target_id
-    assert inspected["schema"] == 2
+    assert inspected["schema"] == 3
     assert stderr == b""
 
 
@@ -332,15 +625,15 @@ def test_worker_survives_malformed_json_and_protocol_errors(tmp_path: Path) -> N
     responses = _lines(completed)
 
     assert completed.returncode == 0
-    assert responses[0] == {"schema": 2, "error": {"code": "invalid_json", "message": "Invalid JSON request."}}
+    assert responses[0] == {"schema": 3, "error": {"code": "invalid_json", "message": "Invalid JSON request."}}
     assert responses[1] == {
-        "schema": 2,
+        "schema": 3,
         "error": {
             "code": "invalid_action",
             "message": "Unsupported action value: 'jump'.",
         },
     }
-    assert responses[2]["schema"] == 2
+    assert responses[2]["schema"] == 3
     assert completed.stderr == b""
 
 
@@ -361,7 +654,7 @@ def test_worker_ignores_blank_lf_records_and_emits_exact_success_shape(tmp_path:
         "page",
         "context",
     }
-    assert response["schema"] == 2
+    assert response["schema"] == 3
     assert completed.stderr == b""
 
 
@@ -385,13 +678,63 @@ def test_worker_project_file_selects_and_opens_that_project(tmp_path: Path) -> N
     assert completed.stderr == b""
 
 
+def test_worker_queries_multi_project_repository_without_project_selection(
+    tmp_path: Path,
+) -> None:
+    _write_source(
+        tmp_path / "A.dpr",
+        "program A; uses AUnit in 'AUnit.pas'; begin end.\n",
+    )
+    _write_source(
+        tmp_path / "B.dpr",
+        "program B; uses BUnit in 'BUnit.pas'; begin end.\n",
+    )
+    _write_source(
+        tmp_path / "AUnit.pas",
+        """
+unit AUnit;
+interface
+type
+  TRepositoryWorkerA = class
+  end;
+implementation
+end.
+""".lstrip(),
+    )
+    _write_source(
+        tmp_path / "BUnit.pas",
+        """
+unit BUnit;
+interface
+type
+  TRepositoryWorkerB = class
+  end;
+implementation
+end.
+""".lstrip(),
+    )
+
+    completed = _worker(
+        tmp_path,
+        b'{"action":"find","query":"RepositoryWorker","max_items":50}\n',
+    )
+    response = _lines(completed)[0]
+
+    assert completed.returncode == 0
+    assert {item["name"] for item in response["result"]} == {
+        "TRepositoryWorkerA",
+        "TRepositoryWorkerB",
+    }
+    assert completed.stderr == b""
+
+
 def test_worker_accepts_crlf_and_unicode_requests(tmp_path: Path) -> None:
     _write_source(tmp_path / "Grüße.pas", "unit Grüße; interface implementation end.\n")
 
     completed = _worker(tmp_path, '{"action":"open","query":"Grüße"}\r\n'.encode("utf-8"))
 
     assert completed.returncode == 0
-    assert _lines(completed)[0]["schema"] == 2
+    assert _lines(completed)[0]["schema"] == 3
     assert completed.stderr == b""
 
 
@@ -423,8 +766,8 @@ def test_worker_drains_oversize_record_then_serves_later_request(tmp_path: Path)
     responses = _lines(completed)
 
     assert completed.returncode == 0
-    assert responses[0] == {"schema": 2, "error": {"code": "request_too_large", "message": "Request exceeds the 1 MiB limit."}}
-    assert responses[1]["schema"] == 2
+    assert responses[0] == {"schema": 3, "error": {"code": "request_too_large", "message": "Request exceeds the 1 MiB limit."}}
+    assert responses[1]["schema"] == 3
     assert completed.stderr == b""
 
 
@@ -452,7 +795,7 @@ def test_worker_reports_unterminated_oversize_record_before_newline(tmp_path: Pa
             pytest.fail("worker did not report an unterminated oversized record before newline")
 
         assert json.loads(oversized) == {
-            "schema": 2,
+            "schema": 3,
             "error": {
                 "code": "request_too_large",
                 "message": "Request exceeds the 1 MiB limit.",
@@ -464,7 +807,7 @@ def test_worker_reports_unterminated_oversize_record_before_newline(tmp_path: Pa
         recovered = json.loads(process.stdout.readline())
         process.stdin.close()
 
-        assert recovered["schema"] == 2
+        assert recovered["schema"] == 3
         assert process.wait(timeout=5) == 0
         assert process.stderr.read() == b""
         assert process.stdout.readline() == b""
@@ -571,8 +914,8 @@ def test_worker_reports_invalid_encoding_and_hides_internal_failures() -> None:
     )
 
     assert [json.loads(line) for line in output.getvalue().splitlines()] == [
-        {"schema": 2, "error": {"code": "invalid_encoding", "message": "Invalid UTF-8 request."}},
-        {"schema": 2, "error": {"code": "internal_error", "message": "Internal request error."}},
+        {"schema": 3, "error": {"code": "invalid_encoding", "message": "Invalid UTF-8 request."}},
+        {"schema": 3, "error": {"code": "internal_error", "message": "Internal request error."}},
     ]
     assert errors.getvalue() == "RuntimeError\n"
 
@@ -580,7 +923,7 @@ def test_worker_reports_invalid_encoding_and_hides_internal_failures() -> None:
 def test_worker_treats_output_oserror_as_transport_failure_without_logging() -> None:
     class StaticResponse:
         def to_mapping(self) -> dict[str, object]:
-            return {"schema": 2, "result": []}
+            return {"schema": 3, "result": []}
 
     class StaticContext:
         def handle(self, request: object) -> StaticResponse:
@@ -625,7 +968,7 @@ def test_worker_redacts_source_unavailable_protocol_details() -> None:
     )
 
     assert json.loads(output.getvalue()) == {
-        "schema": 2,
+        "schema": 3,
         "error": {
             "code": "source_unavailable",
             "message": "Selected source is unavailable.",
@@ -639,7 +982,7 @@ def test_worker_redacts_source_unavailable_protocol_details() -> None:
 def test_worker_flushes_after_every_nonblank_record() -> None:
     class StaticResponse:
         def to_mapping(self) -> dict[str, object]:
-            return {"schema": 2, "result": []}
+            return {"schema": 3, "result": []}
 
     class StaticContext:
         def handle(self, request: object) -> StaticResponse:

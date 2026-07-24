@@ -41,6 +41,138 @@ def assert_budget(response: AgentResponse, max_chars: int) -> None:
     assert response.context.chars <= max_chars
 
 
+def _cpg_context(tmp_path: Path) -> tuple[AgentContext, str]:
+    write_source(
+        tmp_path / "UnitA.pas",
+        """
+        unit UnitA;
+        interface
+        type
+          TThing = class
+            procedure Run;
+          end;
+        implementation
+        procedure TThing.Run;
+        var
+          Value: Integer;
+        begin
+          Value := 1;
+          if Value > 0 then
+            Notify(Value);
+        end;
+        end.
+        """,
+    )
+    context = AgentContext.open(
+        tmp_path,
+        workers=1,
+        worker_memory_budget_bytes=64 * 1024**2,
+    )
+    target = card_named(context.handle({"action": "find", "query": "TThing.Run"}), "Run")
+    return context, str(target["target_id"])
+
+
+def test_cpg_action_builds_and_reuses_one_bounded_subgraph(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context, target_id = _cpg_context(tmp_path)
+    assert context.cpg_cache_entries == 0
+    assert context.cpg_cache_bytes == 0
+    assert context.cpg_sources_parsed == 0
+    before = context.estimated_cache_bytes
+
+    first = context.handle(
+        {
+            "action": "cpg",
+            "target_id": target_id,
+            "graph": "full",
+            "direction": "out",
+            "depth": 16,
+            "max_items": 50,
+            "max_chars": 40000,
+        }
+    )
+
+    assert result_items(first)[0]["item_type"] == "cpg_metadata"
+    assert context.cpg_cache_entries == 1
+    assert context.cpg_cache_bytes > 0
+    assert context.cpg_sources_parsed == 1
+    assert context.estimated_cache_bytes > before
+    monkeypatch.setattr(
+        agent_context_module,
+        "build_cpg_subgraph",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("cached CPG was rebuilt")
+        ),
+    )
+
+    second = context.handle(
+        {
+            "action": "cpg",
+            "target_id": target_id,
+            "graph": "full",
+            "direction": "out",
+            "depth": 16,
+            "max_items": 50,
+            "max_chars": 40000,
+        }
+    )
+
+    assert second.result == first.result
+    assert context.cpg_sources_parsed == 1
+    context.evict_auxiliary_caches()
+    assert context.cpg_cache_entries == 0
+    assert context.cpg_cache_bytes == 0
+
+
+def test_navigation_prewarm_does_not_construct_cpg_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context, _ = _cpg_context(tmp_path)
+    monkeypatch.setattr(
+        agent_context_module,
+        "build_cpg_subgraph",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("CPG entered navigation prewarm")
+        ),
+    )
+
+    context.prewarm_navigation()
+
+    assert context.cpg_cache_entries == 0
+    assert context.cpg_cache_bytes == 0
+    assert context.cpg_sources_parsed == 0
+
+
+def test_cpg_query_parses_only_the_target_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context, target_id = _cpg_context(tmp_path)
+    parsed_files: list[str] = []
+    real_parse = agent_context_module.DelphiParser.parse
+
+    def record_parse(self, text, file_name, **options):  # noqa: ANN001
+        parsed_files.append(str(file_name))
+        return real_parse(self, text, file_name, **options)
+
+    monkeypatch.setattr(agent_context_module.DelphiParser, "parse", record_parse)
+
+    context.handle(
+        {
+            "action": "cpg",
+            "target_id": target_id,
+            "graph": "ast",
+            "direction": "out",
+            "depth": 16,
+        }
+    )
+
+    assert parsed_files == [str(tmp_path / "UnitA.pas")]
+
+
 def test_open_exposes_read_only_workspace_and_complete_response_envelope(tmp_path: Path) -> None:
     write_source(tmp_path / "Main.dpr", "program Main; begin end.")
 
@@ -103,7 +235,9 @@ def test_registry_unreadable_outline_source_reports_a_sanitized_path(tmp_path: P
     assert str(tmp_path) not in caught.value.message
 
 
-def test_multi_project_symbol_actions_require_selection_and_switch_projects(tmp_path: Path) -> None:
+def test_multi_project_symbol_actions_default_to_repository_and_switch_projects(
+    tmp_path: Path,
+) -> None:
     write_source(
         tmp_path / "A.dpr",
         """
@@ -149,10 +283,16 @@ def test_multi_project_symbol_actions_require_selection_and_switch_projects(tmp_
     context = AgentContext.open(tmp_path)
     project_ids = {project.name: project.project_id for project in context.workspace.projects}
 
-    assert context.workspace.active_project is None
-    with pytest.raises(AgentProtocolError) as caught:
-        context.handle({"action": "find", "query": "Only"})
-    assert caught.value.code == "project_required"
+    assert context.workspace.active_project is not None
+    assert context.workspace.active_project.name == "Workspace"
+    repository_result = context.handle({"action": "find", "query": "Only"})
+    assert {item["name"] for item in result_items(repository_result)} == {
+        "AOnly",
+        "BOnly",
+        "TAOnly",
+        "TBOnly",
+    }
+    assert context.navigation_cache_is_warm
 
     a_result = context.handle({"action": "find", "project_id": project_ids["A"], "query": "TAOnly"})
     a_target = card_named(a_result, "TAOnly")
@@ -249,6 +389,226 @@ def test_repeated_find_reuses_ranked_registry_entries(
     assert calls == 1
 
 
+def test_find_reuses_precomputed_normalized_symbol_names(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_source(
+        tmp_path / "NormalizedFind.pas",
+        """
+        unit NormalizedFind;
+        interface
+        type
+          TAlpha = class
+          end;
+        implementation
+        end.
+        """,
+    )
+    context = AgentContext.open(tmp_path)
+    context.handle({"action": "find", "query": "__build_registry__"})
+    calls = 0
+    real_normalized = agent_context_module._normalized
+
+    def counted_normalized(value: str) -> str:
+        nonlocal calls
+        calls += 1
+        return real_normalized(value)
+
+    monkeypatch.setattr(agent_context_module, "_normalized", counted_normalized)
+
+    response = context.handle({"action": "find", "query": "talpha"})
+
+    assert card_named(response, "TAlpha")["qualified_name"] == "NormalizedFind.TAlpha"
+    assert calls == 1
+
+
+def test_find_materializes_only_the_selected_symbol_cards(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    declarations = "\n".join(
+        f"  TGenerated{index:04d} = class end;"
+        for index in range(200)
+    )
+    write_source(
+        tmp_path / "LazyCards.pas",
+        f"""
+        unit LazyCards;
+        interface
+        type
+        {declarations}
+        implementation
+        end.
+        """,
+    )
+    context = AgentContext.open(tmp_path)
+    context.handle({"action": "find", "query": "__build_registry__"})
+    calls = 0
+    real_card = agent_context_module._SymbolEntry.card
+
+    def counted_card(entry: object) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return real_card(entry)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(agent_context_module._SymbolEntry, "card", counted_card)
+
+    response = context.handle(
+        {"action": "find", "query": "", "max_items": 2, "max_chars": 12_000}
+    )
+
+    assert response.page.returned == 2
+    assert response.page.total > response.page.returned
+    assert calls == response.page.returned
+
+
+def test_navigation_registry_retains_flat_symbol_records(tmp_path: Path) -> None:
+    write_source(
+        tmp_path / "FlatRegistry.pas",
+        """
+        unit FlatRegistry;
+        interface
+        type
+          TFlat = class
+          public
+            procedure Run;
+          end;
+        implementation
+        end.
+        """,
+    )
+    context = AgentContext.open(tmp_path)
+    context.prewarm_navigation()
+    registry = context._registry
+
+    assert registry is not None
+    assert registry.entries
+    assert all(not hasattr(entry, "symbol") for entry in registry.entries)
+    assert card_named(context.handle({"action": "find", "query": "TFlat"}), "TFlat")
+
+
+def test_navigation_shards_are_reused_across_context_process_lifetimes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_source(
+        tmp_path / "PersistentShard.pas",
+        """
+        unit PersistentShard;
+        interface
+        type
+          TPersisted = class
+          end;
+        implementation
+        end.
+        """,
+    )
+    cache_dir = tmp_path / ".delphi-lsp" / "agent-cache" / "navigation-v1"
+    first = AgentContext.open(
+        tmp_path,
+        workers=1,
+        navigation_cache_dir=cache_dir,
+    )
+
+    first.prewarm_navigation()
+    first_cards = result_items(first.handle({"action": "find", "query": "TPersisted"}))
+
+    assert first.navigation_disk_hits == 0
+    assert first.navigation_disk_misses == 1
+    assert list(cache_dir.rglob("*.json"))
+
+    def unexpected_parse(_task: object):
+        raise AssertionError("persistent navigation shard was reparsed")
+
+    monkeypatch.setattr(agent_context_module, "_parse_navigation_task", unexpected_parse)
+    second = AgentContext.open(
+        tmp_path,
+        workers=1,
+        navigation_cache_dir=cache_dir,
+    )
+
+    second.prewarm_navigation()
+    second_cards = result_items(second.handle({"action": "find", "query": "TPersisted"}))
+
+    assert second_cards == first_cards
+    assert second.navigation_disk_hits == 1
+    assert second.navigation_disk_misses == 0
+    assert second.parallel_stats.files_completed == 1
+
+
+def test_navigation_shards_miss_after_source_changes_or_corruption(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_path = tmp_path / "ChangingShard.pas"
+    write_source(
+        source_path,
+        """
+        unit ChangingShard;
+        interface
+        type
+          TOld = class
+          end;
+        implementation
+        end.
+        """,
+    )
+    cache_dir = tmp_path / ".delphi-lsp" / "agent-cache" / "navigation-v1"
+    AgentContext.open(
+        tmp_path,
+        workers=1,
+        navigation_cache_dir=cache_dir,
+    ).prewarm_navigation()
+
+    write_source(
+        source_path,
+        """
+        unit ChangingShard;
+        interface
+        type
+          TNew = class
+          end;
+        implementation
+        end.
+        """,
+    )
+    real_parse = agent_context_module._parse_navigation_task
+    calls = 0
+
+    def counted_parse(task: object):
+        nonlocal calls
+        calls += 1
+        return real_parse(task)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(agent_context_module, "_parse_navigation_task", counted_parse)
+    changed = AgentContext.open(
+        tmp_path,
+        workers=1,
+        navigation_cache_dir=cache_dir,
+    )
+    changed.prewarm_navigation()
+
+    assert card_named(changed.handle({"action": "find", "query": "TNew"}), "TNew")
+    assert changed.navigation_disk_hits == 0
+    assert changed.navigation_disk_misses == 1
+    assert calls == 1
+
+    shard = max(cache_dir.rglob("*.json"), key=lambda path: path.stat().st_mtime_ns)
+    shard.write_text("{broken", encoding="utf-8")
+    rebuilt = AgentContext.open(
+        tmp_path,
+        workers=1,
+        navigation_cache_dir=cache_dir,
+    )
+    rebuilt.prewarm_navigation()
+
+    assert card_named(rebuilt.handle({"action": "find", "query": "TNew"}), "TNew")
+    assert rebuilt.navigation_disk_hits == 0
+    assert rebuilt.navigation_disk_misses == 1
+    assert calls == 2
+
+
 def test_request_refreshes_the_selected_workspace_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -269,6 +629,101 @@ def test_request_refreshes_the_selected_workspace_once(
     context.handle({"action": "find", "query": "Main"})
 
     assert calls == 1
+
+
+def test_cached_context_coalesces_revision_scans_until_explicit_invalidation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_source(tmp_path / "Main.dpr", "program Main; begin end.")
+    calls = 0
+    real_fingerprint = agent_workspace_module._selection_fingerprint
+
+    def counted_fingerprint(*args: object, **kwargs: object):
+        nonlocal calls
+        calls += 1
+        return real_fingerprint(*args, **kwargs)
+
+    monkeypatch.setattr(
+        agent_workspace_module,
+        "_selection_fingerprint",
+        counted_fingerprint,
+    )
+    monkeypatch.setattr(agent_context_module.time, "monotonic", lambda: 100.0)
+
+    context = AgentContext.open(tmp_path, revision_check_interval_seconds=3600.0)
+    assert calls == 1
+
+    context.handle({"action": "open"})
+    context.handle({"action": "find", "query": "Main"})
+    assert calls == 1
+
+    context.invalidate_revision_cache()
+    context.handle({"action": "open"})
+    assert calls == 2
+
+
+def test_context_reuses_selected_workspace_revision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_source(tmp_path / "Main.dpr", "program Main; begin end.")
+    calls = 0
+    real_fingerprint = agent_workspace_module._selection_fingerprint
+
+    def counted_fingerprint(*args: object, **kwargs: object):
+        nonlocal calls
+        calls += 1
+        return real_fingerprint(*args, **kwargs)
+
+    monkeypatch.setattr(
+        agent_workspace_module,
+        "_selection_fingerprint",
+        counted_fingerprint,
+    )
+
+    context = AgentContext.open(tmp_path, revision_check_interval_seconds=3600.0)
+    assert context.workspace.current_revision.startswith("workspace_v2_")
+    assert calls == 1
+
+    context.handle({"action": "open"})
+    context.handle({"action": "find", "query": "Main"})
+    assert calls == 1
+
+
+def test_cached_context_rechecks_revision_after_interval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_source(tmp_path / "Main.dpr", "program Main; begin end.")
+    calls = 0
+    now = 100.0
+    real_fingerprint = agent_workspace_module._selection_fingerprint
+
+    def counted_fingerprint(*args: object, **kwargs: object):
+        nonlocal calls
+        calls += 1
+        return real_fingerprint(*args, **kwargs)
+
+    monkeypatch.setattr(
+        agent_workspace_module,
+        "_selection_fingerprint",
+        counted_fingerprint,
+    )
+    monkeypatch.setattr(agent_context_module.time, "monotonic", lambda: now)
+
+    context = AgentContext.open(
+        tmp_path,
+        revision_check_interval_seconds=30.0,
+    )
+    assert calls == 1
+
+    context.handle({"action": "open"})
+    assert calls == 1
+
+    now = 130.0
+    context.handle({"action": "open"})
+    assert calls == 2
 
 
 def test_declaration_section_queries_scan_each_token_at_most_once_in_source_order(
@@ -1416,7 +1871,112 @@ def test_many_routines_reuse_cached_token_starts_without_rebuilding_full_token_l
 
     assert response.page.total == 151  # 150 routines plus the matching program name.
     assert bisect_sequences
-    assert len({id(sequence) for sequence in bisect_sequences}) <= 2
+    # The eager build document is released and inspect creates one lazy document.
+    # Each document owns at most its token and token-start tuple.
+    assert len({id(sequence) for sequence in bisect_sequences}) <= 4
+
+
+def test_registry_releases_eager_source_documents_and_loads_them_on_inspect(
+    tmp_path: Path,
+) -> None:
+    source = (
+        "unit LazySource;\n"
+        "interface\n"
+        "type\n"
+        "  TLazySource = class\n"
+        "  end;\n"
+        "implementation\n"
+        "end.\n"
+    )
+    (tmp_path / "LazySource.pas").write_text(source, encoding="utf-8")
+    context = AgentContext.open(tmp_path)
+
+    target = card_named(
+        context.handle({"action": "find", "query": "TLazySource"}),
+        "TLazySource",
+    )
+    registry = context._registry
+
+    assert registry is not None
+    assert registry.sources.loaded_count == 0
+
+    response = context.handle(
+        {
+            "action": "inspect",
+            "target_id": target["target_id"],
+            "detail": "declaration",
+        }
+    )
+
+    assert "TLazySource = class" in result_items(response)[0]["text"]
+    assert registry.sources.loaded_count == 1
+
+
+def test_navigation_worker_returns_compact_symbols_without_source_or_model(
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "CompactWorker.pas"
+    source_path.write_text(
+        "unit CompactWorker;\n"
+        "interface\n"
+        "type\n"
+        "  TCompactWorker = class\n"
+        "  end;\n"
+        "implementation\n"
+        "end.\n",
+        encoding="utf-8",
+    )
+    task = agent_context_module._NavigationTask(
+        ordinal=0,
+        source_path=str(source_path),
+        display_path="CompactWorker.pas",
+        unit_name="CompactWorker",
+        unit_path="CompactWorker.pas",
+        unit_id="unit-compact-worker",
+        unit_has_error=False,
+        defines=(),
+        include_paths=(),
+    )
+
+    result = agent_context_module._parse_navigation_task(task)
+
+    assert result.text == ""
+    assert result.model is None
+    assert result.read_error == ""
+    assert any(raw.name == "TCompactWorker" for raw in result.raw_symbols)
+    assert all(not hasattr(raw, "symbol") for raw in result.raw_symbols)
+
+
+def test_find_reuses_a_small_lru_of_ranked_queries(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "Queries.pas").write_text(
+        "unit Queries;\n"
+        "interface\n"
+        "type\n"
+        "  TAlpha = class end;\n"
+        "  TBeta = class end;\n"
+        "implementation\n"
+        "end.\n",
+        encoding="utf-8",
+    )
+    context = AgentContext.open(tmp_path)
+    real_ranked_entries = agent_context_module._ranked_entries
+    calls = 0
+
+    def counted_ranked_entries(entries: object, query: str):
+        nonlocal calls
+        calls += 1
+        return real_ranked_entries(entries, query)
+
+    monkeypatch.setattr(agent_context_module, "_ranked_entries", counted_ranked_entries)
+
+    context.handle({"action": "find", "query": "Alpha"})
+    context.handle({"action": "find", "query": "Beta"})
+    context.handle({"action": "find", "query": "Alpha"})
+
+    assert calls == 2
 
 
 def test_bodyless_class_routine_suffix_is_scanned_linearly(
@@ -1477,23 +2037,18 @@ def test_routine_local_filter_uses_a_sorted_container_sweep(
     containers = [
         SimpleNamespace(
             parent_qualified_name="",
-            symbol=SimpleNamespace(
-                kind=agent_context_module.SymbolKind.PROCEDURE,
-                decl_range=SimpleNamespace(start_line=index * 10, start_col=1),
-            ),
+            kind=agent_context_module.SymbolKind.PROCEDURE,
+            line=index * 10,
+            column=1,
         )
         for index in range(container_count)
     ]
     non_routines = [
         SimpleNamespace(
             parent_qualified_name="",
-            symbol=SimpleNamespace(
-                kind=agent_context_module.SymbolKind.VARIABLE,
-                decl_range=SimpleNamespace(
-                    start_line=100_000 + index,
-                    start_col=1,
-                ),
-            ),
+            kind=agent_context_module.SymbolKind.VARIABLE,
+            line=100_000 + index,
+            column=1,
         )
         for index in range(container_count)
     ]
@@ -1810,7 +2365,7 @@ def test_problems_are_project_scoped_paginated_items(tmp_path: Path) -> None:
     assert result_items(response)[0]["kind"] == "cant_find_file"
 
 
-def test_problems_requires_project_in_unselected_multi_project_workspace_without_registry(
+def test_problems_uses_default_repository_project_without_building_registry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1827,11 +2382,14 @@ def test_problems_requires_project_in_unselected_multi_project_workspace_without
     monkeypatch.setattr(agent_context_module, "_build_registry", forbidden_registry)
 
     choices = context.handle({"action": "open"})
-    assert [item["name"] for item in result_items(choices)] == ["A", "B"]
-    assert all(not item["active"] for item in result_items(choices))
-    with pytest.raises(AgentProtocolError) as required:
-        context.handle({"action": "problems"})
-    assert required.value.code == "project_required"
+    projects = [
+        item for item in result_items(choices)
+        if item["item_type"] == "project"
+    ]
+    assert [item["name"] for item in projects] == ["Workspace", "A", "B"]
+    assert [item["name"] for item in projects if item["active"]] == ["Workspace"]
+    response = context.handle({"action": "problems"})
+    assert response.page.total == 0
     assert build_calls == 0
 
 

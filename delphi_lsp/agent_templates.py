@@ -208,7 +208,7 @@ def _reject_symbolic_link(path: Path) -> None:
 def _skill_markdown() -> str:
     return """---
 name: python-delphi-lsp
-description: Inspect Delphi and Object Pascal codebases through the Protocol v2 semantic navigator.
+description: Inspect Delphi and Object Pascal codebases through the Protocol v3 semantic navigator.
 compatibility: opencode
 metadata:
   package: python-delphi-lsp
@@ -218,21 +218,22 @@ metadata:
 
 Inspect Delphi/Object Pascal only through `delphi_codebase`; never raw bash/read/glob/grep/cat/shell source inspection. Preserve one focused target and cite `path:line` evidence from tool output.
 
-## Protocol v2 workflow
+## Protocol v3 workflow
 
-1. Call `open`. If the requested project is not active, select it with `focus(project_id)`.
+1. Call `open`. A multi-project repository is active as one workspace by default; select a concrete project with `focus(project_id)` only when project-specific compiler context is needed.
 2. Call `find` with a narrow query, then `focus(target_id)` for the returned target.
 3. Inspect focused details in this order as needed: `summary`, `declaration`, `members`, `context`, `body`, `implementations`.
-4. Trace relations with `references`, `callers`, `callees`, `uses`, `used_by`, `inherits`, or `implements`.
-5. Call `problems` before declaring evidence missing. Explain any `sound_partial` relation metadata rather than treating partial results as complete.
-6. Call `metrics` for project LOC and architecture metrics. Use `query` for unit summaries or a unit `target_id` with `detail=members` for full Halstead, complexity, coupling, abstractness, instability, and distance details.
-7. Follow `page.next_cursor` with `cursor` until the needed evidence is available.
+4. Call `cpg(target_id)` when AST structure, control flow, local data flow, or explicit call edges are needed. Narrow with `graph`, `direction`, and `depth`.
+5. Trace relations with `references`, `callers`, `callees`, `uses`, `used_by`, `inherits`, or `implements`.
+6. Call `problems` before declaring evidence missing. Explain any `sound_partial` relation metadata rather than treating partial results as complete.
+7. Call `metrics` for project LOC and architecture metrics. Use `query` for unit summaries or a unit `target_id` with `detail=members` for full Halstead, complexity, coupling, abstractness, instability, and distance details.
+8. Follow `page.next_cursor` with `cursor` until the needed evidence is available.
 
 Prefer `summary` and `declaration`, narrow `max_items` and `max_chars`, and request `body` only when it is necessary. Keep the focused target stable while collecting evidence.
 
 ## Tool calls
 
-`delphi_codebase` accepts `action` (`open`, `find`, `inspect`, `trace`, `focus`, `problems`, `metrics`), optional `query`, `target_id`, `project_id`, `detail`, `relation`, `cursor`, `max_items` (1-50), and `max_chars` (256-40000). It has no root or path argument; the active OpenCode worktree is used.
+`delphi_codebase` accepts `action` (`open`, `find`, `inspect`, `trace`, `focus`, `problems`, `metrics`, `cpg`), optional `query`, `target_id`, `project_id`, `detail`, `relation`, `graph` (`ast`, `cfg`, `dfg`, `call`, `full`), `direction` (`out`, `in`, `both`), `depth` (1-16), `cursor`, `max_items` (1-50), and `max_chars` (256-40000). It has no root or path argument; the active OpenCode worktree is used.
 """
 
 
@@ -280,12 +281,15 @@ const PYTHON = __PYTHON_EXECUTABLE__
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000
 
 type AgentRequest = {
-  action: "open" | "find" | "inspect" | "trace" | "focus" | "problems" | "metrics"
+  action: "open" | "find" | "inspect" | "trace" | "focus" | "problems" | "metrics" | "cpg"
   query?: string
   target_id?: string
   project_id?: string
   detail?: "summary" | "declaration" | "members" | "context" | "body" | "implementations"
   relation?: "references" | "callers" | "callees" | "uses" | "used_by" | "inherits" | "implements"
+  graph?: "ast" | "cfg" | "dfg" | "call" | "full"
+  direction?: "out" | "in" | "both"
+  depth?: number
   cursor?: string
   max_items?: number
   max_chars?: number
@@ -294,7 +298,7 @@ type AgentRequest = {
 type AgentFocus = { project_id: string; unit_id: string; target_id: string }
 
 type AgentSuccessResponse = {
-  schema: 2
+  schema: 3
   workspace_revision: string
   focus: AgentFocus
   result: unknown
@@ -303,7 +307,7 @@ type AgentSuccessResponse = {
 }
 
 type AgentErrorResponse = {
-  schema: 2
+  schema: 3
   error: { code: string; message: string }
 }
 
@@ -361,7 +365,7 @@ function parseAgentResponse(line: string): AgentResponse {
     throw new WorkerProtocolError("delphi_codebase returned malformed JSON.")
   }
 
-  if (!isRecord(payload) || payload.schema !== 2) {
+  if (!isRecord(payload) || payload.schema !== 3) {
     throw new WorkerProtocolError("delphi_codebase returned a malformed protocol response.")
   }
   if ("error" in payload) {
@@ -543,14 +547,17 @@ export const DelphiCodebasePlugin: Plugin = async (_input) => {
   return {
     tool: {
       delphi_codebase: tool({
-        description: "Protocol v2 semantic Delphi/Object Pascal codebase navigation.",
+        description: "Protocol v3 semantic Delphi/Object Pascal codebase navigation.",
         args: {
-          action: tool.schema.enum(["open", "find", "inspect", "trace", "focus", "problems", "metrics"]),
+          action: tool.schema.enum(["open", "find", "inspect", "trace", "focus", "problems", "metrics", "cpg"]),
           query: tool.schema.string().optional(),
           target_id: tool.schema.string().optional(),
           project_id: tool.schema.string().optional(),
           detail: tool.schema.enum(["summary", "declaration", "members", "context", "body", "implementations"]).optional(),
           relation: tool.schema.enum(["references", "callers", "callees", "uses", "used_by", "inherits", "implements"]).optional(),
+          graph: tool.schema.enum(["ast", "cfg", "dfg", "call", "full"]).optional(),
+          direction: tool.schema.enum(["out", "in", "both"]).optional(),
+          depth: tool.schema.number().int().min(1).max(16).optional(),
           cursor: tool.schema.string().optional(),
           max_items: tool.schema.number().int().min(1).max(50).optional(),
           max_chars: tool.schema.number().int().min(256).max(40_000).optional(),

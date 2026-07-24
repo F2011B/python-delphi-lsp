@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import delphi_lsp.metrics as metrics_module
 from delphi_lsp.agent_context import AgentContext
 from delphi_lsp.agent_protocol import AgentProtocolError
 
@@ -73,6 +74,41 @@ def test_metrics_returns_project_summary_and_unit_cards(tmp_path: Path) -> None:
     unit_items = [item for item in items if item["item_type"] == "unit_metrics"]
     assert [item["name"] for item in unit_items] == ["Alpha", "Beta", "Main"]
     assert json.dumps(response.to_mapping(), allow_nan=False)
+
+
+def test_metrics_stream_units_without_materializing_a_project_source_map(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = open_metric_context(tmp_path)
+
+    monkeypatch.setattr(
+        metrics_module,
+        "analyze_project",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("project source map was materialized")
+        ),
+    )
+
+    response = context.handle(
+        {"action": "metrics", "max_items": 50, "max_chars": 40000}
+    )
+
+    assert response_items(response)[0]["unit_count"] == 3
+
+
+def test_parallel_metrics_match_serial_metrics(tmp_path: Path) -> None:
+    serial = open_metric_context(tmp_path)
+    parallel = AgentContext.open(tmp_path, "Main.dpr", workers=2)
+
+    serial_response = serial.handle(
+        {"action": "metrics", "detail": "members", "max_items": 50, "max_chars": 40000}
+    )
+    parallel_response = parallel.handle(
+        {"action": "metrics", "detail": "members", "max_items": 50, "max_chars": 40000}
+    )
+
+    assert response_items(parallel_response) == response_items(serial_response)
 
 
 def test_metrics_filters_units_and_selects_open_unit_id(tmp_path: Path) -> None:

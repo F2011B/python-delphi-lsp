@@ -20,6 +20,8 @@ import threading
 import time
 from types import ModuleType
 
+from watchfiles import watch
+
 from ._version import __version__
 from .agent_context import AgentContext
 from .agent_protocol import AgentProtocolError
@@ -32,10 +34,101 @@ DEFAULT_IDLE_TIMEOUT = 1800
 DEFAULT_STARTUP_TIMEOUT = 120.0
 _MAX_MESSAGE_BYTES = 1024 * 1024
 _CONNECTION_TIMEOUT = 2.0
+_CLIENT_RESPONSE_TIMEOUT = 120.0
 _MEMORY_SIZE = re.compile(r"^(?P<count>[1-9][0-9]*)(?P<suffix>[KMG]?)$", re.IGNORECASE)
 _STARTUP_DIAGNOSTIC_BYTES = 16 * 1024
 _STARTUP_TOKEN_RE = re.compile(r"(?i)(token\b[^\n\r]*?:?\s*['\"]?[A-Za-z0-9_-]+['\"]?|\b[a-zA-Z0-9_-]{32,})")
 _START_LOCK_INCOMPLETE_GRACE_SECONDS = 1.0
+_CACHE_REVISION_CHECK_INTERVAL_SECONDS = 3600.0
+_WATCHER_READY_TIMEOUT_SECONDS = 1.0
+_WATCHER_READY_POLL_MILLISECONDS = 50
+_WATCHED_SUFFIXES = frozenset(
+    {".pas", ".pp", ".inc", ".dpr", ".dpk", ".dproj", ".cfg"}
+)
+_PROCESS_START_LOCKS_GUARD = threading.Lock()
+_PROCESS_START_LOCKS: dict[str, tuple[threading.Lock, int]] = {}
+
+
+def current_process_rss_bytes() -> int:
+    """Return the current resident set size, or zero when unavailable."""
+    try:
+        if sys.platform == "darwin":
+            return _darwin_process_rss_bytes()
+        if sys.platform.startswith("linux"):
+            statm = Path("/proc/self/statm").read_text(encoding="ascii").split()
+            return int(statm[1]) * int(os.sysconf("SC_PAGE_SIZE"))
+        if os.name == "nt":
+            return _windows_process_rss_bytes()
+    except Exception:
+        pass
+    return 0
+
+
+def _darwin_process_rss_bytes() -> int:
+    import ctypes
+
+    class TimeValue(ctypes.Structure):
+        _fields_ = [("seconds", ctypes.c_int), ("microseconds", ctypes.c_int)]
+
+    class MachTaskBasicInfo(ctypes.Structure):
+        _fields_ = [
+            ("virtual_size", ctypes.c_uint64),
+            ("resident_size", ctypes.c_uint64),
+            ("resident_size_max", ctypes.c_uint64),
+            ("user_time", TimeValue),
+            ("system_time", TimeValue),
+            ("policy", ctypes.c_int),
+            ("suspend_count", ctypes.c_int),
+        ]
+
+    library = ctypes.CDLL(None)
+    library.mach_task_self.restype = ctypes.c_uint
+    library.task_info.argtypes = (
+        ctypes.c_uint,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_uint),
+    )
+    library.task_info.restype = ctypes.c_int
+    info = MachTaskBasicInfo()
+    count = ctypes.c_uint(ctypes.sizeof(info) // ctypes.sizeof(ctypes.c_int))
+    result = library.task_info(
+        library.mach_task_self(),
+        20,
+        ctypes.byref(info),
+        ctypes.byref(count),
+    )
+    return int(info.resident_size) if result == 0 else 0
+
+
+def _windows_process_rss_bytes() -> int:
+    import ctypes
+    from ctypes import wintypes
+
+    class ProcessMemoryCounters(ctypes.Structure):
+        _fields_ = [
+            ("cb", wintypes.DWORD),
+            ("PageFaultCount", wintypes.DWORD),
+            ("PeakWorkingSetSize", ctypes.c_size_t),
+            ("WorkingSetSize", ctypes.c_size_t),
+            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+            ("PagefileUsage", ctypes.c_size_t),
+            ("PeakPagefileUsage", ctypes.c_size_t),
+        ]
+
+    counters = ProcessMemoryCounters()
+    counters.cb = ctypes.sizeof(counters)
+    process = ctypes.windll.kernel32.GetCurrentProcess()
+    if not ctypes.windll.psapi.GetProcessMemoryInfo(
+        process,
+        ctypes.byref(counters),
+        counters.cb,
+    ):
+        return 0
+    return int(counters.WorkingSetSize)
 
 
 def estimate_deep_size(value: object) -> int:
@@ -273,6 +366,23 @@ def _safe_metadata_path(root: str | Path, *, create: bool = False) -> Path:
     return result
 
 
+def _safe_navigation_cache_path(root: str | Path, *, create: bool = False) -> Path:
+    parent = _safe_metadata_path(root, create=create).parent
+    result = parent / "navigation-v1"
+    if result.exists() and result.is_symlink():
+        raise CacheClientError("unsafe_metadata", "Navigation cache path is unsafe.")
+    if create:
+        result.mkdir(mode=0o700, exist_ok=True)
+        if os.name != "nt":
+            os.chmod(result, 0o700)
+    return result
+
+
+def navigation_cache_path(root: str | Path, *, create: bool = False) -> Path:
+    """Return the validated persistent navigation-cache directory."""
+    return _safe_navigation_cache_path(root, create=create)
+
+
 def _metadata_mapping(metadata: CacheMetadata) -> dict[str, object]:
     return {field.name: getattr(metadata, field.name) for field in fields(metadata)}
 
@@ -472,10 +582,34 @@ def _start_lock(root: str | Path, timeout: float):
             pass
 
 
+@contextlib.contextmanager
+def _process_start_lock(root: str | Path):
+    canonical = str(Path(root).resolve())
+    with _PROCESS_START_LOCKS_GUARD:
+        lock, users = _PROCESS_START_LOCKS.get(
+            canonical,
+            (threading.Lock(), 0),
+        )
+        _PROCESS_START_LOCKS[canonical] = (lock, users + 1)
+    try:
+        with lock:
+            yield
+    finally:
+        with _PROCESS_START_LOCKS_GUARD:
+            current_lock, current_users = _PROCESS_START_LOCKS[canonical]
+            if current_users == 1:
+                del _PROCESS_START_LOCKS[canonical]
+            else:
+                _PROCESS_START_LOCKS[canonical] = (
+                    current_lock,
+                    current_users - 1,
+                )
+
+
 def _client_exchange(metadata: CacheMetadata, request: dict[str, object]) -> CacheClientResponse:
     try:
         with socket.create_connection(("127.0.0.1", metadata.port), timeout=2) as connection:
-            connection.settimeout(3)
+            connection.settimeout(_CLIENT_RESPONSE_TIMEOUT)
             request_without_token = {key: value for key, value in request.items() if key != "token"}
             connection.sendall(json.dumps({"token": metadata.token, **request_without_token}, separators=(",", ":")).encode("utf-8") + b"\n")
             response = _read_line(connection)
@@ -533,38 +667,93 @@ def _read_startup_tail(diagnostics: object, *, max_bytes: int = _STARTUP_DIAGNOS
     return b""
 
 
-class _CacheService:
-    def __init__(self, metadata: CacheMetadata) -> None:
-        self.metadata = metadata
-        self.context = AgentContext.open(
-            metadata.root,
-            metadata.project_file or None,
-            workers=metadata.workers,
-            worker_memory_budget_bytes=metadata.max_memory_bytes,
+def _daemon_process_options() -> dict[str, object]:
+    options: dict[str, object] = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+    }
+    if os.name == "nt":
+        options["creationflags"] = (
+            subprocess.CREATE_NO_WINDOW
+            | subprocess.CREATE_NEW_PROCESS_GROUP
         )
+    else:
+        options["start_new_session"] = True
+    return options
+
+
+class _CacheService:
+    def __init__(
+        self,
+        metadata: CacheMetadata,
+        *,
+        defer_context: bool = False,
+    ) -> None:
+        self.metadata = metadata
+        self._rss_baseline_bytes = current_process_rss_bytes()
+        self._context: AgentContext | None = None
+        self.context_ready = threading.Event()
+        self.watcher_ready = threading.Event()
         self.budget = CacheBudget(metadata.max_memory_bytes)
         self.stats = CacheStats()
         self.lock = threading.Lock()
         self.started = time.monotonic()
         self.last_activity = self.started
         self.cache_state = "warming"
-        self.last_revision = self.context.workspace.workspace_revision
+        self.last_revision = ""
         self.last_budget = BudgetResult(0, 0.0, 0.0, False, False, False)
         self.prewarm_seconds = 0.0
+        self.startup_error = ""
         self.shutdown = threading.Event()
+        self.prewarm_thread: threading.Thread | None = None
+        if not defer_context:
+            self._initialize_context()
+
+    @property
+    def context(self) -> AgentContext:
+        if self._context is None:
+            raise RuntimeError("Cache workspace is still being discovered.")
+        return self._context
+
+    def _initialize_context(self) -> AgentContext:
+        if self._context is None:
+            context = AgentContext.open(
+                self.metadata.root,
+                self.metadata.project_file or None,
+                workers=self.metadata.workers,
+                worker_memory_budget_bytes=self.metadata.max_memory_bytes,
+                revision_check_interval_seconds=_CACHE_REVISION_CHECK_INTERVAL_SECONDS,
+                navigation_cache_dir=navigation_cache_path(
+                    self.metadata.root,
+                    create=True,
+                ),
+            )
+            self._context = context
+            self.last_revision = context.workspace.workspace_revision
+        self.context_ready.set()
+        return self._context
+
+    def _measure_retained_bytes(self) -> int:
+        process_rss = current_process_rss_bytes()
+        process_growth = (
+            max(0, process_rss - self._rss_baseline_bytes)
+            if process_rss > 0 and self._rss_baseline_bytes > 0
+            else 0
+        )
+        return max(self.context.estimated_cache_bytes, process_growth)
 
     def prewarm(self) -> None:
         started = time.monotonic()
+        context = self._initialize_context()
         try:
-            self.context.handle({"action": "find", "query": "", "max_items": 1, "max_chars": 256})
-            self.last_revision = self.context.workspace.workspace_revision
+            self.last_revision = context.prewarm_navigation()
             self.cache_state = "warm"
         except AgentProtocolError as error:
             if error.code != "project_required":
                 raise
             self.cache_state = "ready"
         self.last_budget = self.budget.enforce(
-            measure=lambda: estimate_deep_size(self.context.cache_roots()),
+            measure=self._measure_retained_bytes,
             evict_auxiliary=self.context.evict_auxiliary_caches,
             evict_navigation=self.context.evict_navigation_caches,
         )
@@ -572,17 +761,58 @@ class _CacheService:
             self.stats.evictions += 1
             self.cache_state = "compact"
         self.prewarm_seconds = time.monotonic() - started
-        self.stats.parallel_fallbacks = self.context.parallel_stats.fallbacks
+        self.stats.parallel_fallbacks = context.parallel_stats.fallbacks
+
+    def start_prewarm(self) -> None:
+        def run() -> None:
+            try:
+                with self.lock:
+                    self.prewarm()
+            except Exception as error:
+                detail = _truncate_and_sanitize_startup_diagnostics(
+                    f"{type(error).__name__}: {error}".encode(
+                        "utf-8",
+                        "replace",
+                    )
+                )
+                self.startup_error = detail or type(error).__name__
+                self.cache_state = "failed"
+            finally:
+                self.context_ready.set()
+
+        self.prewarm_thread = threading.Thread(
+            target=run,
+            name="delphi-cache-prewarm",
+            daemon=True,
+        )
+        self.prewarm_thread.start()
 
     def request(self, request: dict[str, object]) -> CacheClientResponse:
+        action = request.get("action")
+        if action == "status":
+            warning = "" if request.get("_startup_probe") is True else self._consume_warning()
+            return CacheClientResponse(self.status(), warning)
+        if action == "stop":
+            self.shutdown.set()
+            return CacheClientResponse({"stopping": True})
+        if self.cache_state == "warming":
+            self.last_activity = time.monotonic()
+            raise CacheClientError(
+                "cache_warming",
+                "Cache is still warming. Retry after cache status reports ready.",
+            )
+        if self.cache_state == "failed":
+            detail = (
+                f" {self.startup_error}"
+                if self.startup_error
+                else ""
+            )
+            raise CacheClientError(
+                "cache_failed",
+                f"Cache workspace discovery or warm-up failed.{detail}",
+            )
+        self.watcher_ready.wait(timeout=_WATCHER_READY_TIMEOUT_SECONDS)
         with self.lock:
-            action = request.get("action")
-            if action == "status":
-                warning = "" if request.get("_startup_probe") is True else self._consume_warning()
-                return CacheClientResponse(self.status(), warning)
-            if action == "stop":
-                self.shutdown.set()
-                return CacheClientResponse({"stopping": True})
             self.last_activity = time.monotonic()
             before = self.last_revision
             was_warm = self.context.navigation_cache_is_warm
@@ -605,7 +835,7 @@ class _CacheService:
             if before != after:
                 self.stats.invalidations += 1
             self.last_budget = self.budget.enforce(
-                measure=lambda: estimate_deep_size(self.context.cache_roots()),
+                measure=self._measure_retained_bytes,
                 evict_auxiliary=self.context.evict_auxiliary_caches,
                 evict_navigation=self.context.evict_navigation_caches,
             )
@@ -625,6 +855,12 @@ class _CacheService:
     def status(self) -> dict[str, object]:
         now = time.monotonic()
         idle = max(0.0, now - self.last_activity)
+        context = self._context
+        parallel_stats = (
+            context.parallel_stats
+            if context is not None
+            else None
+        )
         return {
             "pid": self.metadata.pid, "root": self.metadata.root, "project_file": self.metadata.project_file,
             "version": self.metadata.version, "uptime": now - self.started, "idle_seconds": idle,
@@ -636,14 +872,68 @@ class _CacheService:
             "cache_state": self.cache_state, "requests": self.stats.requests, "warm_hits": self.stats.warm_hits,
             "rebuilds": self.stats.rebuilds, "invalidations": self.stats.invalidations, "evictions": self.stats.evictions,
             "workers_configured": "auto" if self.metadata.workers == 0 else self.metadata.workers,
-            "workers_effective": self.context.parallel_stats.effective_workers,
-            "parallel_files_completed": self.context.parallel_stats.files_completed,
+            "workers_effective": parallel_stats.effective_workers if parallel_stats else 0,
+            "parallel_files_completed": parallel_stats.files_completed if parallel_stats else 0,
             "prewarm_seconds": self.prewarm_seconds,
-            "parallel_seconds": self.context.parallel_stats.elapsed_seconds,
+            "parallel_seconds": parallel_stats.elapsed_seconds if parallel_stats else 0.0,
             "parallel_fallbacks": self.stats.parallel_fallbacks,
+            "navigation_disk_hits": context.navigation_disk_hits if context else 0,
+            "navigation_disk_misses": context.navigation_disk_misses if context else 0,
+            "cpg_cache_entries": context.cpg_cache_entries if context else 0,
+            "cpg_cache_bytes": context.cpg_cache_bytes if context else 0,
             "idle_timeout": self.metadata.idle_timeout, "idle_remaining": max(0.0, self.metadata.idle_timeout - idle),
-            "workspace_revision": self.context.workspace.workspace_revision,
+            "workspace_revision": self.last_revision,
+            "startup_error": self.startup_error,
         }
+
+
+def _watch_filter(_change: object, path: str) -> bool:
+    return Path(path).suffix.casefold() in _WATCHED_SUFFIXES
+
+
+def watch_workspace_changes(
+    root: str | Path,
+    *,
+    stop_event: threading.Event,
+    on_change: Callable[[], None],
+    on_ready: Callable[[], None] | None = None,
+) -> None:
+    ready = False
+    try:
+        for changes in watch(
+            root,
+            watch_filter=_watch_filter,
+            stop_event=stop_event,
+            debounce=50,
+            step=20,
+            rust_timeout=_WATCHER_READY_POLL_MILLISECONDS,
+            yield_on_timeout=True,
+            recursive=True,
+            raise_interrupt=False,
+        ):
+            if not ready:
+                ready = True
+                if on_ready is not None:
+                    on_ready()
+            if changes:
+                on_change()
+    except (OSError, RuntimeError):
+        on_change()
+    finally:
+        if not ready and on_ready is not None:
+            on_ready()
+
+
+def _watch_workspace(service: _CacheService) -> None:
+    service.context_ready.wait()
+    if service.shutdown.is_set() or service._context is None:
+        return
+    watch_workspace_changes(
+        service.metadata.root,
+        stop_event=service.shutdown,
+        on_change=service._context.invalidate_revision_cache,
+        on_ready=service.watcher_ready.set,
+    )
 
 
 def _serve_connection(connection: socket.socket, service: _CacheService) -> None:
@@ -691,11 +981,22 @@ def run_cache_daemon(
         idle_timeout,
         time.time(),
     )
+    watcher: threading.Thread | None = None
     try:
-        service = _CacheService(metadata)
-        service.prewarm()
+        service = _CacheService(metadata, defer_context=True)
         _write_metadata(metadata)
-        while not service.shutdown.is_set() and time.monotonic() - service.last_activity < idle_timeout:
+        watcher = threading.Thread(
+            target=_watch_workspace,
+            args=(service,),
+            name="delphi-cache-watcher",
+            daemon=True,
+        )
+        watcher.start()
+        service.start_prewarm()
+        while (
+            not service.shutdown.is_set()
+            and time.monotonic() - service.last_activity < idle_timeout
+        ):
             try:
                 connection, _ = listener.accept()
             except socket.timeout:
@@ -704,8 +1005,12 @@ def run_cache_daemon(
                 connection.settimeout(_CONNECTION_TIMEOUT)
                 _serve_connection(connection, service)
     finally:
+        if "service" in locals():
+            service.shutdown.set()
         listener.close()
         _remove_metadata_if_owned(metadata)
+        if watcher is not None:
+            watcher.join(timeout=2.0)
 
 
 def _start_cache_unlocked(
@@ -753,16 +1058,14 @@ def _start_cache_unlocked(
     ]
     if project:
         command.extend(("--project-file", project))
-    options: dict[str, object] = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL}
-    if os.name == "nt":
-        options["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
-        options["start_new_session"] = True
+    options = _daemon_process_options()
     with tempfile.TemporaryFile() as diagnostics:
         options["stderr"] = diagnostics
         process = subprocess.Popen(command, **options)
         deadline = time.monotonic() + startup_timeout
         startup_ready = False
+        timed_out = False
+        return_code: int | None = None
         try:
             while time.monotonic() < deadline:
                 metadata = _read_metadata(canonical)
@@ -776,10 +1079,12 @@ def _start_cache_unlocked(
                 if process.poll() is not None:
                     break
                 time.sleep(0.05)
-            if process.poll() is None:
+            return_code = process.poll()
+            timed_out = return_code is None
+            if timed_out:
                 process.kill()
             with contextlib.suppress(Exception):
-                process.wait()
+                return_code = process.wait()
             metadata = _read_metadata(canonical)
             if metadata and metadata.pid == process.pid:
                 _remove_metadata_if_owned(metadata)
@@ -787,9 +1092,28 @@ def _start_cache_unlocked(
             raw = _read_startup_tail(diagnostics)
             message = _truncate_and_sanitize_startup_diagnostics(raw)
             base = "Cache daemon did not become ready."
+            if timed_out:
+                reason = (
+                    f" Startup timed out after {startup_timeout:.1f}s before "
+                    "readiness metadata was published."
+                )
+            else:
+                reason = (
+                    f" Child process exited with code {return_code} before "
+                    "readiness metadata was published."
+                )
             if message:
-                raise CacheClientError("startup_failed", f"{base} {message}")
-            raise CacheClientError("startup_failed", base)
+                raise CacheClientError(
+                    "startup_failed",
+                    f"{base}{reason} Child stderr: {message}",
+                )
+            raise CacheClientError(
+                "startup_failed",
+                (
+                    f"{base}{reason} No child diagnostics were emitted. "
+                    f"Python executable: {sys.executable}. Workspace: {canonical}."
+                ),
+            )
         finally:
             if not startup_ready:
                 if process.poll() is None:
@@ -809,17 +1133,20 @@ def start_cache(
 ) -> CacheMetadata:
     if type(workers) is not int or not 0 <= workers <= 32:
         raise ValueError("workers must be auto or an integer from 1 through 32.")
+    if type(idle_timeout) is not int or idle_timeout <= 0:
+        raise ValueError("idle_timeout must be greater than zero.")
     if not math.isfinite(startup_timeout) or startup_timeout <= 0:
         raise ValueError("startup_timeout must be greater than zero.")
-    with _start_lock(root, startup_timeout):
-        return _start_cache_unlocked(
-            root,
-            project_file=project_file,
-            max_memory_bytes=max_memory_bytes,
-            workers=workers,
-            idle_timeout=idle_timeout,
-            startup_timeout=startup_timeout,
-        )
+    with _process_start_lock(root):
+        with _start_lock(root, startup_timeout):
+            return _start_cache_unlocked(
+                root,
+                project_file=project_file,
+                max_memory_bytes=max_memory_bytes,
+                workers=workers,
+                idle_timeout=idle_timeout,
+                startup_timeout=startup_timeout,
+            )
 
 
 def query_cache(root: str | Path, request: dict[str, object]) -> CacheClientResponse:
@@ -830,7 +1157,13 @@ def query_cache(root: str | Path, request: dict[str, object]) -> CacheClientResp
     if not _pid_alive(metadata.pid):
         _remove_metadata_if_owned(metadata)
         raise CacheClientError("cache_not_running", "Cache daemon is not running.")
-    return _client_exchange(metadata, request)
+    while True:
+        try:
+            return _client_exchange(metadata, request)
+        except CacheClientError as error:
+            if error.code != "cache_warming":
+                raise
+            time.sleep(0.05)
 
 
 def cache_status(root: str | Path) -> dict[str, object]:
@@ -872,7 +1205,7 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument("--project-file", default="")
     serve.add_argument("--max-memory", type=int, default=DEFAULT_MAX_MEMORY_BYTES)
     serve.add_argument("--workers", type=int, default=0)
-    serve.add_argument("--idle-timeout", type=int, default=DEFAULT_IDLE_TIMEOUT)
+    serve.add_argument("--idle-timeout", type=_positive_integer, default=DEFAULT_IDLE_TIMEOUT)
     args = parser.parse_args(argv)
     if args.command == "serve":
         run_cache_daemon(
@@ -883,6 +1216,13 @@ def main(argv: list[str] | None = None) -> int:
             idle_timeout=args.idle_timeout,
         )
     return 0
+
+
+def _positive_integer(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be greater than zero")
+    return parsed
 
 
 if __name__ == "__main__":

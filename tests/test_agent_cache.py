@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
+import contextlib
 from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
 import re
 import socket
+import sys
 import textwrap
 import threading
 import time
@@ -24,6 +26,90 @@ from delphi_lsp.agent_context import AgentContext
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_workspace_change_watcher_invalidates_revision_cache(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from delphi_lsp import agent_cache
+
+    stop = threading.Event()
+    invalidations: list[None] = []
+
+    def changed(*_args, **_kwargs):
+        yield {(1, str(tmp_path / "Changed.pas"))}
+        stop.set()
+
+    monkeypatch.setattr(agent_cache, "watch", changed)
+
+    agent_cache.watch_workspace_changes(
+        tmp_path,
+        stop_event=stop,
+        on_change=lambda: invalidations.append(None),
+    )
+
+    assert invalidations == [None]
+
+
+def test_workspace_change_watcher_invalidates_when_backend_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from delphi_lsp import agent_cache
+
+    def failed_watch(*_args, **_kwargs):
+        raise OSError("watch backend unavailable")
+
+    invalidations: list[None] = []
+    monkeypatch.setattr(agent_cache, "watch", failed_watch)
+
+    agent_cache.watch_workspace_changes(
+        tmp_path,
+        stop_event=threading.Event(),
+        on_change=lambda: invalidations.append(None),
+    )
+
+    assert invalidations == [None]
+
+
+def test_current_process_rss_dispatches_platform_measurements(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from delphi_lsp import agent_cache
+
+    monkeypatch.setattr(agent_cache.sys, "platform", "darwin")
+    monkeypatch.setattr(agent_cache, "_darwin_process_rss_bytes", lambda: 123)
+    assert agent_cache.current_process_rss_bytes() == 123
+
+    monkeypatch.setattr(agent_cache.sys, "platform", "linux")
+    monkeypatch.setattr(
+        agent_cache.Path,
+        "read_text",
+        lambda _path, **_options: "100 12 0 0 0 0 0",
+    )
+    monkeypatch.setattr(agent_cache.os, "sysconf", lambda _name: 4096, raising=False)
+    assert agent_cache.current_process_rss_bytes() == 12 * 4096
+
+    monkeypatch.setattr(agent_cache.sys, "platform", "win32")
+    monkeypatch.setattr(agent_cache.os, "name", "nt")
+    monkeypatch.setattr(agent_cache, "_windows_process_rss_bytes", lambda: 456)
+    assert agent_cache.current_process_rss_bytes() == 456
+
+
+def test_current_process_rss_returns_zero_when_measurement_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from delphi_lsp import agent_cache
+
+    monkeypatch.setattr(agent_cache.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        agent_cache,
+        "_darwin_process_rss_bytes",
+        lambda: (_ for _ in ()).throw(RuntimeError("unavailable")),
+    )
+
+    assert agent_cache.current_process_rss_bytes() == 0
 
 
 def test_cache_daemon_lifecycle_reuses_one_authenticated_process(tmp_path: Path) -> None:
@@ -46,7 +132,7 @@ def test_cache_daemon_lifecycle_reuses_one_authenticated_process(tmp_path: Path)
         second = start_cache(tmp_path, max_memory_bytes=512 * 1024**2, workers=2, startup_timeout=30)
         assert first.pid == second.pid
         response = query_cache(tmp_path, {"action": "open"})
-        assert response.payload["schema"] == 2
+        assert response.payload["schema"] == 3
         status = cache_status(tmp_path)
         assert status["pid"] == first.pid
         assert status["workers_configured"] == 2
@@ -63,6 +149,156 @@ def test_cache_daemon_lifecycle_reuses_one_authenticated_process(tmp_path: Path)
             assert metadata_file.parent.stat().st_mode & 0o777 == 0o700
     finally:
         stop_cache(tmp_path)
+
+
+def test_cache_daemon_reports_ready_before_slow_prewarm_finishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from delphi_lsp import agent_cache
+
+    write_source(tmp_path / "Demo.dpr", "program Demo; begin end.")
+    prewarm_started = threading.Event()
+    allow_prewarm = threading.Event()
+    real_prewarm = agent_cache._CacheService.prewarm
+
+    def slow_prewarm(service: agent_cache._CacheService) -> None:
+        prewarm_started.set()
+        assert allow_prewarm.wait(timeout=5)
+        real_prewarm(service)
+
+    monkeypatch.setattr(agent_cache._CacheService, "prewarm", slow_prewarm)
+    daemon = threading.Thread(
+        target=agent_cache.run_cache_daemon,
+        args=(tmp_path,),
+        kwargs={"idle_timeout": 10},
+        daemon=True,
+    )
+    daemon.start()
+
+    try:
+        assert prewarm_started.wait(timeout=2)
+        deadline = time.monotonic() + 2
+        metadata = agent_cache._read_metadata(tmp_path)
+        while metadata is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+            metadata = agent_cache._read_metadata(tmp_path)
+
+        assert metadata is not None
+        status = agent_cache._client_exchange(
+            metadata,
+            {"action": "status", "_startup_probe": True},
+        ).payload
+        assert status["cache_state"] == "warming"
+    finally:
+        allow_prewarm.set()
+        deadline = time.monotonic() + 2
+        metadata = agent_cache._read_metadata(tmp_path)
+        while metadata is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+            metadata = agent_cache._read_metadata(tmp_path)
+        if metadata is not None:
+            with contextlib.suppress(agent_cache.CacheClientError):
+                agent_cache._client_exchange(metadata, {"action": "stop"})
+        daemon.join(timeout=3)
+
+
+def test_cache_daemon_reports_ready_before_slow_workspace_discovery_finishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from delphi_lsp import agent_cache
+
+    write_source(tmp_path / "Demo.dpr", "program Demo; begin end.")
+    discovery_started = threading.Event()
+    allow_discovery = threading.Event()
+    real_open = agent_cache.AgentContext.open
+
+    def slow_open(*args, **kwargs):  # noqa: ANN002, ANN003
+        discovery_started.set()
+        assert allow_discovery.wait(timeout=5)
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(agent_cache.AgentContext, "open", slow_open)
+    daemon = threading.Thread(
+        target=agent_cache.run_cache_daemon,
+        args=(tmp_path,),
+        kwargs={"idle_timeout": 10},
+        daemon=True,
+    )
+    daemon.start()
+
+    try:
+        assert discovery_started.wait(timeout=2)
+        deadline = time.monotonic() + 2
+        metadata = agent_cache._read_metadata(tmp_path)
+        while metadata is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+            metadata = agent_cache._read_metadata(tmp_path)
+
+        assert metadata is not None
+        status = agent_cache._client_exchange(
+            metadata,
+            {"action": "status", "_startup_probe": True},
+        ).payload
+        assert status["cache_state"] == "warming"
+        assert status["workspace_revision"] == ""
+    finally:
+        allow_discovery.set()
+        deadline = time.monotonic() + 2
+        metadata = agent_cache._read_metadata(tmp_path)
+        while metadata is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+            metadata = agent_cache._read_metadata(tmp_path)
+        if metadata is not None:
+            with contextlib.suppress(agent_cache.CacheClientError):
+                agent_cache._client_exchange(metadata, {"action": "stop"})
+        daemon.join(timeout=3)
+
+
+def test_query_cache_retries_while_daemon_is_warming(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from delphi_lsp import agent_cache
+
+    metadata = agent_cache.CacheMetadata(
+        2,
+        str(tmp_path.resolve()),
+        os.getpid(),
+        1,
+        "x" * 32,
+        "test",
+        "",
+        512 * 1024**2,
+        0,
+        10,
+        time.time(),
+    )
+    attempts = 0
+
+    def exchange(
+        _metadata: agent_cache.CacheMetadata,
+        _request: dict[str, object],
+    ) -> agent_cache.CacheClientResponse:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise agent_cache.CacheClientError(
+                "cache_warming",
+                "Cache is still warming.",
+            )
+        return agent_cache.CacheClientResponse({"schema": 2})
+
+    monkeypatch.setattr(agent_cache, "_read_metadata", lambda _root: metadata)
+    monkeypatch.setattr(agent_cache, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(agent_cache, "_client_exchange", exchange)
+    monkeypatch.setattr(agent_cache.time, "sleep", lambda _seconds: None)
+
+    response = agent_cache.query_cache(tmp_path, {"action": "open"})
+
+    assert response.payload == {"schema": 2}
+    assert attempts == 2
 
 
 def test_cache_daemon_compacts_handles_bad_clients_and_idles(tmp_path: Path) -> None:
@@ -124,7 +360,12 @@ type
 implementation
 end. { changed }
 """, encoding="utf-8")
-        after = query_cache(tmp_path, {"action": "open"}).payload["workspace_revision"]
+        deadline = time.monotonic() + 5
+        after = before
+        while after == before and time.monotonic() < deadline:
+            after = query_cache(tmp_path, {"action": "open"}).payload["workspace_revision"]
+            if after == before:
+                time.sleep(0.05)
         assert before != after
         assert cache_status(tmp_path)["invalidations"] >= 1
         source.write_text("""unit UnitA;
@@ -137,7 +378,13 @@ type
 implementation
 end.
 """, encoding="utf-8")
-        rebuilt = query_cache(tmp_path, {"action": "find", "query": "TAdded"}).payload
+        deadline = time.monotonic() + 5
+        rebuilt = {"result": []}
+        while time.monotonic() < deadline:
+            rebuilt = query_cache(tmp_path, {"action": "find", "query": "TAdded"}).payload
+            if any(item["name"] == "TAdded" for item in rebuilt["result"]):
+                break
+            time.sleep(0.05)
         assert any(item["name"] == "TAdded" for item in rebuilt["result"])
         stop_cache(tmp_path)
         stop_cache(tmp_path)
@@ -235,6 +482,48 @@ def test_startup_timeout_replaces_the_old_ten_second_deadline(
     assert error.value.code == "startup_failed"
     assert process.polls >= 3
     assert process.killed is True
+    assert "timed out after 30.0s" in error.value.message
+    assert str(tmp_path.resolve()) in error.value.message
+    assert sys.executable in error.value.message
+
+
+def test_windows_cache_daemon_starts_without_a_console_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from delphi_lsp import agent_cache
+
+    create_no_window = 0x08000000
+    create_new_process_group = 0x00000200
+    detached_process = 0x00000008
+    monkeypatch.setattr(agent_cache.os, "name", "nt")
+    monkeypatch.setattr(
+        agent_cache.subprocess,
+        "CREATE_NO_WINDOW",
+        create_no_window,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        agent_cache.subprocess,
+        "CREATE_NEW_PROCESS_GROUP",
+        create_new_process_group,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        agent_cache.subprocess,
+        "DETACHED_PROCESS",
+        detached_process,
+        raising=False,
+    )
+
+    options = agent_cache._daemon_process_options()
+
+    assert options["creationflags"] == (
+        create_no_window | create_new_process_group
+    )
+    assert options["creationflags"] & detached_process == 0
+    assert options["stdin"] is agent_cache.subprocess.DEVNULL
+    assert options["stdout"] is agent_cache.subprocess.DEVNULL
+    assert "start_new_session" not in options
 
 
 @pytest.mark.parametrize("startup_timeout", [0, -1, float("nan"), float("inf")])
@@ -270,7 +559,7 @@ def test_partial_client_disconnect_does_not_stop_daemon(tmp_path: Path) -> None:
         metadata = start_cache(tmp_path)
         with socket.create_connection(("127.0.0.1", metadata.port)) as connection:
             connection.sendall(b'{"token":"partial"')
-        assert query_cache(tmp_path, {"action": "open"}).payload["schema"] == 2
+        assert query_cache(tmp_path, {"action": "open"}).payload["schema"] == 3
         assert cache_status(tmp_path)["pid"] == metadata.pid
     finally:
         stop_cache(tmp_path)
@@ -350,12 +639,208 @@ def test_prewarm_only_tolerates_project_selection_error(monkeypatch, tmp_path: P
         time.time(),
     )
     service = _CacheService(metadata)
-    monkeypatch.setattr(service.context, "handle", lambda request: (_ for _ in ()).throw(AgentProtocolError("project_required", "Select a project.")))
+    monkeypatch.setattr(service.context, "prewarm_navigation", lambda: (_ for _ in ()).throw(AgentProtocolError("project_required", "Select a project.")))
     service.prewarm()
     assert service.cache_state == "ready"
-    monkeypatch.setattr(service.context, "handle", lambda request: (_ for _ in ()).throw(AgentProtocolError("invalid_request", "Bad request.")))
+    monkeypatch.setattr(service.context, "prewarm_navigation", lambda: (_ for _ in ()).throw(AgentProtocolError("invalid_request", "Bad request.")))
     with pytest.raises(AgentProtocolError, match="Bad request"):
         service.prewarm()
+
+
+def test_multiple_projects_prewarm_repository_navigation_cache(
+    tmp_path: Path,
+) -> None:
+    from delphi_lsp.agent_cache import CacheMetadata, _CacheService
+
+    write_source(
+        tmp_path / "A.dpr",
+        "program A; uses AUnit in 'AUnit.pas'; begin end.",
+    )
+    write_source(
+        tmp_path / "B.dpr",
+        "program B; uses BUnit in 'BUnit.pas'; begin end.",
+    )
+    write_source(
+        tmp_path / "AUnit.pas",
+        """
+        unit AUnit;
+        interface
+        type
+          TARepositoryCache = class
+          end;
+        implementation
+        end.
+        """,
+    )
+    write_source(
+        tmp_path / "BUnit.pas",
+        """
+        unit BUnit;
+        interface
+        type
+          TBRepositoryCache = class
+          end;
+        implementation
+        end.
+        """,
+    )
+    metadata = CacheMetadata(
+        2,
+        str(tmp_path.resolve()),
+        os.getpid(),
+        1,
+        "x" * 32,
+        "test",
+        "",
+        512 * 1024**2,
+        0,
+        10,
+        time.time(),
+    )
+    service = _CacheService(metadata)
+
+    service.prewarm()
+
+    assert service.context.navigation_cache_is_warm
+    assert service.cache_state == "warm"
+    assert service.status()["current_bytes"] > 0
+    assert service.status()["cpg_cache_entries"] == 0
+    assert service.status()["cpg_cache_bytes"] == 0
+    result = service.request(
+        {"action": "find", "query": "RepositoryCache"}
+    ).payload["result"]
+    assert {item["name"] for item in result} == {
+        "TARepositoryCache",
+        "TBRepositoryCache",
+    }
+
+
+def test_cache_service_uses_constant_time_accounting_instead_of_deep_graph_walk(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from delphi_lsp import agent_cache
+    from delphi_lsp.agent_cache import CacheMetadata, _CacheService
+
+    write_source(
+        tmp_path / "Demo.dpr",
+        """
+        program Demo;
+        type
+          TIndexed = class
+          end;
+        begin
+        end.
+        """,
+    )
+    metadata = CacheMetadata(
+        2,
+        str(tmp_path.resolve()),
+        os.getpid(),
+        1,
+        "x" * 32,
+        "test",
+        "",
+        512 * 1024**2,
+        1,
+        10,
+        time.time(),
+    )
+    service = _CacheService(metadata)
+    monkeypatch.setattr(
+        agent_cache,
+        "estimate_deep_size",
+        lambda _value: (_ for _ in ()).throw(AssertionError("deep graph walk entered request path")),
+    )
+
+    service.prewarm()
+    response = service.request({"action": "find", "query": "TIndexed"})
+
+    assert any(item["name"] == "TIndexed" for item in response.payload["result"])
+    assert service.last_budget.retained_bytes >= service.context.estimated_cache_bytes
+
+
+def test_cache_service_accounts_for_unestimated_process_rss(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from delphi_lsp import agent_cache
+    from delphi_lsp.agent_cache import CacheMetadata, _CacheService
+
+    write_source(tmp_path / "Demo.dpr", "program Demo; begin end.")
+    monkeypatch.setattr(agent_cache, "current_process_rss_bytes", lambda: 1_000)
+    metadata = CacheMetadata(
+        2,
+        str(tmp_path.resolve()),
+        os.getpid(),
+        1,
+        "x" * 32,
+        "test",
+        "",
+        10_000,
+        1,
+        10,
+        time.time(),
+    )
+    service = _CacheService(metadata)
+    monkeypatch.setattr(
+        type(service.context),
+        "estimated_cache_bytes",
+        property(lambda _context: 100),
+    )
+    monkeypatch.setattr(agent_cache, "current_process_rss_bytes", lambda: 9_500)
+
+    assert service._measure_retained_bytes() == 8_500
+    result = service.budget.enforce(
+        measure=service._measure_retained_bytes,
+        evict_auxiliary=lambda: None,
+        evict_navigation=lambda: None,
+    )
+    assert result.utilization_percent == 85.0
+    assert result.warning_active is True
+    assert result.warning_triggered is True
+
+
+def test_cache_prewarm_builds_registry_without_running_a_find_response(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from delphi_lsp.agent_cache import CacheMetadata, _CacheService
+
+    write_source(tmp_path / "Demo.dpr", "program Demo; begin end.")
+    metadata = CacheMetadata(
+        2,
+        str(tmp_path.resolve()),
+        os.getpid(),
+        1,
+        "x" * 32,
+        "test",
+        "",
+        512 * 1024**2,
+        1,
+        10,
+        time.time(),
+    )
+    service = _CacheService(metadata)
+    called = 0
+    real_prewarm = service.context.prewarm_navigation
+
+    def record_prewarm() -> str:
+        nonlocal called
+        called += 1
+        return real_prewarm()
+
+    monkeypatch.setattr(service.context, "prewarm_navigation", record_prewarm)
+    monkeypatch.setattr(
+        service.context,
+        "handle",
+        lambda _request: (_ for _ in ()).throw(AssertionError("find response constructed")),
+    )
+
+    service.prewarm()
+
+    assert called == 1
+    assert service.context.navigation_cache_is_warm
 
 
 def test_fresh_incomplete_start_lock_is_not_stale(tmp_path: Path) -> None:
@@ -478,7 +963,7 @@ def test_metadata_reader_rejects_symlink_and_unsafe_permissions(tmp_path: Path) 
             query_cache(tmp_path, {"action": "open"})
         path.unlink()
         target.replace(path)
-        assert query_cache(tmp_path, {"action": "open"}).payload["schema"] == 2
+        assert query_cache(tmp_path, {"action": "open"}).payload["schema"] == 3
     finally:
         stop_cache(tmp_path)
 
@@ -498,7 +983,7 @@ def test_cache_daemon_rejects_invalid_auth_without_dying(tmp_path: Path) -> None
             query_cache(tmp_path, {"action": "find", "query": "Demo"})
         raw["token"] = metadata.token
         path.write_text(json.dumps(raw), encoding="utf-8")
-        assert query_cache(tmp_path, {"action": "find", "query": "Demo"}).payload["schema"] == 2
+        assert query_cache(tmp_path, {"action": "find", "query": "Demo"}).payload["schema"] == 3
     finally:
         stop_cache(tmp_path)
 
@@ -512,6 +997,7 @@ def test_readme_documents_bounded_cache_daemon_commands_and_retention_contract()
         "delphi-lsp-agent cache stop --root PATH",
         "delphi-lsp-agent query --root PATH find TCustomer",
         "delphi-lsp-agent query --root PATH focus TARGET_ID",
+        "delphi-lsp-agent query --root PATH focus --project-id PROJECT_ID",
         "delphi-lsp-agent query --root PATH inspect",
         "delphi-lsp-agent query --root PATH trace TARGET_ID --relation callers",
         "delphi-lsp-agent query --root PATH metrics UNIT_QUERY",
@@ -530,8 +1016,10 @@ def test_readme_documents_bounded_cache_daemon_commands_and_retention_contract()
     assert "cache lifecycle JSON" in readme
     assert "stop status JSON" in readme
     assert "status JSON" in readme
-    assert "Protocol v2 JSON" in readme
+    assert "Protocol v3 JSON" in readme
     assert "writes warnings to stderr" in readme
+    assert "A `.dproj` is optional" in readme
+    assert "Selecting a project this way also prewarms" in readme
     assert "Eviction is ordered" in readme
     assert "auxiliary caches are evicted first" in readme
     assert "rebuilds the navigation state on demand" in readme
@@ -541,8 +1029,8 @@ def test_readme_documents_bounded_cache_daemon_commands_and_retention_contract()
     assert "Do not copy or share this token" in readme
     assert "--workers auto|N" in readme
     assert "--startup-timeout 120" in readme
-    assert "four worker processes" in readme
-    assert "128 MiB" in readme
+    assert "eight worker processes" in readme
+    assert "64 MiB" in readme
     assert "spawn" in readme
     assert "short-lived" in readme
     assert "transient worker memory" in readme
@@ -553,6 +1041,11 @@ def test_readme_documents_bounded_cache_daemon_commands_and_retention_contract()
     assert "prewarm_seconds" in readme
     assert "parallel_seconds" in readme
     assert "parallel_fallbacks" in readme
+    assert "content-addressed JSON" in readme
+    assert "OpenCode cache" in readme
+    assert "contains no pickle" in readme
+    assert "navigation_disk_hits" in readme
+    assert "navigation_disk_misses" in readme
 
 def write_source(path: Path, source: str) -> None:
     path.write_text(textwrap.dedent(source).strip() + "\n", encoding="utf-8")

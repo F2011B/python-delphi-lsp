@@ -75,7 +75,11 @@ def discover_delphi_project(
     on_progress: ProgressCallback | None = None,
 ) -> DelphiProjectDiscovery:
     root_path = Path(root).expanduser().resolve()
-    project_path = Path(project_file).expanduser().resolve() if project_file is not None else None
+    project_path = Path(project_file).expanduser() if project_file is not None else None
+    if project_path is not None:
+        if not project_path.is_absolute():
+            project_path = root_path / project_path
+        project_path = project_path.resolve()
     discovery = DelphiProjectDiscovery(root=str(root_path))
     _emit_progress(on_progress, "discovery", str(root_path), 0, 0, None, "project discovery started")
 
@@ -142,7 +146,21 @@ def discover_delphi_project(
     for value in defines:
         add_define(value)
 
-    candidates = _project_candidates(root_path, project_path)
+    explicit_dproj: Path | None = None
+    if (
+        project_path is not None
+        and project_path.suffix.casefold() == ".dproj"
+    ):
+        explicit_dproj = project_path
+        project_path = _project_entry_from_dproj(
+            explicit_dproj,
+            discovery,
+        )
+    candidates = (
+        []
+        if explicit_dproj is not None and project_path is None
+        else _project_candidates(root_path, project_path)
+    )
     for project in candidates:
         key = str(project).casefold()
         if key not in seen_projects:
@@ -156,8 +174,13 @@ def discover_delphi_project(
                 seen_search,
                 discovery.search_path_origins,
             )
-        dproj = project.with_suffix(".dproj")
-        if dproj.exists():
+        dproj_candidates = [project.with_suffix(".dproj")]
+        if explicit_dproj is not None:
+            dproj_candidates.insert(0, explicit_dproj)
+        for dproj in dproj_candidates:
+            config_key = str(dproj).casefold()
+            if config_key in seen_configs or not dproj.exists():
+                continue
             _read_dproj(
                 dproj,
                 discovery,
@@ -169,7 +192,7 @@ def discover_delphi_project(
                 discovery.include_path_origins,
                 add_define,
             )
-            seen_configs.add(str(dproj).casefold())
+            seen_configs.add(config_key)
             discovery.config_files.append(str(dproj))
         for cfg in (project.with_suffix(".cfg"), project.with_suffix(".dof")):
             if cfg.exists():
@@ -477,6 +500,72 @@ def _main_source_from_dproj(path: Path) -> str | None:
         if _xml_local_name(element.tag) == "MainSource" and element.text:
             return element.text.strip()
     return None
+
+
+def _project_entry_from_dproj(
+    path: Path,
+    discovery: DelphiProjectDiscovery,
+) -> Path | None:
+    try:
+        root = ET.parse(path).getroot()
+    except ET.ParseError as exc:
+        discovery.problems.append(
+            DiscoveryProblem(
+                "cant_read_project",
+                f"Could not parse Delphi project file: {exc}",
+                str(path),
+            )
+        )
+        return None
+    except OSError as exc:
+        discovery.problems.append(
+            DiscoveryProblem(
+                "cant_read_project",
+                f"Could not read Delphi project file: {exc}",
+                str(path),
+            )
+        )
+        return None
+
+    main_source = next(
+        (
+            (element.text or "").strip()
+            for element in root.iter()
+            if _xml_local_name(element.tag) == "MainSource"
+            and (element.text or "").strip()
+        ),
+        "",
+    )
+    if not main_source:
+        discovery.problems.append(
+            DiscoveryProblem(
+                "cant_read_project",
+                "Delphi project file does not define MainSource.",
+                str(path),
+            )
+        )
+        return None
+
+    entry = (path.parent / main_source).resolve()
+    if entry.suffix.casefold() not in PROJECT_EXTENSIONS:
+        discovery.problems.append(
+            DiscoveryProblem(
+                "cant_read_project",
+                "MainSource must reference a .dpr or .dpk entry file.",
+                str(path),
+            )
+        )
+        return None
+    if not entry.is_file():
+        discovery.problems.append(
+            DiscoveryProblem(
+                "cant_read_project",
+                f"MainSource does not exist: {entry}",
+                str(path),
+            )
+        )
+        return None
+    return entry
 
 
 def _scan_sources(

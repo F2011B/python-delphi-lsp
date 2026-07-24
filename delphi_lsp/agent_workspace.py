@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
+import sys
 import unicodedata
 
 from .agent_protocol import AgentProtocolError, Focus, make_target_id
@@ -89,6 +90,7 @@ class AgentWorkspace:
         self._units: tuple[AgentUnit, ...] = ()
         self._include_files: tuple[dict[str, str], ...] = ()
         self._project_cache: dict[str, _ProjectCache] = {}
+        self._current_revision = ""
 
     @classmethod
     def open(
@@ -110,6 +112,21 @@ class AgentWorkspace:
         )
         projects: list[AgentProject] = []
         project_paths: dict[str, Path | None] = {}
+        default_project_id = ""
+        if (
+            resolved_project_file is None
+            and len(discovery.project_files) > 1
+        ):
+            default_project_id = make_target_id("project", "", "workspace")
+            projects.append(
+                AgentProject(
+                    project_id=default_project_id,
+                    name="Workspace",
+                    path=".",
+                    kind="workspace",
+                )
+            )
+            project_paths[default_project_id] = None
         if discovery.project_files:
             for value in discovery.project_files:
                 path = Path(value)
@@ -138,7 +155,9 @@ class AgentWorkspace:
             project_paths[project_id] = None
 
         workspace = cls(root_path, discovery, tuple(projects), project_paths)
-        if len(projects) == 1:
+        if default_project_id:
+            workspace.select_project(default_project_id)
+        elif len(projects) == 1:
             workspace.select_project(projects[0].project_id)
         return workspace
 
@@ -178,6 +197,20 @@ class AgentWorkspace:
 
     def cache_roots(self) -> tuple[object, ...]:
         return (self._project_cache, self._active_result)
+
+    @property
+    def estimated_cache_bytes(self) -> int:
+        retained = 512
+        seen_results: set[int] = set()
+        for cached in self._project_cache.values():
+            result = cached.result
+            if id(result) in seen_results:
+                continue
+            seen_results.add(id(result))
+            retained += _estimate_project_result_bytes(result)
+        if self._active_result is not None and id(self._active_result) not in seen_results:
+            retained += _estimate_project_result_bytes(self._active_result)
+        return retained
 
     def evict_recomputable_caches(self) -> None:
         self._project_cache.clear()
@@ -254,6 +287,15 @@ class AgentWorkspace:
 
     @property
     def workspace_revision(self) -> str:
+        return self.refresh_revision()
+
+    @property
+    def current_revision(self) -> str:
+        if not self._current_revision:
+            return self.refresh_revision()
+        return self._current_revision
+
+    def refresh_revision(self) -> str:
         discovery = self._active_discovery or self._discovery
         result = self._active_result
         if self._active_project_id:
@@ -268,7 +310,8 @@ class AgentWorkspace:
                     scan_workspace_sources=False,
                 )
         fingerprint = _selection_fingerprint(discovery, result, root=self._root)
-        return f"workspace_v2_{fingerprint}"
+        self._current_revision = f"workspace_v2_{fingerprint}"
+        return self._current_revision
 
     def select_project(self, project_id: str) -> None:
         self._select_project_with_revision(project_id)
@@ -279,7 +322,11 @@ class AgentWorkspace:
         project_path = self._project_paths[project_id]
         cached = self._project_cache.get(project_id)
         if project_path is None:
-            discovery = self._discovery if cached is None else discover_workspace_sources(self._root)
+            discovery = (
+                self._discovery
+                if cached is None and self._discovery.source_files
+                else discover_workspace_sources(self._root)
+            )
         else:
             discovery = discover_delphi_project(
                 self._root,
@@ -290,7 +337,8 @@ class AgentWorkspace:
             fingerprint = _selection_fingerprint(discovery, cached.result, root=self._root)
             if fingerprint == cached.fingerprint:
                 self._activate_project(project_id, discovery, cached.result)
-                return f"workspace_v2_{fingerprint}"
+                self._current_revision = f"workspace_v2_{fingerprint}"
+                return self._current_revision
 
         if project_path is None:
             result = _catalog_workspace_sources(discovery)
@@ -308,7 +356,8 @@ class AgentWorkspace:
             fingerprint=fingerprint,
         )
         self._activate_project(project_id, discovery, result)
-        return f"workspace_v2_{fingerprint}"
+        self._current_revision = f"workspace_v2_{fingerprint}"
+        return self._current_revision
 
     def _activate_project(
         self,
@@ -530,6 +579,26 @@ def _selection_fingerprint(
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _estimate_project_result_bytes(result: ProjectIndexResult) -> int:
+    retained = 2048
+    retained += sum(
+        768 + sys.getsizeof(unit.name) + sys.getsizeof(unit.path)
+        for unit in result.parsed_units
+    )
+    retained += sum(
+        384 + sys.getsizeof(include.name) + sys.getsizeof(include.path)
+        for include in result.include_files
+    )
+    retained += sum(
+        512
+        + sys.getsizeof(problem.file_name)
+        + sys.getsizeof(problem.description)
+        for problem in result.problems
+    )
+    retained += sum(sys.getsizeof(name) + 96 for name in result.not_found_units)
+    return retained
 
 
 def _selection_state(

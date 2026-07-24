@@ -4,6 +4,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 import re
+from typing import TypeVar
 import unicodedata
 
 from .agent_protocol import AgentProtocolError
@@ -11,6 +12,7 @@ from .agent_workspace import AgentWorkspace
 from .consts import AttributeName, SyntaxNodeType
 from .nodes import SyntaxNode
 from .parser import DelphiParser
+from .parser_backend import ParserMode
 from .project_indexer import ProjectIndexer, ProjectProblem
 from .semantic import (
     GenericInstanceTypeRef,
@@ -46,6 +48,7 @@ _TYPE_KINDS = frozenset(
     }
 )
 _GroupKey = tuple[str, str, str, str]
+_AdjacencyValue = TypeVar("_AdjacencyValue")
 
 
 @dataclass(frozen=True)
@@ -62,6 +65,9 @@ class RelationTarget:
     line: int
     column: int
     card: Mapping[str, object]
+    visibility: str = ""
+    type_name: str = ""
+    owner: str = ""
 
 
 @dataclass(frozen=True)
@@ -95,9 +101,13 @@ class ProjectRelationIndex:
         project_id: str,
         revision: str,
         targets: Sequence[RelationTarget],
+        *,
+        targets_complete: bool = True,
     ) -> None:
         self.project_id = project_id
         self.revision = revision
+        self.targets_complete = targets_complete
+        self._workspace = workspace
         self._root = workspace.root
         self._targets = {target.target_id: target for target in targets}
         self._target_groups = {
@@ -131,10 +141,9 @@ class ProjectRelationIndex:
             )
             self._identity_targets.setdefault(identity, []).append(target)
 
-        roots, load_problems = _load_project_roots(workspace)
-        self._roots = roots
-        self._problems = list(load_problems)
-        self._semantics = build_workspace_semantics_from_roots(roots) if roots else None
+        self._roots: dict[str, SyntaxNode] = {}
+        self._problems: list[dict[str, object]] = []
+        self._semantics: WorkspaceSemanticResult | None = None
         self._symbol_targets: dict[int, RelationTarget | None] = {}
         self._references: list[_ReferenceRecord] = []
         self._unit_edges: list[_UnitEdge] = []
@@ -142,11 +151,40 @@ class ProjectRelationIndex:
         self._implements: list[_TypeEdge] = []
         self._unresolved_references = 0
         self._ambiguous_references = 0
-        if self._semantics is not None:
-            self._build_graph(self._semantics)
-            self._add_contains_edges(self._semantics)
-            self._add_semantic_problems(self._semantics)
-        self._problems = _dedupe_mappings(self._problems)
+        self._deep_graph_ready = False
+        self._unit_sources_loaded: set[_GroupKey] = set()
+        self._index_graph()
+
+    @property
+    def estimated_cache_bytes(self) -> int:
+        adjacency_maps = (
+            self._references_by_target,
+            self._calls_by_target,
+            self._calls_by_owner,
+            self._unit_edges_by_source,
+            self._unit_edges_by_target,
+            self._inherits_by_source,
+            self._implements_by_source,
+        )
+        adjacency_groups = sum(len(groups) for groups in adjacency_maps)
+        adjacency_slots = sum(
+            len(values)
+            for groups in adjacency_maps
+            for values in groups.values()
+        )
+        edge_bytes = (
+            len(self._references) * 384
+            + len(self._unit_edges) * 320
+            + (len(self._inherits) + len(self._implements)) * 288
+        )
+        return (
+            4096
+            + len(self._targets) * 512
+            + edge_bytes
+            + adjacency_groups * 192
+            + adjacency_slots * 8
+            + len(self._problems) * 512
+        )
 
     def trace(self, target_id: str, relation: str) -> list[dict[str, object]]:
         target = self._targets.get(target_id)
@@ -154,50 +192,59 @@ class ProjectRelationIndex:
             raise AgentProtocolError("target_not_found", f"Target not found: {target_id}.")
         self._validate_applicability(target, relation)
         group = self._target_groups[target_id]
+        active_project = self._workspace.active_project
+        lightweight_units = (
+            active_project is not None
+            and active_project.kind == "workspace"
+        )
+        if relation == "uses" and lightweight_units:
+            self._ensure_unit_graph((group,))
+        elif relation == "used_by" and lightweight_units:
+            self._ensure_unit_graph(
+                tuple(
+                    candidate_group
+                    for candidate_group, candidates in self._groups.items()
+                    if candidates and candidates[0].kind == SymbolKind.UNIT.value
+                )
+            )
+        else:
+            self._ensure_deep_graph()
 
         if relation == "references":
             items = [
                 self._relation_item(relation, record.owner_group or record.target_group, record.evidence)
-                for record in self._references
-                if record.target_group == group
+                for record in self._references_by_target.get(group, ())
             ]
         elif relation == "callers":
             items = [
                 self._relation_item(relation, record.owner_group, record.evidence)
-                for record in self._references
-                if record.kind == ReferenceKind.CALL
-                and record.target_group == group
-                and record.owner_group is not None
+                for record in self._calls_by_target.get(group, ())
+                if record.owner_group is not None
             ]
         elif relation == "callees":
             items = [
                 self._relation_item(relation, record.target_group, record.evidence)
-                for record in self._references
-                if record.kind == ReferenceKind.CALL and record.owner_group == group
+                for record in self._calls_by_owner.get(group, ())
             ]
         elif relation == "uses":
             items = [
                 self._relation_item(relation, edge.target_group, edge.evidence)
-                for edge in self._unit_edges
-                if edge.source_group == group
+                for edge in self._unit_edges_by_source.get(group, ())
             ]
         elif relation == "used_by":
             items = [
                 self._relation_item(relation, edge.source_group, edge.evidence)
-                for edge in self._unit_edges
-                if edge.target_group == group
+                for edge in self._unit_edges_by_target.get(group, ())
             ]
         elif relation == "inherits":
             items = [
                 self._relation_item(relation, edge.target_group, edge.evidence)
-                for edge in self._inherits
-                if edge.source_group == group
+                for edge in self._inherits_by_source.get(group, ())
             ]
         elif relation == "implements":
             items = [
                 self._relation_item(relation, edge.target_group, edge.evidence)
-                for edge in self._implements
-                if edge.source_group == group
+                for edge in self._implements_by_source.get(group, ())
             ]
         else:  # AgentRequest validation normally rejects this first.
             raise AgentProtocolError("invalid_relation", f"Unsupported relation value: {relation!r}.")
@@ -209,6 +256,183 @@ class ProjectRelationIndex:
         result.extend(relations)
         result.extend(self._problems)
         return result
+
+    def _ensure_unit_graph(self, groups: Sequence[_GroupKey]) -> None:
+        if self._deep_graph_ready:
+            return
+        for group in groups:
+            if group in self._unit_sources_loaded:
+                continue
+            self._unit_sources_loaded.add(group)
+            candidates = self._groups.get(group)
+            if not candidates:
+                continue
+            source = candidates[0]
+            try:
+                text = read_source_text(Path(source.source_path))
+                parsed = DelphiParser(
+                    include_paths=self._workspace.include_paths,
+                    defines=self._workspace.defines,
+                    mode=(
+                        ParserMode.TOLERANT
+                        if len(self._workspace.units) >= 256
+                        else ParserMode.STRICT
+                    ),
+                ).parse(
+                    text,
+                    source.source_path,
+                    build_semantic=False,
+                )
+            except Exception as error:
+                self._problems.append(
+                    {
+                        "item_type": "relation_problem",
+                        "kind": "cant_parse_file",
+                        "message": _safe_problem_message(
+                            f"{type(error).__name__}: {error}",
+                            self._root,
+                            (
+                                source.source_path,
+                                getattr(error, "filename", None),
+                                getattr(error, "filename2", None),
+                            ),
+                        ),
+                        "path": source.path,
+                    }
+                )
+                continue
+            if parsed.problems:
+                first = parsed.problems[0]
+                self._problems.append(
+                    {
+                        "item_type": "relation_problem",
+                        "kind": "partial_parse",
+                        "message": (
+                            f"Partial DelphiAST parse at {first.line}:{first.column}: "
+                            f"{first.message}"
+                        ),
+                        "path": source.path,
+                    }
+                )
+            self._add_lightweight_unit_edges(source, parsed.root)
+        self._index_graph()
+        self._problems = _dedupe_mappings(self._problems)
+
+    def _add_lightweight_unit_edges(
+        self,
+        source: RelationTarget,
+        root: SyntaxNode,
+    ) -> None:
+        source_group = _target_group(source)
+        unit_targets = {
+            _normalized(target.unit_name or target.name): target
+            for target in self._targets.values()
+            if target.kind == SymbolKind.UNIT.value
+        }
+        pending = [root]
+        while pending:
+            node = pending.pop()
+            pending.extend(reversed(node.child_nodes))
+            if node.typ not in {
+                SyntaxNodeType.ntUses,
+                SyntaxNodeType.ntContains,
+                SyntaxNodeType.ntRequires,
+            }:
+                continue
+            for child in node.child_nodes:
+                if child.typ != SyntaxNodeType.ntUnit:
+                    continue
+                name = child.get_attribute(AttributeName.anName).strip()
+                target = unit_targets.get(_normalized(name))
+                if target is None:
+                    self._unresolved_references += 1
+                    self._problems.append(
+                        {
+                            "item_type": "relation_problem",
+                            "kind": "unresolved_unit",
+                            "message": f"Unit not found: {name}",
+                            "path": source.path,
+                            "line": child.line,
+                            "column": child.col,
+                        }
+                    )
+                    continue
+                evidence = {
+                    "path": source.path,
+                    "line": child.line,
+                    "column": child.col,
+                    "kind": (
+                        "contains"
+                        if node.typ == SyntaxNodeType.ntContains
+                        else "uses"
+                    ),
+                }
+                self._unit_edges.append(
+                    _UnitEdge(
+                        source_group=source_group,
+                        target_group=_target_group(target),
+                        evidence=evidence,
+                    )
+                )
+
+    def _ensure_deep_graph(self) -> None:
+        if self._deep_graph_ready:
+            return
+        roots, load_problems = _load_project_roots(self._workspace)
+        self._roots = roots
+        self._problems = list(load_problems)
+        self._semantics = (
+            build_workspace_semantics_from_roots(roots)
+            if roots
+            else None
+        )
+        self._symbol_targets.clear()
+        self._references.clear()
+        self._unit_edges.clear()
+        self._inherits.clear()
+        self._implements.clear()
+        self._unresolved_references = 0
+        self._ambiguous_references = 0
+        if self._semantics is not None:
+            self._build_graph(self._semantics)
+            self._add_contains_edges(self._semantics)
+            self._add_semantic_problems(self._semantics)
+        self._deep_graph_ready = True
+        self._index_graph()
+        self._problems = _dedupe_mappings(self._problems)
+
+    def _index_graph(self) -> None:
+        references_by_target: dict[_GroupKey, list[_ReferenceRecord]] = {}
+        calls_by_target: dict[_GroupKey, list[_ReferenceRecord]] = {}
+        calls_by_owner: dict[_GroupKey, list[_ReferenceRecord]] = {}
+        for record in self._references:
+            references_by_target.setdefault(record.target_group, []).append(record)
+            if record.kind != ReferenceKind.CALL:
+                continue
+            calls_by_target.setdefault(record.target_group, []).append(record)
+            if record.owner_group is not None:
+                calls_by_owner.setdefault(record.owner_group, []).append(record)
+        self._references_by_target = _freeze_adjacency(references_by_target)
+        self._calls_by_target = _freeze_adjacency(calls_by_target)
+        self._calls_by_owner = _freeze_adjacency(calls_by_owner)
+
+        unit_edges_by_source: dict[_GroupKey, list[_UnitEdge]] = {}
+        unit_edges_by_target: dict[_GroupKey, list[_UnitEdge]] = {}
+        for edge in self._unit_edges:
+            unit_edges_by_source.setdefault(edge.source_group, []).append(edge)
+            unit_edges_by_target.setdefault(edge.target_group, []).append(edge)
+        self._unit_edges_by_source = _freeze_adjacency(unit_edges_by_source)
+        self._unit_edges_by_target = _freeze_adjacency(unit_edges_by_target)
+
+        inherits_by_source: dict[_GroupKey, list[_TypeEdge]] = {}
+        for edge in self._inherits:
+            inherits_by_source.setdefault(edge.source_group, []).append(edge)
+        self._inherits_by_source = _freeze_adjacency(inherits_by_source)
+
+        implements_by_source: dict[_GroupKey, list[_TypeEdge]] = {}
+        for edge in self._implements:
+            implements_by_source.setdefault(edge.source_group, []).append(edge)
+        self._implements_by_source = _freeze_adjacency(implements_by_source)
 
     def _build_graph(self, semantics: WorkspaceSemanticResult) -> None:
         for model in semantics.models.values():
@@ -404,10 +628,27 @@ class ProjectRelationIndex:
         if not candidates:
             return None
         target = candidates[0]
+        card = (
+            dict(target.card)
+            if target.card
+            else {
+                "target_id": target.target_id,
+                "unit_id": target.unit_id,
+                "name": target.name,
+                "qualified_name": target.qualified_name,
+                "kind": target.kind,
+                "path": target.path,
+                "line": target.line,
+                "column": target.column,
+                "visibility": target.visibility,
+                "owner": target.owner,
+                "type": target.type_name,
+            }
+        )
         return {
             "item_type": "relation",
             "relation": relation,
-            **dict(target.card),
+            **card,
             "evidence": dict(evidence),
         }
 
@@ -484,6 +725,11 @@ def _load_project_roots(
     active_project = workspace.active_project
     if active_project is None:
         raise AgentProtocolError("project_required", "Select a project before tracing relations.")
+    parser_mode = (
+        ParserMode.TOLERANT
+        if len(workspace.units) >= 256
+        else ParserMode.STRICT
+    )
     if active_project.kind != "workspace":
         project_path = Path(active_project.path)
         if not project_path.is_absolute():
@@ -492,6 +738,7 @@ def _load_project_roots(
             search_paths=workspace.search_paths,
             include_paths=workspace.include_paths,
             defines=workspace.defines,
+            mode=parser_mode,
         )
         result = indexer.index(str(project_path.resolve()))
         roots = {
@@ -502,7 +749,11 @@ def _load_project_roots(
         problems = [_project_problem_item(problem, workspace.root) for problem in result.problems]
         return roots, problems
 
-    parser = DelphiParser(include_paths=workspace.include_paths, defines=workspace.defines)
+    parser = DelphiParser(
+        include_paths=workspace.include_paths,
+        defines=workspace.defines,
+        mode=parser_mode,
+    )
     roots: dict[str, SyntaxNode] = {}
     problems: list[dict[str, object]] = []
     for unit in workspace.units:
@@ -512,11 +763,25 @@ def _load_project_roots(
         source_path = source_path.expanduser().resolve()
         try:
             text = read_source_text(source_path)
-            roots[str(source_path)] = parser.parse(
+            parsed = parser.parse(
                 text,
                 str(source_path),
                 build_semantic=False,
-            ).root
+            )
+            roots[str(source_path)] = parsed.root
+            if parsed.problems:
+                first = parsed.problems[0]
+                problems.append(
+                    {
+                        "item_type": "relation_problem",
+                        "kind": "partial_parse",
+                        "message": (
+                            f"Partial DelphiAST parse at {first.line}:{first.column}: "
+                            f"{first.message}"
+                        ),
+                        "path": _display_project_path(source_path, workspace.root),
+                    }
+                )
         except Exception as exc:
             problems.append(
                 {
@@ -820,6 +1085,12 @@ def _relation_sort_key(item: Mapping[str, object]) -> tuple[object, ...]:
         str(evidence_mapping.get("kind", "")),
         str(item.get("target_id", "")),
     )
+
+
+def _freeze_adjacency(
+    groups: Mapping[_GroupKey, list[_AdjacencyValue]],
+) -> dict[_GroupKey, tuple[_AdjacencyValue, ...]]:
+    return {key: tuple(values) for key, values in groups.items()}
 
 
 def _dedupe_mappings(items: Iterable[Mapping[str, object]]) -> list[dict[str, object]]:

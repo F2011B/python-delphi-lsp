@@ -12,6 +12,7 @@ from .consts import AttributeName, SyntaxNodeType
 from .lark_tokens import KEYWORDS
 from .nodes import SyntaxNode
 from .parser import DelphiParser
+from .parser_backend import ParserMode, normalize_mode
 from .semantic import Scope, SymbolKind
 
 
@@ -34,6 +35,8 @@ _DEPENDENCY_NODES = frozenset(
         SyntaxNodeType.ntRequires,
     }
 )
+_LARGE_PROJECT_UNIT_THRESHOLD = 256
+_LARGE_PROJECT_CHAR_THRESHOLD = 16 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -258,6 +261,7 @@ def analyze_unit(
     *,
     defines: Iterable[str] = (),
     include_paths: Iterable[str] = (),
+    parser_mode: ParserMode | str = ParserMode.STRICT,
 ) -> UnitMetrics:
     scan = _scan_source(source)
     problems: list[MetricProblem] = []
@@ -267,9 +271,22 @@ def analyze_unit(
         parsed = DelphiParser(
             defines=tuple(defines),
             include_paths=tuple(include_paths),
+            mode=normalize_mode(parser_mode),
         ).parse(source, path, build_semantic=True)
         root = parsed.root
         semantic = parsed.semantic
+        if parsed.problems:
+            first = parsed.problems[0]
+            problems.append(
+                MetricProblem(
+                    kind="partial_parse",
+                    path=path,
+                    message=(
+                        f"Partial DelphiAST parse at {first.line}:{first.column}: "
+                        f"{first.message}"
+                    ),
+                )
+            )
     except Exception as error:
         problems.append(
             MetricProblem(
@@ -333,13 +350,60 @@ def analyze_project(
     project_id: str = "",
     project_name: str = "",
     unit_ids: Mapping[str, str] | None = None,
+    parser_mode: ParserMode | str | None = None,
 ) -> ProjectMetrics:
     unique_sources = _unique_sources(sources)
+    if parser_mode is None:
+        source_chars = sum(len(source) for source in unique_sources.values())
+        selected_mode = (
+            ParserMode.TOLERANT
+            if len(unique_sources) >= _LARGE_PROJECT_UNIT_THRESHOLD
+            or source_chars >= _LARGE_PROJECT_CHAR_THRESHOLD
+            else ParserMode.STRICT
+        )
+    else:
+        selected_mode = normalize_mode(parser_mode)
     units = [
-        analyze_unit(source, path, defines=defines, include_paths=include_paths)
+        analyze_unit(
+            source,
+            path,
+            defines=defines,
+            include_paths=include_paths,
+            parser_mode=selected_mode,
+        )
         for path, source in unique_sources.items()
     ]
-    units.sort(key=lambda item: (item.name.casefold(), item.path.casefold(), item.name, item.path))
+    unique_includes = _unique_sources(include_sources or {})
+    include_loc = sum(
+        _scan_source(source).lines.total_lines
+        for source in unique_includes.values()
+    )
+    return aggregate_project_metrics(
+        units,
+        include_loc=include_loc,
+        project_id=project_id,
+        project_name=project_name,
+        unit_ids=unit_ids,
+    )
+
+
+def aggregate_project_metrics(
+    analyzed_units: Iterable[UnitMetrics],
+    *,
+    include_loc: int = 0,
+    project_id: str = "",
+    project_name: str = "",
+    unit_ids: Mapping[str, str] | None = None,
+) -> ProjectMetrics:
+    units = list(analyzed_units)
+    units.sort(
+        key=lambda item: (
+            item.name.casefold(),
+            item.path.casefold(),
+            item.name,
+            item.path,
+        )
+    )
 
     canonical_units: dict[str, UnitMetrics] = {}
     for unit in units:
@@ -366,6 +430,15 @@ def analyze_project(
         dependencies_by_unit[unit.path] = (internal_values, external_values)
         dependency_edges += len(internal_values) + len(external_values)
 
+    operator_vocabulary = frozenset().union(
+        *(unit._operator_vocabulary for unit in units)
+    )
+    operand_vocabulary = frozenset().union(
+        *(unit._operand_vocabulary for unit in units)
+    )
+    total_operators = sum(unit.halstead.total_operators for unit in units)
+    total_operands = sum(unit.halstead.total_operands for unit in units)
+
     enriched: list[UnitMetrics] = []
     id_by_path = {path.casefold(): value for path, value in (unit_ids or {}).items()}
     for unit in units:
@@ -383,27 +456,25 @@ def analyze_project(
                 instability=instability,
                 distance=abs(unit.abstractness + instability - 1.0),
                 unit_id=id_by_path.get(unit.path.casefold(), unit.unit_id),
+                _operator_vocabulary=frozenset(),
+                _operand_vocabulary=frozenset(),
             )
         )
 
     line_metrics = _sum_line_metrics(unit.lines for unit in enriched)
     routines = [routine for unit in enriched for routine in unit.cyclomatic.routines]
     cyclomatic = CyclomaticMetrics.from_routines(routines)
-    operator_vocabulary = frozenset().union(*(unit._operator_vocabulary for unit in enriched))
-    operand_vocabulary = frozenset().union(*(unit._operand_vocabulary for unit in enriched))
     halstead = _halstead_metrics(
         operator_vocabulary=operator_vocabulary,
         operand_vocabulary=operand_vocabulary,
-        total_operators=sum(unit.halstead.total_operators for unit in enriched),
-        total_operands=sum(unit.halstead.total_operands for unit in enriched),
+        total_operators=total_operators,
+        total_operands=total_operands,
     )
     maintainability = _maintainability_index(
         volume=halstead.volume,
         complexity=cyclomatic.total,
         source_lines=line_metrics.source_lines,
     )
-    unique_includes = _unique_sources(include_sources or {})
-    include_loc = sum(_scan_source(source).lines.total_lines for source in unique_includes.values())
     problems = tuple(problem for unit in enriched for problem in unit.problems)
     return ProjectMetrics(
         units=tuple(enriched),
@@ -756,4 +827,5 @@ __all__ = [
     "ProjectMetrics",
     "analyze_unit",
     "analyze_project",
+    "aggregate_project_metrics",
 ]

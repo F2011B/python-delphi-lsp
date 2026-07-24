@@ -25,7 +25,7 @@ def test_readme_documents_opencode_history_and_query_ergonomics() -> None:
     assert "2.0.0" in readme
     assert "persistent session/root worker" in readme
     assert "OpenCode worker stays separate from CLI daemon" in readme
-    assert "current plugin behavior is unchanged" in readme
+    assert "Protocol v3 adds CPG" in readme
     readme_contracts = [
         "delphi-lsp-agent query --root PATH find TCustomer",
         "delphi-lsp-agent query --root PATH focus TARGET_ID",
@@ -395,6 +395,7 @@ def test_opencode_install_writes_protocol_v2_skill_plugin_and_agent(tmp_path: Pa
     assert "never raw bash/read/glob/grep/cat/shell" in skill_text
     assert "sound_partial" in skill_text
     assert "Call `metrics`" in skill_text
+    assert "multi-project repository is active as one workspace" in skill_text
     assert b"\r\n" not in skill_bytes
 
     agent_text = agent.read_text(encoding="utf-8")
@@ -447,6 +448,11 @@ def test_opencode_install_writes_protocol_v2_skill_plugin_and_agent(tmp_path: Pa
     assert "max_items" in plugin_text
     assert "max_chars" in plugin_text
     assert '"metrics"' in plugin_text
+    assert '"cpg"' in plugin_text
+    assert '"ast", "cfg", "dfg", "call", "full"' in plugin_text
+    assert '"out", "in", "both"' in plugin_text
+    assert "depth" in plugin_text
+    assert "Protocol v3" in plugin_text
     assert "WorkerProtocolError" in plugin_text
     assert "error instanceof WorkerProtocolError" in plugin_text
     assert "console.log" not in plugin_text
@@ -764,7 +770,7 @@ def test_generated_plugin_runtime_reuses_and_cleans_workers_without_bun(tmp_path
             ? [{ path: "src/Ünit.pas", line: 7, name: "Grüße" }]
             : [{ name: "Grüße" }]
           return JSON.stringify({
-            schema: 2,
+            schema: 3,
             workspace_revision: "revision-1",
             focus,
             result,
@@ -806,7 +812,7 @@ def test_generated_plugin_runtime_reuses_and_cleans_workers_without_bun(tmp_path
                     return
                   }
                   if (behavior === "malformed-protocol") {
-                    stdoutController.enqueue(encoder.encode('{"schema":2}\\n'))
+                    stdoutController.enqueue(encoder.encode('{"schema":3}\\n'))
                     return
                   }
                   if (behavior === "transport-close") {
@@ -815,7 +821,7 @@ def test_generated_plugin_runtime_reuses_and_cleans_workers_without_bun(tmp_path
                     return
                   }
                   if (behavior === "incomplete") {
-                    stdoutController.enqueue(encoder.encode('{"schema":2'))
+                    stdoutController.enqueue(encoder.encode('{"schema":3'))
                     stdoutClosed = true
                     stdoutController.close()
                     return

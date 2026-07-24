@@ -2,7 +2,7 @@
 
 `python-delphi-lsp` parses Delphi/Object Pascal, builds semantic and project
 indexes, serves LSP, and provides bounded codebase navigation for agents.
-Version 2.1.0 is authored by Dark Light and supports Windows, macOS, and Linux.
+Version 3.0.0 is authored by Dark Light and supports Windows, macOS, and Linux.
 
 ## Install and quick start
 
@@ -126,7 +126,8 @@ available without returning the complete file as agent context.
 Auto-discovery reads `.dpr`, `.dpk`, `.dproj`, `.cfg`, and `.dof` files.
 Its resolution order is:
 
-1. An explicit project selection takes precedence.
+1. An explicit `.dproj`, `.dpr`, or `.dpk` selection takes precedence. An
+   explicit `.dproj` resolves its `MainSource`.
 2. Otherwise, `.dpr` and `.dpk` candidates are considered.
 3. `MainSource` in a `.dproj` contributes its entry project.
 4. A selected entry associates same-stem `.dproj`, `.cfg`, and `.dof`.
@@ -135,13 +136,15 @@ Its resolution order is:
 6. Direct `Unit in 'path/Unit.pas'` references contribute their parent
    directory to unit search paths.
 
-A single discovered project is selected automatically. With no project entry,
-the server uses a synthetic workspace of supported sources. Scans skip build
-and cache directories such as `build`, `dist`, environments, VCS folders,
-`node_modules`, and tool caches. Missing paths and invalid metadata become
-problems; paths are not guessed.
+A single discovered project is selected automatically. With multiple project
+entries, a synthetic repository workspace containing every supported source is
+selected automatically while the concrete projects remain available. With no
+project entry, the same workspace model is used. Scans skip build and cache
+directories such as `build`, `dist`, environments, VCS folders, `node_modules`,
+and tool caches. Missing paths and invalid metadata become problems; paths are
+not guessed.
 
-## Agent CLI and Interface/Protocol v2
+## Agent CLI and Interface/Protocol v3
 
 `delphi-lsp-agent` has these subcommands and options:
 
@@ -157,8 +160,10 @@ delphi-lsp-agent view --root PATH [--project-file FILE] --layer LAYER
 delphi-lsp-agent index --root PATH [--project-file FILE] [--out FILE]
                        [--workers auto|N]
 delphi-lsp-agent query --root PATH ACTION [VALUE]
-                      [--project-id FILE] [--detail summary|declaration|members|context|body|implementations]
+                      [--project-id ID] [--detail summary|declaration|members|context|body|implementations]
                       [--relation references|callers|callees|uses|used_by|inherits|implements]
+                      [--graph ast|cfg|dfg|call|full] [--direction out|in|both]
+                      [--depth 1..16]
                       [--cursor TEXT] [--max-items INT] [--max-chars INT]
 delphi-lsp-agent skill install [--target PATH] [--force]
 delphi-lsp-agent opencode install [--target PATH] [--python PYTHON]
@@ -177,17 +182,44 @@ delphi-lsp-agent cache stop --root PATH
 `cache start` outputs cache lifecycle JSON; runtime warnings are still on stderr.
 `cache status --format json` outputs status JSON to stdout and the same warning stream on stderr.
 `cache stop` outputs stop status JSON and may include warnings on stderr.
-`query` outputs Protocol v2 JSON responses and writes warnings to stderr.
+`query` outputs Protocol v3 JSON responses and writes warnings to stderr.
 
 ```bash
 delphi-lsp-agent query --root PATH find TCustomer
 delphi-lsp-agent query --root PATH focus TARGET_ID
 delphi-lsp-agent query --root PATH inspect
 delphi-lsp-agent query --root PATH trace TARGET_ID --relation callers
+delphi-lsp-agent query --root PATH cpg TARGET_ID --graph full --direction out --depth 4
 delphi-lsp-agent query --root PATH metrics
 delphi-lsp-agent query --root PATH metrics UNIT_QUERY
 delphi-lsp-agent cache status --root PATH --format json
 ```
+
+The repository root is sufficient even when it contains many projects:
+
+```bash
+delphi-lsp-agent cache start --root PATH
+delphi-lsp-agent query --root PATH find TCustomer
+```
+
+This prewarms one bounded repository navigation index and requires no project
+selection. A `.dproj` is optional. Pass one when its project-specific compiler
+settings and `MainSource` should define the index:
+
+```bash
+delphi-lsp-agent cache start --root PATH --project-file relative/path/Main.dproj
+```
+
+An explicit `.dpr` or `.dpk` remains supported. To switch an already running
+repository cache to one of its concrete project views, list the projects and
+focus one by its returned `project_id`:
+
+```bash
+delphi-lsp-agent query --root PATH open
+delphi-lsp-agent query --root PATH focus --project-id PROJECT_ID
+```
+
+Selecting a project this way also prewarms its navigation cache.
 
 `inspect` uses the currently focused target, so call `focus TARGET_ID` before
 `inspect` unless a previous request already selected it.
@@ -199,24 +231,43 @@ above 80 percent.
 
 Cold builds parse independent source units in short-lived processes created with
 the cross-platform `spawn` method. `--workers auto|N` defaults to `auto`.
-Automatic selection uses at most four worker processes, leaves one detected CPU
+Automatic selection uses at most eight worker processes, leaves one detected CPU
 free, never exceeds the source task count, and—for the cache daemon—allows one
-worker per `128 MiB` of retained-cache budget. `view` and `index` use the same
-task, CPU, and four-worker caps without the cache-budget term. An explicit value
+worker per `64 MiB` of retained-cache budget. `view` and `index` use the same
+task, CPU, and eight-worker caps without the cache-budget term. An explicit value
 from 1 through 32 overrides the automatic CPU and memory caps but is still
 limited by the number of tasks.
 
-Worker processes exit before retained-cache accounting. Their models and source
-text are streamed into the parent, so transient worker memory is separate from
-the retained navigation structures and the existing 80-percent warning. If an
-automatic pool fails before accepting a result, one automatic serial fallback
-is attempted; explicit worker counts fail instead of silently changing the
-requested configuration.
+Worker processes build compact, detached navigation shards and exit before
+retained-cache accounting. Full semantic object graphs and source text are not
+retained in the parent. Tokenized source documents are loaded only for source
+evidence requests such as `inspect`, and a byte-bounded LRU evicts older
+documents. The transient worker memory remains separate from retained navigation
+structures and the existing 80-percent warning. Retained bytes are maintained
+incrementally; requests never traverse the complete cache object graph merely
+to measure it. If an automatic pool fails before accepting a result, one
+automatic serial fallback is attempted; explicit worker counts fail instead of
+silently changing the requested configuration.
 
-`cache start` waits up to `--startup-timeout 120` seconds by default for a large
-workspace to prewarm. The timeout belongs to the starting client and does not
-change daemon compatibility or idle shutdown. Starting a live root with a
-different worker configuration reports a configuration conflict.
+Detached navigation shards are also stored as versioned, content-addressed JSON
+under `.delphi-lsp/agent-cache/navigation-v1`. A restarted CLI or OpenCode cache
+daemon reuses unchanged units without parsing them again. Source content,
+conditional defines, or a shard-schema change produces a cache miss; malformed
+or incompatible JSON is ignored and rebuilt. The disk cache contains no pickle
+payloads and does not count against the retained-RAM budget.
+
+Cache prewarming builds the navigation registry directly without constructing
+an empty-query result, symbol cards, pagination, or JSON payloads. Up to sixteen
+recent ranked queries are retained in a small LRU so alternating CLI and
+OpenCode searches remain warm.
+
+`cache start` waits up to `--startup-timeout 120` seconds for the child process
+to bind and publish readiness metadata, not for the large workspace to finish
+prewarming. Workspace discovery and prewarming continue in the daemon while
+status reports `warming`. If bootstrap fails, the CLI reports whether it timed
+out or exited, the exit code, Python executable, workspace, and a sanitized
+tail of child stderr. Starting a live root with a different worker
+configuration reports a configuration conflict.
 
 Eviction is ordered: auxiliary caches are evicted first, navigation caches second.
 If compaction removes navigable data, the daemon rebuilds the navigation state on demand
@@ -227,7 +278,8 @@ The daemon tracks a 30-minute idle timeout; idle state shows in JSON status (`ca
 Workspace state appears in status as `requests`, `warm_hits`, `rebuilds`, `invalidations`,
 `evictions`, and `cache_state`. Parallel prewarm status adds
 `workers_configured`, `workers_effective`, `parallel_files_completed`,
-`prewarm_seconds`, `parallel_seconds`, and `parallel_fallbacks`.
+`prewarm_seconds`, `parallel_seconds`, `parallel_fallbacks`,
+`navigation_disk_hits`, and `navigation_disk_misses`.
 
 Metadata is stored in `.delphi-lsp/agent-cache/daemon.json` with owner-only token and
 permissions (`daemon.json` mode 600 and parent 700). Do not copy or share this token
@@ -244,8 +296,8 @@ agent, and plugin. The two deprecated write flags are harmless aliases and do
 not change user configuration.
 `worker` serves NDJSON over standard input/output.
 
-Protocol v2 actions are `open`, `find`, `inspect`, `trace`, `focus`,
-`problems`, and `metrics`. A `metrics` request without a query returns the
+Protocol v3 actions are `open`, `find`, `inspect`, `trace`, `focus`,
+`problems`, `metrics`, and `cpg`. A `metrics` request without a query returns the
 project summary followed by unit cards. A query filters units, while a unit
 `target_id` from `open` selects one unit; `detail: "members"` adds routine,
 Halstead, dependency, and symbol-count detail without returning source text.
@@ -255,18 +307,52 @@ Detail values are `summary`, `declaration`, `members`,
 `implements`.
 
 A request requires `action` and can include `query`, `target_id`,
-`project_id`, `detail`, `relation`, `cursor`, `max_items`, and
-`max_chars`. Defaults are empty text fields, `detail: "summary"`, no
-relation, `max_items: 12`, and `max_chars: 12000`. Ranges are 1–50 items
-and 256–40000 characters. A successful envelope has `schema: 2`,
+`project_id`, `detail`, `relation`, `graph`, `direction`, `depth`, `cursor`,
+`max_items`, and `max_chars`. Defaults are empty text fields,
+`detail: "summary"`, no relation, `graph: "full"`, `direction: "out"`,
+`depth: 4`, `max_items: 12`, and `max_chars: 12000`. Depth is 1–16;
+response ranges are 1–50 items and 256–40000 characters. A successful envelope
+has `schema: 3`,
 `workspace_revision`, `focus` (project, unit, and target IDs), `result`,
-`page`, and `context`; errors have `schema: 2` and a code/message.
+`page`, and `context`; errors have `schema: 3` and a code/message. Existing
+target IDs remain unchanged across the protocol upgrade.
 
 Focus preserves the selected project, unit, or target. Cursors bind a workspace
 revision and request fingerprint, so source changes and cross-target or
 cross-detail reuse invalidate them. `max_items` and `max_chars` bound each
 response. A `sound_partial` relation is sound but incomplete: unresolved and
 ambiguous relations are never fabricated. Unsupported relations are rejected.
+
+### Lazy code property graph
+
+The `cpg` action translates one selected unit, type, or routine into a bounded
+code property graph. Graph selectors are `ast`, `cfg`, `dfg`, `call`, and `full`;
+`direction` accepts `out`, `in`, or `both`, and `depth` limits traversal
+from the selected target. Together, `graph`, `direction`, and `depth` select
+the returned subgraph. Results contain stable CPG node and edge IDs,
+location and symbol properties, graph metadata, and explicit problems.
+
+AST edges preserve syntax containment. CFG edges include routine entry/exit,
+sequence, conditional branches, loop back-edges, and conservative structured
+control flow. Local DFG edges distinguish definitions, uses, and reaching
+definitions. CALL edges are emitted only for a uniquely resolved explicit
+callee. Ambiguous or unsupported semantics increase the unresolved count and
+are reported as `sound_partial`; the navigator does not fabricate certainty.
+
+CPG construction is lazy: navigation prewarming creates no graph. The first
+request parses only the selected source, and identical requests reuse an
+in-memory LRU keyed by workspace revision, target, `graph`, `direction`, and
+`depth`. The CPG LRU receives 20 percent of the configured retained-cache
+budget, capped at 128 MiB. Source text and full parser trees are not retained
+inside graph records, and normal navigation keeps its existing cache path.
+
+The release gate used the pinned 8,549-file FPC corpus with 4,021,192 physical
+lines on an Apple-silicon Mac with Python 3.14 and eight workers. Navigation
+prewarming took 22.62 seconds. The first focused CPG query took 0.0166 seconds;
+the cached query took 0.000069 seconds and retained 4,007 bytes. Exactly one
+source was parsed for CPG. Legacy navigation retained 98.43 percent of its
+in-run control throughput, above the 95-percent release floor. Reproduce it
+with `python scripts/benchmark_cpg.py --root CORPUS --query Run --workers 8`.
 
 For every source size the navigator builds an outline first, loads source detail
 lazily for a selected target, and returns only selected fragments. Typed source
@@ -297,14 +383,16 @@ retired `.opencode/tools` path and never reads or changes `opencode.json`; that
 file remains entirely user-owned. The deprecated `--write-config` and
 `--write-agent` options are accepted harmlessly for compatibility.
 
-The plugin maintains one worker per session/root, reusing focus and indexes.
+The plugin maintains one worker per session/root, reusing focus, indexes, and
+lazy CPG subgraphs.
 During compaction it restores the focus and summary into the new context.
 Transport failure, session deletion, and plugin disposal clean up the worker.
 
 OpenCode history: 1.1.0 and 1.1.1 used a spawned view per call model.
 Persistent session/root worker support first shipped in 2.0.0.
 This is the same persistent session/root worker boundary.
-The OpenCode worker stays separate from CLI daemon, and current plugin behavior is unchanged.
+The OpenCode worker stays separate from CLI daemon. Protocol v3 adds CPG
+arguments without changing the persistent session/root boundary.
 
 A generated OpenCode agent starts with this Markdown frontmatter:
 
@@ -340,7 +428,7 @@ permission:
 
 Select `python-delphi-lsp`, ask it to load the `python-delphi-lsp` skill, then
 use `delphi_codebase` actions such as
-`open`, `find`, `focus`, and `inspect`. Use semantic tool calls, not raw
+`open`, `find`, `focus`, `inspect`, and `cpg`. Use semantic tool calls, not raw
 source tools.
 
 For architecture questions, call `metrics` without a query to compare unit

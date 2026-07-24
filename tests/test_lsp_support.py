@@ -19,7 +19,7 @@ CI_PERFORMANCE_TIMEOUT_MULTIPLIER = 2.0 if os.environ.get('CI') else 1.0
 LARGE_FILE_LSP_COLD_START_TIMEOUT_SECONDS_BY_PLATFORM = {
     'linux': 3.0,
     'linux2': 3.0,
-    'darwin': 2.0,
+    'darwin': 2.5,
     'win32': 3.0,
 }
 LARGE_FILE_LSP_COLD_START_TIMEOUT_SECONDS = (

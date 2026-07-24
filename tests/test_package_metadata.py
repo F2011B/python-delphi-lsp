@@ -28,12 +28,12 @@ def test_lsp_console_script_dependencies_are_installed_by_default() -> None:
     assert '"lsprotocol>=2023.0.1"' in project
 
 
-def test_release_metadata_declares_2_1_0_sole_namespace_author_and_windows_support() -> None:
+def test_release_metadata_declares_3_0_0_sole_namespace_author_and_windows_support() -> None:
     pyproject = (ROOT / 'pyproject.toml').read_text(encoding='utf-8')
     project = _section('project', pyproject)
     scripts = _section('project.scripts', pyproject)
 
-    assert 'version = "2.1.0"' in project
+    assert 'version = "3.0.0"' in project
     assert '"Operating System :: OS Independent"' in project
     assert '"Operating System :: Microsoft :: Windows"' in project
     assert '"Operating System :: MacOS"' in project
@@ -56,7 +56,7 @@ def test_public_and_lsp_versions_match_release_metadata() -> None:
     assert create_server().version == version
 
 
-def test_readme_documents_v2_release_plugin_protocol_discovery_and_vllm_proof() -> None:
+def test_readme_documents_v3_release_plugin_protocol_discovery_and_vllm_proof() -> None:
     readme = (ROOT / 'README.md').read_text(encoding='utf-8')
     forbidden = 'delphi' + 'ast'
 
@@ -70,7 +70,7 @@ def test_readme_documents_v2_release_plugin_protocol_discovery_and_vllm_proof() 
     assert '.agents/skills/python-delphi-lsp/SKILL.md' in readme
     assert '.opencode/agents/python-delphi-lsp.md' in readme
     assert '.opencode/plugins/delphi_codebase.ts' in readme
-    assert 'Protocol v2' in readme
+    assert 'Protocol v3' in readme
     assert 'sound_partial' in readme
     assert 'workspace_revision' in readme
     assert '117,511-line' in readme
@@ -83,7 +83,17 @@ def test_readme_documents_v2_release_plugin_protocol_discovery_and_vllm_proof() 
     assert 'Auto-discovery reads `.dpr`, `.dpk`, `.dproj`, `.cfg`, and `.dof` files' in readme
     assert 'no file-size threshold' in readme
     assert 'final answer' in readme
-    assert 'Version 2.1.0' in readme
+    assert 'Version 3.0.0' in readme
+    assert '`cpg`' in readme
+    assert '`ast`, `cfg`, `dfg`, `call`, and `full`' in readme
+    assert '`graph`, `direction`, and `depth`' in readme
+    assert '20 percent' in readme
+    assert '128 MiB' in readme
+    assert '4,021,192' in readme
+    assert '22.62' in readme
+    assert '0.0166' in readme
+    assert '0.000069' in readme
+    assert '98.43 percent' in readme
     assert 'view --layer metrics' in readme
     assert '`metrics`' in readme
     assert 'total_loc_with_includes' in readme
@@ -140,6 +150,21 @@ def test_sdist_includes_files_required_by_packaged_tests() -> None:
     assert 'include scripts/audit_delphi_language_features.py' in manifest
     assert 'include scripts/build_github_performance_corpus.py' in manifest
     assert 'include scripts/benchmark_github_corpus.py' in manifest
+    assert 'include scripts/benchmark_cpg.py' in manifest
     assert 'include scripts/benchmark_parallel_cache.py' in manifest
     assert 'include scripts/ollama/ornith-lspctx.Modelfile' in manifest
     assert 'include tests/corpora.performance.lock.json' in manifest
+
+
+def test_release_3_0_0_notes_document_protocol_cpg_and_performance_gate() -> None:
+    notes = (ROOT / 'docs' / 'release-3.0.0.md').read_text(encoding='utf-8')
+
+    assert '# Python Delphi LSP 3.0.0' in notes
+    assert 'Protocol v3' in notes
+    assert '`cpg`' in notes
+    assert 'sound_partial' in notes
+    assert 'target IDs remain unchanged' in notes
+    assert '4,021,192' in notes
+    assert '22.62' in notes
+    assert '98.43 percent' in notes
+    assert 'one source' in notes
