@@ -655,31 +655,54 @@ def _daemon_process_options() -> dict[str, object]:
 
 
 class _CacheService:
-    def __init__(self, metadata: CacheMetadata) -> None:
+    def __init__(
+        self,
+        metadata: CacheMetadata,
+        *,
+        defer_context: bool = False,
+    ) -> None:
         self.metadata = metadata
         self._rss_baseline_bytes = current_process_rss_bytes()
-        self.context = AgentContext.open(
-            metadata.root,
-            metadata.project_file or None,
-            workers=metadata.workers,
-            worker_memory_budget_bytes=metadata.max_memory_bytes,
-            revision_check_interval_seconds=_CACHE_REVISION_CHECK_INTERVAL_SECONDS,
-            navigation_cache_dir=navigation_cache_path(
-                metadata.root,
-                create=True,
-            ),
-        )
+        self._context: AgentContext | None = None
+        self.context_ready = threading.Event()
         self.budget = CacheBudget(metadata.max_memory_bytes)
         self.stats = CacheStats()
         self.lock = threading.Lock()
         self.started = time.monotonic()
         self.last_activity = self.started
         self.cache_state = "warming"
-        self.last_revision = self.context.workspace.workspace_revision
+        self.last_revision = ""
         self.last_budget = BudgetResult(0, 0.0, 0.0, False, False, False)
         self.prewarm_seconds = 0.0
+        self.startup_error = ""
         self.shutdown = threading.Event()
         self.prewarm_thread: threading.Thread | None = None
+        if not defer_context:
+            self._initialize_context()
+
+    @property
+    def context(self) -> AgentContext:
+        if self._context is None:
+            raise RuntimeError("Cache workspace is still being discovered.")
+        return self._context
+
+    def _initialize_context(self) -> AgentContext:
+        if self._context is None:
+            context = AgentContext.open(
+                self.metadata.root,
+                self.metadata.project_file or None,
+                workers=self.metadata.workers,
+                worker_memory_budget_bytes=self.metadata.max_memory_bytes,
+                revision_check_interval_seconds=_CACHE_REVISION_CHECK_INTERVAL_SECONDS,
+                navigation_cache_dir=navigation_cache_path(
+                    self.metadata.root,
+                    create=True,
+                ),
+            )
+            self._context = context
+            self.last_revision = context.workspace.workspace_revision
+        self.context_ready.set()
+        return self._context
 
     def _measure_retained_bytes(self) -> int:
         process_rss = current_process_rss_bytes()
@@ -692,8 +715,9 @@ class _CacheService:
 
     def prewarm(self) -> None:
         started = time.monotonic()
+        context = self._initialize_context()
         try:
-            self.last_revision = self.context.prewarm_navigation()
+            self.last_revision = context.prewarm_navigation()
             self.cache_state = "warm"
         except AgentProtocolError as error:
             if error.code != "project_required":
@@ -708,15 +732,24 @@ class _CacheService:
             self.stats.evictions += 1
             self.cache_state = "compact"
         self.prewarm_seconds = time.monotonic() - started
-        self.stats.parallel_fallbacks = self.context.parallel_stats.fallbacks
+        self.stats.parallel_fallbacks = context.parallel_stats.fallbacks
 
     def start_prewarm(self) -> None:
         def run() -> None:
             try:
                 with self.lock:
                     self.prewarm()
-            except Exception:
+            except Exception as error:
+                detail = _truncate_and_sanitize_startup_diagnostics(
+                    f"{type(error).__name__}: {error}".encode(
+                        "utf-8",
+                        "replace",
+                    )
+                )
+                self.startup_error = detail or type(error).__name__
                 self.cache_state = "failed"
+            finally:
+                self.context_ready.set()
 
         self.prewarm_thread = threading.Thread(
             target=run,
@@ -740,7 +773,15 @@ class _CacheService:
                 "Cache is still warming. Retry after cache status reports ready.",
             )
         if self.cache_state == "failed":
-            raise CacheClientError("cache_failed", "Cache warm-up failed.")
+            detail = (
+                f" {self.startup_error}"
+                if self.startup_error
+                else ""
+            )
+            raise CacheClientError(
+                "cache_failed",
+                f"Cache workspace discovery or warm-up failed.{detail}",
+            )
         with self.lock:
             self.last_activity = time.monotonic()
             before = self.last_revision
@@ -784,6 +825,12 @@ class _CacheService:
     def status(self) -> dict[str, object]:
         now = time.monotonic()
         idle = max(0.0, now - self.last_activity)
+        context = self._context
+        parallel_stats = (
+            context.parallel_stats
+            if context is not None
+            else None
+        )
         return {
             "pid": self.metadata.pid, "root": self.metadata.root, "project_file": self.metadata.project_file,
             "version": self.metadata.version, "uptime": now - self.started, "idle_seconds": idle,
@@ -795,17 +842,18 @@ class _CacheService:
             "cache_state": self.cache_state, "requests": self.stats.requests, "warm_hits": self.stats.warm_hits,
             "rebuilds": self.stats.rebuilds, "invalidations": self.stats.invalidations, "evictions": self.stats.evictions,
             "workers_configured": "auto" if self.metadata.workers == 0 else self.metadata.workers,
-            "workers_effective": self.context.parallel_stats.effective_workers,
-            "parallel_files_completed": self.context.parallel_stats.files_completed,
+            "workers_effective": parallel_stats.effective_workers if parallel_stats else 0,
+            "parallel_files_completed": parallel_stats.files_completed if parallel_stats else 0,
             "prewarm_seconds": self.prewarm_seconds,
-            "parallel_seconds": self.context.parallel_stats.elapsed_seconds,
+            "parallel_seconds": parallel_stats.elapsed_seconds if parallel_stats else 0.0,
             "parallel_fallbacks": self.stats.parallel_fallbacks,
-            "navigation_disk_hits": self.context.navigation_disk_hits,
-            "navigation_disk_misses": self.context.navigation_disk_misses,
-            "cpg_cache_entries": self.context.cpg_cache_entries,
-            "cpg_cache_bytes": self.context.cpg_cache_bytes,
+            "navigation_disk_hits": context.navigation_disk_hits if context else 0,
+            "navigation_disk_misses": context.navigation_disk_misses if context else 0,
+            "cpg_cache_entries": context.cpg_cache_entries if context else 0,
+            "cpg_cache_bytes": context.cpg_cache_bytes if context else 0,
             "idle_timeout": self.metadata.idle_timeout, "idle_remaining": max(0.0, self.metadata.idle_timeout - idle),
             "workspace_revision": self.last_revision,
+            "startup_error": self.startup_error,
         }
 
 
@@ -836,10 +884,13 @@ def watch_workspace_changes(
 
 
 def _watch_workspace(service: _CacheService) -> None:
+    service.context_ready.wait()
+    if service.shutdown.is_set() or service._context is None:
+        return
     watch_workspace_changes(
         service.metadata.root,
         stop_event=service.shutdown,
-        on_change=service.context.invalidate_revision_cache,
+        on_change=service._context.invalidate_revision_cache,
     )
 
 
@@ -890,7 +941,7 @@ def run_cache_daemon(
     )
     watcher: threading.Thread | None = None
     try:
-        service = _CacheService(metadata)
+        service = _CacheService(metadata, defer_context=True)
         _write_metadata(metadata)
         watcher = threading.Thread(
             target=_watch_workspace,
@@ -974,6 +1025,8 @@ def _start_cache_unlocked(
         process = subprocess.Popen(command, **options)
         deadline = time.monotonic() + startup_timeout
         startup_ready = False
+        timed_out = False
+        return_code: int | None = None
         try:
             while time.monotonic() < deadline:
                 metadata = _read_metadata(canonical)
@@ -987,10 +1040,12 @@ def _start_cache_unlocked(
                 if process.poll() is not None:
                     break
                 time.sleep(0.05)
-            if process.poll() is None:
+            return_code = process.poll()
+            timed_out = return_code is None
+            if timed_out:
                 process.kill()
             with contextlib.suppress(Exception):
-                process.wait()
+                return_code = process.wait()
             metadata = _read_metadata(canonical)
             if metadata and metadata.pid == process.pid:
                 _remove_metadata_if_owned(metadata)
@@ -998,9 +1053,28 @@ def _start_cache_unlocked(
             raw = _read_startup_tail(diagnostics)
             message = _truncate_and_sanitize_startup_diagnostics(raw)
             base = "Cache daemon did not become ready."
+            if timed_out:
+                reason = (
+                    f" Startup timed out after {startup_timeout:.1f}s before "
+                    "readiness metadata was published."
+                )
+            else:
+                reason = (
+                    f" Child process exited with code {return_code} before "
+                    "readiness metadata was published."
+                )
             if message:
-                raise CacheClientError("startup_failed", f"{base} {message}")
-            raise CacheClientError("startup_failed", base)
+                raise CacheClientError(
+                    "startup_failed",
+                    f"{base}{reason} Child stderr: {message}",
+                )
+            raise CacheClientError(
+                "startup_failed",
+                (
+                    f"{base}{reason} No child diagnostics were emitted. "
+                    f"Python executable: {sys.executable}. Workspace: {canonical}."
+                ),
+            )
         finally:
             if not startup_ready:
                 if process.poll() is None:

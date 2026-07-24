@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import socket
+import sys
 import textwrap
 import threading
 import time
@@ -191,6 +192,59 @@ def test_cache_daemon_reports_ready_before_slow_prewarm_finishes(
         assert status["cache_state"] == "warming"
     finally:
         allow_prewarm.set()
+        deadline = time.monotonic() + 2
+        metadata = agent_cache._read_metadata(tmp_path)
+        while metadata is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+            metadata = agent_cache._read_metadata(tmp_path)
+        if metadata is not None:
+            with contextlib.suppress(agent_cache.CacheClientError):
+                agent_cache._client_exchange(metadata, {"action": "stop"})
+        daemon.join(timeout=3)
+
+
+def test_cache_daemon_reports_ready_before_slow_workspace_discovery_finishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from delphi_lsp import agent_cache
+
+    write_source(tmp_path / "Demo.dpr", "program Demo; begin end.")
+    discovery_started = threading.Event()
+    allow_discovery = threading.Event()
+    real_open = agent_cache.AgentContext.open
+
+    def slow_open(*args, **kwargs):  # noqa: ANN002, ANN003
+        discovery_started.set()
+        assert allow_discovery.wait(timeout=5)
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(agent_cache.AgentContext, "open", slow_open)
+    daemon = threading.Thread(
+        target=agent_cache.run_cache_daemon,
+        args=(tmp_path,),
+        kwargs={"idle_timeout": 10},
+        daemon=True,
+    )
+    daemon.start()
+
+    try:
+        assert discovery_started.wait(timeout=2)
+        deadline = time.monotonic() + 2
+        metadata = agent_cache._read_metadata(tmp_path)
+        while metadata is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+            metadata = agent_cache._read_metadata(tmp_path)
+
+        assert metadata is not None
+        status = agent_cache._client_exchange(
+            metadata,
+            {"action": "status", "_startup_probe": True},
+        ).payload
+        assert status["cache_state"] == "warming"
+        assert status["workspace_revision"] == ""
+    finally:
+        allow_discovery.set()
         deadline = time.monotonic() + 2
         metadata = agent_cache._read_metadata(tmp_path)
         while metadata is None and time.monotonic() < deadline:
@@ -428,6 +482,9 @@ def test_startup_timeout_replaces_the_old_ten_second_deadline(
     assert error.value.code == "startup_failed"
     assert process.polls >= 3
     assert process.killed is True
+    assert "timed out after 30.0s" in error.value.message
+    assert str(tmp_path.resolve()) in error.value.message
+    assert sys.executable in error.value.message
 
 
 def test_windows_cache_daemon_starts_without_a_console_window(
