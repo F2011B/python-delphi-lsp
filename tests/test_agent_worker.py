@@ -513,7 +513,7 @@ end.
         assert status.returncode == 0
         assert reported["pid"] == started["pid"]
         assert reported["warning_threshold_percent"] == 80
-        assert "Warning:" in status.stderr
+        assert ("Warning:" in status.stderr) == reported["warning_active"]
 
         text_status = subprocess.run(
             [sys.executable, "-m", "delphi_lsp.agent_cli", "cache", "status", "--root", str(tmp_path)],
@@ -523,7 +523,7 @@ end.
         )
         assert text_status.returncode == 0
         assert text_status.stdout.startswith(f"running pid={started['pid']} state=")
-        assert "Warning:" in text_status.stderr
+        assert ("Warning:" in text_status.stderr) == reported["warning_active"]
     finally:
         stop = subprocess.run(
             [sys.executable, "-m", "delphi_lsp.agent_cli", "cache", "stop", "--root", str(tmp_path)],

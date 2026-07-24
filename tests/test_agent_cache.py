@@ -88,7 +88,7 @@ def test_current_process_rss_dispatches_platform_measurements(
         "read_text",
         lambda _path, **_options: "100 12 0 0 0 0 0",
     )
-    monkeypatch.setattr(agent_cache.os, "sysconf", lambda _name: 4096)
+    monkeypatch.setattr(agent_cache.os, "sysconf", lambda _name: 4096, raising=False)
     assert agent_cache.current_process_rss_bytes() == 12 * 4096
 
     monkeypatch.setattr(agent_cache.sys, "platform", "win32")

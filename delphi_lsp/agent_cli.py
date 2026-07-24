@@ -289,6 +289,7 @@ def _index(args: argparse.Namespace) -> None:
 
 
 def _skill_install(args: argparse.Namespace) -> None:
+    _require_install_directory(args.target)
     try:
         skill_path = install_skill(args.target, force=args.force)
     except FileExistsError as error:
@@ -297,6 +298,7 @@ def _skill_install(args: argparse.Namespace) -> None:
 
 
 def _opencode_install(args: argparse.Namespace) -> None:
+    _require_install_directory(args.target)
     try:
         skill_path, plugin_path, agent_path = install_opencode_support(
             args.target,
@@ -309,6 +311,12 @@ def _opencode_install(args: argparse.Namespace) -> None:
     print(skill_path)
     print(plugin_path)
     print(agent_path)
+
+
+def _require_install_directory(target: str | Path) -> None:
+    path = Path(target).expanduser()
+    if path.exists() and not path.is_dir():
+        raise _CliError("io_error", f"Install target is not a directory: {path}")
 
 
 def _worker(args: argparse.Namespace) -> None:

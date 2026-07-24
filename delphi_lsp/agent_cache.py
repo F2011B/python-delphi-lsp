@@ -40,6 +40,8 @@ _STARTUP_DIAGNOSTIC_BYTES = 16 * 1024
 _STARTUP_TOKEN_RE = re.compile(r"(?i)(token\b[^\n\r]*?:?\s*['\"]?[A-Za-z0-9_-]+['\"]?|\b[a-zA-Z0-9_-]{32,})")
 _START_LOCK_INCOMPLETE_GRACE_SECONDS = 1.0
 _CACHE_REVISION_CHECK_INTERVAL_SECONDS = 3600.0
+_WATCHER_READY_TIMEOUT_SECONDS = 1.0
+_WATCHER_READY_POLL_MILLISECONDS = 50
 _WATCHED_SUFFIXES = frozenset(
     {".pas", ".pp", ".inc", ".dpr", ".dpk", ".dproj", ".cfg"}
 )
@@ -665,6 +667,7 @@ class _CacheService:
         self._rss_baseline_bytes = current_process_rss_bytes()
         self._context: AgentContext | None = None
         self.context_ready = threading.Event()
+        self.watcher_ready = threading.Event()
         self.budget = CacheBudget(metadata.max_memory_bytes)
         self.stats = CacheStats()
         self.lock = threading.Lock()
@@ -782,6 +785,7 @@ class _CacheService:
                 "cache_failed",
                 f"Cache workspace discovery or warm-up failed.{detail}",
             )
+        self.watcher_ready.wait(timeout=_WATCHER_READY_TIMEOUT_SECONDS)
         with self.lock:
             self.last_activity = time.monotonic()
             before = self.last_revision
@@ -866,7 +870,9 @@ def watch_workspace_changes(
     *,
     stop_event: threading.Event,
     on_change: Callable[[], None],
+    on_ready: Callable[[], None] | None = None,
 ) -> None:
+    ready = False
     try:
         for changes in watch(
             root,
@@ -874,13 +880,22 @@ def watch_workspace_changes(
             stop_event=stop_event,
             debounce=50,
             step=20,
+            rust_timeout=_WATCHER_READY_POLL_MILLISECONDS,
+            yield_on_timeout=True,
             recursive=True,
             raise_interrupt=False,
         ):
+            if not ready:
+                ready = True
+                if on_ready is not None:
+                    on_ready()
             if changes:
                 on_change()
     except (OSError, RuntimeError):
         on_change()
+    finally:
+        if not ready and on_ready is not None:
+            on_ready()
 
 
 def _watch_workspace(service: _CacheService) -> None:
@@ -891,6 +906,7 @@ def _watch_workspace(service: _CacheService) -> None:
         service.metadata.root,
         stop_event=service.shutdown,
         on_change=service._context.invalidate_revision_cache,
+        on_ready=service.watcher_ready.set,
     )
 
 
@@ -968,10 +984,10 @@ def run_cache_daemon(
     finally:
         if "service" in locals():
             service.shutdown.set()
-        if watcher is not None:
-            watcher.join(timeout=2.0)
         listener.close()
         _remove_metadata_if_owned(metadata)
+        if watcher is not None:
+            watcher.join(timeout=2.0)
 
 
 def _start_cache_unlocked(
