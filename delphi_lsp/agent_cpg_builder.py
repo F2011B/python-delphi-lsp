@@ -59,13 +59,13 @@ def build_cpg_subgraph(
     depth: int,
     record_limit: int = 50_000,
 ) -> CpgSubgraph:
-    del candidates  # Call resolution is added by the call-graph builder.
     selected = _select_target_syntax(target, syntax_root)
     root_node = _target_node(target)
     nodes = [root_node]
     edges: list[CpgEdge] = []
     problems: list[CpgProblem] = []
     syntax_nodes: dict[int, CpgNode] = {}
+    unresolved = 0
     if selected is None:
         problems.append(
             CpgProblem(
@@ -116,6 +116,24 @@ def build_cpg_subgraph(
             )
             nodes.extend(cfg_nodes)
             edges.extend(cfg_edges)
+            edges.extend(
+                _build_data_flow(
+                    selected,
+                    syntax_nodes,
+                    cfg_edges,
+                    root_node,
+                )
+            )
+            call_nodes, call_edges, unresolved_calls = _build_calls(
+                target,
+                selected,
+                syntax_nodes,
+                candidates,
+                root_node,
+            )
+            nodes.extend(call_nodes)
+            edges.extend(call_edges)
+            unresolved += unresolved_calls
     complete = CpgSubgraph.create(
         target_id=target.target_id,
         graph="full",
@@ -124,6 +142,7 @@ def build_cpg_subgraph(
         edges=edges,
         problems=problems,
         truncated=bool(stack) if selected is not None else False,
+        unresolved=unresolved,
         record_limit=record_limit,
     )
     return complete.select(
@@ -456,6 +475,176 @@ def _cfg_edge(
             properties={"kind": kind},
         )
     )
+
+
+def _build_data_flow(
+    selected: SyntaxNode,
+    syntax_nodes: Mapping[int, CpgNode],
+    cfg_edges: Sequence[CpgEdge],
+    root_node: CpgNode,
+) -> list[CpgEdge]:
+    definitions: dict[str, list[tuple[str, str]]] = {}
+    uses: dict[str, list[tuple[str, str]]] = {}
+    stack = [selected]
+    while stack:
+        current = stack.pop()
+        stack.extend(reversed(current.child_nodes))
+        owner = syntax_nodes.get(id(current))
+        if owner is None or not _is_executable(current):
+            continue
+        if current.typ == SyntaxNodeType.ntAssign:
+            lhs = current.find_node(SyntaxNodeType.ntLHS)
+            rhs = current.find_node(SyntaxNodeType.ntRHS)
+            definitions[owner.node_id] = _named_identifiers(lhs, syntax_nodes)
+            uses[owner.node_id] = _named_identifiers(rhs, syntax_nodes)
+        elif current.typ == SyntaxNodeType.ntCall:
+            identifiers = _named_identifiers(current, syntax_nodes)
+            uses[owner.node_id] = identifiers[1:]
+        elif current.typ in _CONTROL_TYPES:
+            identifiers: list[tuple[str, str]] = []
+            for child in current.child_nodes:
+                if not _is_executable(child):
+                    identifiers.extend(_named_identifiers(child, syntax_nodes))
+            uses[owner.node_id] = identifiers
+
+    result: list[CpgEdge] = []
+    for owner_id, records in definitions.items():
+        for name, identifier_id in records:
+            properties = {"name": name, "owner_node_id": owner_id}
+            result.append(
+                CpgEdge.create(
+                    label="DEF",
+                    source=root_node.node_id,
+                    target=identifier_id,
+                    properties=properties,
+                )
+            )
+    for owner_id, records in uses.items():
+        for name, identifier_id in records:
+            properties = {"name": name, "owner_node_id": owner_id}
+            result.append(
+                CpgEdge.create(
+                    label="USE",
+                    source=root_node.node_id,
+                    target=identifier_id,
+                    properties=properties,
+                )
+            )
+
+    predecessors: dict[str, set[str]] = {}
+    flow_nodes: set[str] = set(definitions) | set(uses)
+    for edge in cfg_edges:
+        predecessors.setdefault(edge.target, set()).add(edge.source)
+        flow_nodes.add(edge.source)
+        flow_nodes.add(edge.target)
+    incoming: dict[str, dict[str, frozenset[str]]] = {
+        node_id: {} for node_id in flow_nodes
+    }
+    outgoing: dict[str, dict[str, frozenset[str]]] = {
+        node_id: {} for node_id in flow_nodes
+    }
+    ordered_nodes = sorted(flow_nodes)
+    changed = True
+    remaining = max(1, len(ordered_nodes) * 4)
+    while changed and remaining > 0:
+        changed = False
+        remaining -= 1
+        for node_id in ordered_nodes:
+            merged: dict[str, set[str]] = {}
+            for predecessor in predecessors.get(node_id, ()):
+                for name, identifiers in outgoing.get(predecessor, {}).items():
+                    merged.setdefault(name, set()).update(identifiers)
+            next_incoming = {
+                name: frozenset(identifiers)
+                for name, identifiers in merged.items()
+            }
+            next_outgoing = dict(next_incoming)
+            for name, identifier_id in definitions.get(node_id, ()):
+                next_outgoing[name] = frozenset({identifier_id})
+            if incoming[node_id] != next_incoming or outgoing[node_id] != next_outgoing:
+                incoming[node_id] = next_incoming
+                outgoing[node_id] = next_outgoing
+                changed = True
+
+    for owner_id, records in uses.items():
+        available = incoming.get(owner_id, {})
+        for name, use_id in records:
+            for definition_id in sorted(available.get(name, ())):
+                result.append(
+                    CpgEdge.create(
+                        label="REACHING_DEF",
+                        source=definition_id,
+                        target=use_id,
+                        properties={"name": name, "owner_node_id": owner_id},
+                    )
+                )
+    return result
+
+
+def _build_calls(
+    target: CpgTarget,
+    selected: SyntaxNode,
+    syntax_nodes: Mapping[int, CpgNode],
+    candidates: Mapping[str, Sequence[CpgTarget]],
+    root_node: CpgNode,
+) -> tuple[list[CpgNode], list[CpgEdge], int]:
+    nodes: list[CpgNode] = []
+    edges: list[CpgEdge] = []
+    unresolved = 0
+    stack = [selected]
+    while stack:
+        current = stack.pop()
+        stack.extend(reversed(current.child_nodes))
+        if current.typ != SyntaxNodeType.ntCall:
+            continue
+        call_node = syntax_nodes.get(id(current))
+        identifiers = _named_identifiers(current, syntax_nodes)
+        if call_node is None or not identifiers:
+            unresolved += 1
+            continue
+        name = identifiers[0][0]
+        matches = tuple(candidates.get(name.casefold(), ()))
+        if len(matches) != 1:
+            unresolved += 1
+            continue
+        callee = matches[0]
+        callee_node = _target_node(callee)
+        nodes.append(callee_node)
+        edges.append(
+            CpgEdge.create(
+                label="CALL",
+                source=root_node.node_id,
+                target=callee_node.node_id,
+                properties={
+                    "call_node_id": call_node.node_id,
+                    "name": name,
+                    "path": target.path,
+                    "line": current.line,
+                    "column": current.col,
+                },
+            )
+        )
+    return nodes, edges, unresolved
+
+
+def _named_identifiers(
+    root: SyntaxNode | None,
+    syntax_nodes: Mapping[int, CpgNode],
+) -> list[tuple[str, str]]:
+    if root is None:
+        return []
+    result: list[tuple[str, str]] = []
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        stack.extend(reversed(current.child_nodes))
+        if current.typ not in {SyntaxNodeType.ntIdentifier, SyntaxNodeType.ntName}:
+            continue
+        name = current.get_attribute(AttributeName.anName)
+        node = syntax_nodes.get(id(current))
+        if name and node is not None:
+            result.append((name.casefold(), node.node_id))
+    return result
 
 
 __all__ = ["build_cpg_subgraph"]

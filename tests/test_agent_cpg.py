@@ -358,3 +358,115 @@ def test_loop_cfg_has_a_back_edge_and_a_fallthrough() -> None:
     }
     assert "loop_back" in edge_kinds
     assert "false" in edge_kinds
+
+
+def test_dfg_emits_def_use_and_reaching_definition_edges() -> None:
+    from delphi_lsp.agent_cpg import CpgTarget
+    from delphi_lsp.agent_cpg_builder import build_cpg_subgraph
+
+    root = DelphiParser().parse(
+        CPG_SOURCE,
+        "UnitA.pas",
+        build_semantic=False,
+    ).root
+    target = CpgTarget(
+        target_id="target_v2_run",
+        source_path="UnitA.pas",
+        path="UnitA.pas",
+        unit_id="target_v2_unit",
+        name="Run",
+        qualified_name="TThing.Run",
+        kind="method",
+        line=8,
+        column=1,
+    )
+
+    graph = build_cpg_subgraph(
+        target=target,
+        syntax_root=root,
+        candidates={},
+        graph="dfg",
+        direction="out",
+        depth=16,
+    )
+
+    assert {"DEF", "USE", "REACHING_DEF"} <= {
+        edge.label for edge in graph.edges
+    }
+    value_nodes = {
+        node.node_id
+        for node in graph.nodes
+        if node.label == "IDENTIFIER"
+        and dict(node.properties).get("name") == "Value"
+    }
+    assert len(value_nodes) >= 3
+    assert any(
+        edge.label == "REACHING_DEF"
+        and edge.source in value_nodes
+        and edge.target in value_nodes
+        for edge in graph.edges
+    )
+
+
+def test_call_graph_resolves_only_one_unique_compact_target() -> None:
+    from delphi_lsp.agent_cpg import CpgTarget
+    from delphi_lsp.agent_cpg_builder import build_cpg_subgraph
+
+    root = DelphiParser().parse(
+        CPG_SOURCE,
+        "UnitA.pas",
+        build_semantic=False,
+    ).root
+    caller = CpgTarget(
+        target_id="target_v2_run",
+        source_path="UnitA.pas",
+        path="UnitA.pas",
+        unit_id="target_v2_unit",
+        name="Run",
+        qualified_name="TThing.Run",
+        kind="method",
+        line=8,
+        column=1,
+    )
+    callee = CpgTarget(
+        target_id="target_v2_notify",
+        source_path="UnitB.pas",
+        path="UnitB.pas",
+        unit_id="target_v2_unit_b",
+        name="Notify",
+        qualified_name="UnitB.Notify",
+        kind="procedure",
+        line=3,
+        column=1,
+    )
+
+    graph = build_cpg_subgraph(
+        target=caller,
+        syntax_root=root,
+        candidates={"notify": (callee,)},
+        graph="call",
+        direction="out",
+        depth=4,
+    )
+
+    assert any(
+        edge.label == "CALL"
+        and dict(edge.properties).get("call_node_id")
+        for edge in graph.edges
+    )
+    assert any(
+        dict(node.properties).get("target_id") == callee.target_id
+        for node in graph.nodes
+    )
+    assert graph.unresolved == 0
+
+    ambiguous = build_cpg_subgraph(
+        target=caller,
+        syntax_root=root,
+        candidates={"notify": (callee, callee)},
+        graph="call",
+        direction="out",
+        depth=4,
+    )
+    assert not ambiguous.edges
+    assert ambiguous.unresolved == 1
