@@ -568,6 +568,41 @@ class _CpgCandidates(Mapping[str, tuple[CpgTarget, ...]]):
     def __len__(self) -> int:
         return len(self._resolved)
 
+    def resolve_many(
+        self,
+        names: set[str],
+    ) -> dict[str, tuple[CpgTarget, ...]]:
+        keys = {_normalized(name) for name in names}
+        missing = keys.difference(self._resolved)
+        if missing:
+            collected: dict[str, list[CpgTarget]] = {
+                name: [] for name in missing
+            }
+            for entry in self._entries:
+                if entry.kind not in _ROUTINE_KINDS:
+                    continue
+                name_match = entry.normalized_name in missing
+                qualified_match = (
+                    entry.normalized_qualified_name in missing
+                    and entry.normalized_qualified_name
+                    != entry.normalized_name
+                )
+                if not name_match and not qualified_match:
+                    continue
+                target = _cpg_target(entry)
+                if name_match:
+                    collected[entry.normalized_name].append(target)
+                if qualified_match:
+                    collected[entry.normalized_qualified_name].append(target)
+            self._resolved.update(
+                (name, tuple(matches))
+                for name, matches in collected.items()
+            )
+        return {
+            name: self._resolved.get(name, ())
+            for name in keys
+        }
+
 
 def _cpg_target(entry: _SymbolEntry) -> CpgTarget:
     return CpgTarget(
@@ -636,6 +671,7 @@ class AgentContext:
             CpgSubgraph,
         ] = OrderedDict()
         self._cpg_cache_bytes = 0
+        self._cpg_sources_parsed = 0
 
     @classmethod
     def open(
@@ -683,6 +719,10 @@ class AgentContext:
     @property
     def cpg_cache_bytes(self) -> int:
         return self._cpg_cache_bytes
+
+    @property
+    def cpg_sources_parsed(self) -> int:
+        return self._cpg_sources_parsed
 
     def cache_roots(self) -> tuple[object, ...]:
         return (
@@ -867,6 +907,7 @@ class AgentContext:
             return cached
         try:
             document = registry.sources[entry.source_path]
+            self._cpg_sources_parsed += 1
             parsed = DelphiParser(
                 defines=document.defines,
                 include_paths=document.include_paths,

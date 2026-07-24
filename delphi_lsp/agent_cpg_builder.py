@@ -591,6 +591,7 @@ def _build_calls(
     nodes: list[CpgNode] = []
     edges: list[CpgEdge] = []
     unresolved = 0
+    calls: list[tuple[SyntaxNode, CpgNode, str]] = []
     stack = [selected]
     while stack:
         current = stack.pop()
@@ -603,7 +604,19 @@ def _build_calls(
             unresolved += 1
             continue
         name = identifiers[0][0]
-        matches = tuple(candidates.get(name.casefold(), ()))
+        calls.append((current, call_node, name.casefold()))
+
+    names = {name for _, _, name in calls}
+    batch_resolver = getattr(candidates, "resolve_many", None)
+    if callable(batch_resolver):
+        resolved = batch_resolver(names)
+    else:
+        resolved = {
+            name: tuple(candidates.get(name, ()))
+            for name in names
+        }
+    for current, call_node, name in calls:
+        matches = tuple(resolved.get(name, ()))
         if len(matches) != 1:
             unresolved += 1
             continue

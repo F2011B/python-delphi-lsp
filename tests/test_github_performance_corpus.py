@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 LOCK_PATH = ROOT / "tests" / "corpora.performance.lock.json"
 BUILD_SCRIPT = ROOT / "scripts" / "build_github_performance_corpus.py"
 BENCH_SCRIPT = ROOT / "scripts" / "benchmark_github_corpus.py"
+CPG_BENCH_SCRIPT = ROOT / "scripts" / "benchmark_cpg.py"
 
 
 def _load_module(path: Path):
@@ -238,3 +239,36 @@ def test_peak_rss_is_reported_in_bytes_on_the_current_platform() -> None:
     benchmark = _load_module(BENCH_SCRIPT)
 
     assert benchmark._peak_rss_bytes() > 0
+
+
+def test_cpg_benchmark_enforces_four_million_loc_and_lazy_behavior() -> None:
+    assert CPG_BENCH_SCRIPT.is_file()
+    assert "include scripts/benchmark_cpg.py" in (
+        ROOT / "MANIFEST.in"
+    ).read_text(encoding="utf-8")
+    benchmark = _load_module(CPG_BENCH_SCRIPT)
+    passing = {
+        "loc": 4_000_000,
+        "legacy_control_queries_per_second": 100.0,
+        "legacy_queries_per_second": 96.0,
+        "sources_parsed_for_cpg": 1,
+        "cpg_cached_seconds": 0.01,
+        "cpg_first_seconds": 0.5,
+    }
+
+    assert benchmark.release_failures(passing) == []
+
+    failing = {
+        **passing,
+        "loc": 3_999_999,
+        "legacy_queries_per_second": 94.9,
+        "sources_parsed_for_cpg": 2,
+        "cpg_cached_seconds": 0.6,
+    }
+    failures = benchmark.release_failures(failing)
+
+    assert len(failures) == 4
+    assert any("4000000" in failure for failure in failures)
+    assert any("5 percent" in failure for failure in failures)
+    assert any("one source" in failure for failure in failures)
+    assert any("cached CPG" in failure for failure in failures)

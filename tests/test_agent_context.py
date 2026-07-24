@@ -79,6 +79,7 @@ def test_cpg_action_builds_and_reuses_one_bounded_subgraph(
     context, target_id = _cpg_context(tmp_path)
     assert context.cpg_cache_entries == 0
     assert context.cpg_cache_bytes == 0
+    assert context.cpg_sources_parsed == 0
     before = context.estimated_cache_bytes
 
     first = context.handle(
@@ -96,6 +97,7 @@ def test_cpg_action_builds_and_reuses_one_bounded_subgraph(
     assert result_items(first)[0]["item_type"] == "cpg_metadata"
     assert context.cpg_cache_entries == 1
     assert context.cpg_cache_bytes > 0
+    assert context.cpg_sources_parsed == 1
     assert context.estimated_cache_bytes > before
     monkeypatch.setattr(
         agent_context_module,
@@ -118,6 +120,7 @@ def test_cpg_action_builds_and_reuses_one_bounded_subgraph(
     )
 
     assert second.result == first.result
+    assert context.cpg_sources_parsed == 1
     context.evict_auxiliary_caches()
     assert context.cpg_cache_entries == 0
     assert context.cpg_cache_bytes == 0
@@ -140,6 +143,7 @@ def test_navigation_prewarm_does_not_construct_cpg_state(
 
     assert context.cpg_cache_entries == 0
     assert context.cpg_cache_bytes == 0
+    assert context.cpg_sources_parsed == 0
 
 
 def test_cpg_query_parses_only_the_target_source(

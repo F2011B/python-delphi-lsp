@@ -259,6 +259,70 @@ def test_target_local_ast_is_deterministic_and_unit_scoped() -> None:
     assert len(first.nodes) > 10
 
 
+def test_call_resolution_batches_names_into_one_registry_scan() -> None:
+    from delphi_lsp.agent_cpg import CpgTarget
+    from delphi_lsp.agent_cpg_builder import build_cpg_subgraph
+
+    root = DelphiParser().parse(
+        CPG_SOURCE,
+        "UnitA.pas",
+        build_semantic=False,
+    ).root
+    target = CpgTarget(
+        target_id="target_v2_run",
+        source_path="UnitA.pas",
+        path="UnitA.pas",
+        unit_id="target_v2_unit",
+        name="Run",
+        qualified_name="TThing.Run",
+        kind="method",
+        line=8,
+        column=1,
+    )
+    notify = CpgTarget(
+        target_id="target_v2_notify",
+        source_path="Notify.pas",
+        path="Notify.pas",
+        unit_id="target_v2_notify_unit",
+        name="Notify",
+        qualified_name="Notify",
+        kind="procedure",
+        line=3,
+        column=1,
+    )
+
+    class BatchCandidates(dict[str, tuple[CpgTarget, ...]]):
+        def __init__(self) -> None:
+            super().__init__()
+            self.resolve_many_calls = 0
+
+        def resolve_many(
+            self,
+            names: set[str],
+        ) -> dict[str, tuple[CpgTarget, ...]]:
+            self.resolve_many_calls += 1
+            return {
+                name: (notify,) if name == "notify" else ()
+                for name in names
+            }
+
+        def __getitem__(self, name: str) -> tuple[CpgTarget, ...]:
+            raise AssertionError(f"per-name registry scan requested for {name}")
+
+    candidates = BatchCandidates()
+    graph = build_cpg_subgraph(
+        target=target,
+        syntax_root=root,
+        candidates=candidates,
+        graph="call",
+        direction="out",
+        depth=16,
+    )
+
+    assert candidates.resolve_many_calls == 1
+    assert {edge.label for edge in graph.edges} == {"CALL"}
+
+
 def test_routine_cfg_contains_entry_exit_and_conditional_branches() -> None:
     from delphi_lsp.agent_cpg import CpgTarget
     from delphi_lsp.agent_cpg_builder import build_cpg_subgraph
