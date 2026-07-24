@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
+import contextlib
 from dataclasses import dataclass
 import json
 import os
@@ -147,6 +148,103 @@ def test_cache_daemon_lifecycle_reuses_one_authenticated_process(tmp_path: Path)
             assert metadata_file.parent.stat().st_mode & 0o777 == 0o700
     finally:
         stop_cache(tmp_path)
+
+
+def test_cache_daemon_reports_ready_before_slow_prewarm_finishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from delphi_lsp import agent_cache
+
+    write_source(tmp_path / "Demo.dpr", "program Demo; begin end.")
+    prewarm_started = threading.Event()
+    allow_prewarm = threading.Event()
+    real_prewarm = agent_cache._CacheService.prewarm
+
+    def slow_prewarm(service: agent_cache._CacheService) -> None:
+        prewarm_started.set()
+        assert allow_prewarm.wait(timeout=5)
+        real_prewarm(service)
+
+    monkeypatch.setattr(agent_cache._CacheService, "prewarm", slow_prewarm)
+    daemon = threading.Thread(
+        target=agent_cache.run_cache_daemon,
+        args=(tmp_path,),
+        kwargs={"idle_timeout": 10},
+        daemon=True,
+    )
+    daemon.start()
+
+    try:
+        assert prewarm_started.wait(timeout=2)
+        deadline = time.monotonic() + 2
+        metadata = agent_cache._read_metadata(tmp_path)
+        while metadata is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+            metadata = agent_cache._read_metadata(tmp_path)
+
+        assert metadata is not None
+        status = agent_cache._client_exchange(
+            metadata,
+            {"action": "status", "_startup_probe": True},
+        ).payload
+        assert status["cache_state"] == "warming"
+    finally:
+        allow_prewarm.set()
+        deadline = time.monotonic() + 2
+        metadata = agent_cache._read_metadata(tmp_path)
+        while metadata is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+            metadata = agent_cache._read_metadata(tmp_path)
+        if metadata is not None:
+            with contextlib.suppress(agent_cache.CacheClientError):
+                agent_cache._client_exchange(metadata, {"action": "stop"})
+        daemon.join(timeout=3)
+
+
+def test_query_cache_retries_while_daemon_is_warming(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from delphi_lsp import agent_cache
+
+    metadata = agent_cache.CacheMetadata(
+        2,
+        str(tmp_path.resolve()),
+        os.getpid(),
+        1,
+        "x" * 32,
+        "test",
+        "",
+        512 * 1024**2,
+        0,
+        10,
+        time.time(),
+    )
+    attempts = 0
+
+    def exchange(
+        _metadata: agent_cache.CacheMetadata,
+        _request: dict[str, object],
+    ) -> agent_cache.CacheClientResponse:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise agent_cache.CacheClientError(
+                "cache_warming",
+                "Cache is still warming.",
+            )
+        return agent_cache.CacheClientResponse({"schema": 2})
+
+    monkeypatch.setattr(agent_cache, "_read_metadata", lambda _root: metadata)
+    monkeypatch.setattr(agent_cache, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(agent_cache, "_client_exchange", exchange)
+    monkeypatch.setattr(agent_cache.time, "sleep", lambda _seconds: None)
+
+    response = agent_cache.query_cache(tmp_path, {"action": "open"})
+
+    assert response.payload == {"schema": 2}
+    assert attempts == 2
 
 
 def test_cache_daemon_compacts_handles_bad_clients_and_idles(tmp_path: Path) -> None:

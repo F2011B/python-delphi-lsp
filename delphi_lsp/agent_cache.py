@@ -679,6 +679,7 @@ class _CacheService:
         self.last_budget = BudgetResult(0, 0.0, 0.0, False, False, False)
         self.prewarm_seconds = 0.0
         self.shutdown = threading.Event()
+        self.prewarm_thread: threading.Thread | None = None
 
     def _measure_retained_bytes(self) -> int:
         process_rss = current_process_rss_bytes()
@@ -709,15 +710,38 @@ class _CacheService:
         self.prewarm_seconds = time.monotonic() - started
         self.stats.parallel_fallbacks = self.context.parallel_stats.fallbacks
 
+    def start_prewarm(self) -> None:
+        def run() -> None:
+            try:
+                with self.lock:
+                    self.prewarm()
+            except Exception:
+                self.cache_state = "failed"
+
+        self.prewarm_thread = threading.Thread(
+            target=run,
+            name="delphi-cache-prewarm",
+            daemon=True,
+        )
+        self.prewarm_thread.start()
+
     def request(self, request: dict[str, object]) -> CacheClientResponse:
+        action = request.get("action")
+        if action == "status":
+            warning = "" if request.get("_startup_probe") is True else self._consume_warning()
+            return CacheClientResponse(self.status(), warning)
+        if action == "stop":
+            self.shutdown.set()
+            return CacheClientResponse({"stopping": True})
+        if self.cache_state == "warming":
+            self.last_activity = time.monotonic()
+            raise CacheClientError(
+                "cache_warming",
+                "Cache is still warming. Retry after cache status reports ready.",
+            )
+        if self.cache_state == "failed":
+            raise CacheClientError("cache_failed", "Cache warm-up failed.")
         with self.lock:
-            action = request.get("action")
-            if action == "status":
-                warning = "" if request.get("_startup_probe") is True else self._consume_warning()
-                return CacheClientResponse(self.status(), warning)
-            if action == "stop":
-                self.shutdown.set()
-                return CacheClientResponse({"stopping": True})
             self.last_activity = time.monotonic()
             before = self.last_revision
             was_warm = self.context.navigation_cache_is_warm
@@ -865,7 +889,7 @@ def run_cache_daemon(
     watcher: threading.Thread | None = None
     try:
         service = _CacheService(metadata)
-        service.prewarm()
+        _write_metadata(metadata)
         watcher = threading.Thread(
             target=_watch_workspace,
             args=(service,),
@@ -873,8 +897,14 @@ def run_cache_daemon(
             daemon=True,
         )
         watcher.start()
-        _write_metadata(metadata)
-        while not service.shutdown.is_set() and time.monotonic() - service.last_activity < idle_timeout:
+        service.start_prewarm()
+        while (
+            not service.shutdown.is_set()
+            and (
+                service.cache_state == "warming"
+                or time.monotonic() - service.last_activity < idle_timeout
+            )
+        ):
             try:
                 connection, _ = listener.accept()
             except socket.timeout:
@@ -1011,7 +1041,13 @@ def query_cache(root: str | Path, request: dict[str, object]) -> CacheClientResp
     if not _pid_alive(metadata.pid):
         _remove_metadata_if_owned(metadata)
         raise CacheClientError("cache_not_running", "Cache daemon is not running.")
-    return _client_exchange(metadata, request)
+    while True:
+        try:
+            return _client_exchange(metadata, request)
+        except CacheClientError as error:
+            if error.code != "cache_warming":
+                raise
+            time.sleep(0.05)
 
 
 def cache_status(root: str | Path) -> dict[str, object]:
