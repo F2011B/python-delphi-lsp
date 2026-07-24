@@ -203,6 +203,79 @@ def test_relative_project_file_is_resolved_from_workspace_root(
     assert discovery.problems == []
 
 
+def test_explicit_dproj_resolves_main_source_and_retains_settings(
+    tmp_path: Path,
+) -> None:
+    write_text(tmp_path / "Main.dpr", "program Main; begin end.")
+    write_text(
+        tmp_path / "Main.dproj",
+        """
+        <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+          <PropertyGroup>
+            <MainSource>Main.dpr</MainSource>
+            <DCC_UnitSearchPath>lib</DCC_UnitSearchPath>
+            <DCC_IncludePath>include</DCC_IncludePath>
+            <DCC_Define>DPROJ_SELECTED</DCC_Define>
+          </PropertyGroup>
+        </Project>
+        """,
+    )
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "include").mkdir()
+
+    discovery = discover_delphi_project(
+        tmp_path,
+        project_file=tmp_path / "Main.dproj",
+        scan_workspace_sources=False,
+    )
+
+    assert discovery.project_files == [str((tmp_path / "Main.dpr").resolve())]
+    assert discovery.config_files == [str((tmp_path / "Main.dproj").resolve())]
+    assert discovery.search_paths == [str((tmp_path / "lib").resolve())]
+    assert discovery.include_paths == [str((tmp_path / "include").resolve())]
+    assert discovery.defines == ["DPROJ_SELECTED"]
+    assert discovery.problems == []
+
+
+@pytest.mark.parametrize(
+    ("xml", "message"),
+    [
+        ("<Project></Project>", "MainSource"),
+        (
+            "<Project><PropertyGroup><MainSource>Readme.txt</MainSource>"
+            "</PropertyGroup></Project>",
+            ".dpr or .dpk",
+        ),
+        (
+            "<Project><PropertyGroup><MainSource>Missing.dpr</MainSource>"
+            "</PropertyGroup></Project>",
+            "does not exist",
+        ),
+        ("<Project>", "Could not parse"),
+    ],
+)
+def test_explicit_dproj_reports_invalid_main_source(
+    tmp_path: Path,
+    xml: str,
+    message: str,
+) -> None:
+    dproj = tmp_path / "Broken.dproj"
+    write_text(dproj, xml)
+
+    discovery = discover_delphi_project(
+        tmp_path,
+        project_file=dproj,
+        scan_workspace_sources=False,
+    )
+
+    assert discovery.project_files == []
+    assert discovery.config_files == []
+    assert len(discovery.problems) == 1
+    assert discovery.problems[0].kind == "cant_read_project"
+    assert message in discovery.problems[0].message
+    assert discovery.problems[0].origin == str(dproj.resolve())
+
+
 def test_discovery_records_deterministic_path_and_define_origins(tmp_path: Path) -> None:
     write_text(
         tmp_path / "Main.dpr",

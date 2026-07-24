@@ -639,6 +639,21 @@ def _read_startup_tail(diagnostics: object, *, max_bytes: int = _STARTUP_DIAGNOS
     return b""
 
 
+def _daemon_process_options() -> dict[str, object]:
+    options: dict[str, object] = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+    }
+    if os.name == "nt":
+        options["creationflags"] = (
+            subprocess.CREATE_NO_WINDOW
+            | subprocess.CREATE_NEW_PROCESS_GROUP
+        )
+    else:
+        options["start_new_session"] = True
+    return options
+
+
 class _CacheService:
     def __init__(self, metadata: CacheMetadata) -> None:
         self.metadata = metadata
@@ -921,11 +936,7 @@ def _start_cache_unlocked(
     ]
     if project:
         command.extend(("--project-file", project))
-    options: dict[str, object] = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL}
-    if os.name == "nt":
-        options["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
-        options["start_new_session"] = True
+    options = _daemon_process_options()
     with tempfile.TemporaryFile() as diagnostics:
         options["stderr"] = diagnostics
         process = subprocess.Popen(command, **options)

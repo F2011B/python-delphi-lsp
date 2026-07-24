@@ -151,7 +151,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _add_cache_start_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--root", type=Path, default=Path("."))
-    parser.add_argument("--project-file", type=Path)
+    parser.add_argument(
+        "--project-file",
+        type=Path,
+        help=(
+            "Optionally select a .dproj, .dpr, or .dpk file, relative to "
+            "--root if needed."
+        ),
+    )
     parser.add_argument("--max-memory", type=parse_memory_size, default=DEFAULT_MAX_MEMORY_BYTES)
     parser.add_argument("--workers", type=parse_worker_setting, default=0)
     parser.add_argument("--idle-timeout", type=_positive_integer, default=DEFAULT_IDLE_TIMEOUT)

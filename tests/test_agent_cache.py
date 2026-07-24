@@ -332,6 +332,45 @@ def test_startup_timeout_replaces_the_old_ten_second_deadline(
     assert process.killed is True
 
 
+def test_windows_cache_daemon_starts_without_a_console_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from delphi_lsp import agent_cache
+
+    create_no_window = 0x08000000
+    create_new_process_group = 0x00000200
+    detached_process = 0x00000008
+    monkeypatch.setattr(agent_cache.os, "name", "nt")
+    monkeypatch.setattr(
+        agent_cache.subprocess,
+        "CREATE_NO_WINDOW",
+        create_no_window,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        agent_cache.subprocess,
+        "CREATE_NEW_PROCESS_GROUP",
+        create_new_process_group,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        agent_cache.subprocess,
+        "DETACHED_PROCESS",
+        detached_process,
+        raising=False,
+    )
+
+    options = agent_cache._daemon_process_options()
+
+    assert options["creationflags"] == (
+        create_no_window | create_new_process_group
+    )
+    assert options["creationflags"] & detached_process == 0
+    assert options["stdin"] is agent_cache.subprocess.DEVNULL
+    assert options["stdout"] is agent_cache.subprocess.DEVNULL
+    assert "start_new_session" not in options
+
+
 @pytest.mark.parametrize("startup_timeout", [0, -1, float("nan"), float("inf")])
 def test_start_cache_rejects_non_positive_startup_timeout(
     tmp_path: Path,
@@ -451,6 +490,72 @@ def test_prewarm_only_tolerates_project_selection_error(monkeypatch, tmp_path: P
     monkeypatch.setattr(service.context, "prewarm_navigation", lambda: (_ for _ in ()).throw(AgentProtocolError("invalid_request", "Bad request.")))
     with pytest.raises(AgentProtocolError, match="Bad request"):
         service.prewarm()
+
+
+def test_multiple_projects_prewarm_repository_navigation_cache(
+    tmp_path: Path,
+) -> None:
+    from delphi_lsp.agent_cache import CacheMetadata, _CacheService
+
+    write_source(
+        tmp_path / "A.dpr",
+        "program A; uses AUnit in 'AUnit.pas'; begin end.",
+    )
+    write_source(
+        tmp_path / "B.dpr",
+        "program B; uses BUnit in 'BUnit.pas'; begin end.",
+    )
+    write_source(
+        tmp_path / "AUnit.pas",
+        """
+        unit AUnit;
+        interface
+        type
+          TARepositoryCache = class
+          end;
+        implementation
+        end.
+        """,
+    )
+    write_source(
+        tmp_path / "BUnit.pas",
+        """
+        unit BUnit;
+        interface
+        type
+          TBRepositoryCache = class
+          end;
+        implementation
+        end.
+        """,
+    )
+    metadata = CacheMetadata(
+        2,
+        str(tmp_path.resolve()),
+        os.getpid(),
+        1,
+        "x" * 32,
+        "test",
+        "",
+        512 * 1024**2,
+        0,
+        10,
+        time.time(),
+    )
+    service = _CacheService(metadata)
+
+    service.prewarm()
+
+    assert service.context.navigation_cache_is_warm
+    assert service.cache_state == "warm"
+    assert service.status()["current_bytes"] > 0
+    result = service.request(
+        {"action": "find", "query": "RepositoryCache"}
+    ).payload["result"]
+    assert {item["name"] for item in result} == {
+        "TARepositoryCache",
+        "TBRepositoryCache",
+    }
 
 
 def test_cache_service_uses_constant_time_accounting_instead_of_deep_graph_walk(
@@ -735,6 +840,7 @@ def test_readme_documents_bounded_cache_daemon_commands_and_retention_contract()
         "delphi-lsp-agent cache stop --root PATH",
         "delphi-lsp-agent query --root PATH find TCustomer",
         "delphi-lsp-agent query --root PATH focus TARGET_ID",
+        "delphi-lsp-agent query --root PATH focus --project-id PROJECT_ID",
         "delphi-lsp-agent query --root PATH inspect",
         "delphi-lsp-agent query --root PATH trace TARGET_ID --relation callers",
         "delphi-lsp-agent query --root PATH metrics UNIT_QUERY",
@@ -755,6 +861,8 @@ def test_readme_documents_bounded_cache_daemon_commands_and_retention_contract()
     assert "status JSON" in readme
     assert "Protocol v2 JSON" in readme
     assert "writes warnings to stderr" in readme
+    assert "A `.dproj` is optional" in readme
+    assert "Selecting a project this way also prewarms" in readme
     assert "Eviction is ordered" in readme
     assert "auxiliary caches are evicted first" in readme
     assert "rebuilds the navigation state on demand" in readme

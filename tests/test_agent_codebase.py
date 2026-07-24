@@ -395,6 +395,7 @@ def test_opencode_install_writes_protocol_v2_skill_plugin_and_agent(tmp_path: Pa
     assert "never raw bash/read/glob/grep/cat/shell" in skill_text
     assert "sound_partial" in skill_text
     assert "Call `metrics`" in skill_text
+    assert "multi-project repository is active as one workspace" in skill_text
     assert b"\r\n" not in skill_bytes
 
     agent_text = agent.read_text(encoding="utf-8")

@@ -64,6 +64,18 @@ def test_query_cli_rejects_protocol_limits_before_contacting_cache(
         parser.parse_args(["query", "open", option, value])
 
 
+def test_cache_start_help_documents_optional_dproj(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    parser = agent_cli.build_parser()
+
+    with pytest.raises(SystemExit) as stopped:
+        parser.parse_args(["cache", "start", "--help"])
+
+    assert stopped.value.code == 0
+    assert ".dproj" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("value", [0, -1, True])
 def test_start_cache_rejects_non_positive_idle_timeout(
     tmp_path: Path,

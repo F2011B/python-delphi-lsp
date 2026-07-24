@@ -359,6 +359,33 @@ def test_open_selects_an_explicit_project_from_a_multi_project_workspace(tmp_pat
     assert [unit.name for unit in workspace.units] == ["B"]
 
 
+def test_open_accepts_dproj_as_explicit_project_selection(tmp_path: Path) -> None:
+    write_text(tmp_path / "A.dpr", "program A; begin end.")
+    write_text(tmp_path / "nested" / "B.dpr", "program B; begin end.")
+    write_text(
+        tmp_path / "nested" / "B.dproj",
+        """
+        <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+          <PropertyGroup>
+            <MainSource>B.dpr</MainSource>
+            <DCC_Define>SELECTED_BY_DPROJ</DCC_Define>
+          </PropertyGroup>
+        </Project>
+        """,
+    )
+
+    workspace = AgentWorkspace.open(
+        tmp_path,
+        project_file="nested/B.dproj",
+    )
+
+    assert [project.name for project in workspace.projects] == ["B"]
+    assert workspace.active_project is not None
+    assert workspace.active_project.path == "nested/B.dpr"
+    assert workspace.defines == ("SELECTED_BY_DPROJ",)
+    assert [unit.name for unit in workspace.units] == ["B"]
+
+
 def test_selected_project_exposes_only_reachable_units_with_deterministic_ids(tmp_path: Path) -> None:
     write_text(
         tmp_path / "projects" / "Main.dpr",
@@ -418,7 +445,9 @@ def test_selected_project_exposes_only_reachable_units_with_deterministic_ids(tm
         workspace.units[0].path = "changed.pas"  # type: ignore[misc]
 
 
-def test_multiple_projects_stay_inactive_until_selection_and_remain_isolated(tmp_path: Path) -> None:
+def test_multiple_projects_default_to_repository_workspace_and_remain_selectable(
+    tmp_path: Path,
+) -> None:
     write_text(
         tmp_path / "A.dpr",
         """
@@ -465,10 +494,22 @@ def test_multiple_projects_stay_inactive_until_selection_and_remain_isolated(tmp
     workspace = AgentWorkspace.open(tmp_path)
     project_ids = {project.name: project.project_id for project in workspace.projects}
 
-    assert workspace.active_project is None
-    assert workspace.active_project_id == ""
-    assert workspace.focus == Focus()
-    assert workspace.units == ()
+    assert [project.name for project in workspace.projects] == [
+        "Workspace",
+        "A",
+        "B",
+    ]
+    assert workspace.active_project is not None
+    assert workspace.active_project.name == "Workspace"
+    assert workspace.active_project_id == project_ids["Workspace"]
+    assert workspace.focus == Focus(project_id=project_ids["Workspace"])
+    assert [unit.name for unit in workspace.units] == [
+        "A",
+        "AOnly",
+        "B",
+        "BOnly",
+        "Noise",
+    ]
 
     workspace.select_project(project_ids["A"])
 
@@ -526,8 +567,11 @@ def test_select_project_rejects_an_unknown_project_id(tmp_path: Path) -> None:
 
     assert caught.value.code == "project_not_found"
     assert caught.value.message == "Project not found: missing-project."
-    assert workspace.active_project_id == ""
-    assert workspace.focus == Focus()
+    assert workspace.active_project is not None
+    assert workspace.active_project.name == "Workspace"
+    assert workspace.focus == Focus(
+        project_id=workspace.active_project_id,
+    )
 
 
 def test_reselect_reuses_project_index_until_a_reachable_file_changes(
@@ -1116,6 +1160,12 @@ def test_active_project_problems_exclude_unselected_project_discovery_problems(
 
     workspace = AgentWorkspace.open(tmp_path)
     project_ids = {project.name: project.project_id for project in workspace.projects}
+
+    assert workspace.active_project is not None
+    assert workspace.active_project.name == "Workspace"
+    assert workspace.problems == ()
+
+    workspace.select_project(project_ids["B"])
 
     assert len(workspace.problems) == 1
     assert workspace.problems[0]["origin"] == "B.dproj"

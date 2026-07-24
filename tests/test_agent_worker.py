@@ -607,6 +607,56 @@ def test_worker_project_file_selects_and_opens_that_project(tmp_path: Path) -> N
     assert completed.stderr == b""
 
 
+def test_worker_queries_multi_project_repository_without_project_selection(
+    tmp_path: Path,
+) -> None:
+    _write_source(
+        tmp_path / "A.dpr",
+        "program A; uses AUnit in 'AUnit.pas'; begin end.\n",
+    )
+    _write_source(
+        tmp_path / "B.dpr",
+        "program B; uses BUnit in 'BUnit.pas'; begin end.\n",
+    )
+    _write_source(
+        tmp_path / "AUnit.pas",
+        """
+unit AUnit;
+interface
+type
+  TRepositoryWorkerA = class
+  end;
+implementation
+end.
+""".lstrip(),
+    )
+    _write_source(
+        tmp_path / "BUnit.pas",
+        """
+unit BUnit;
+interface
+type
+  TRepositoryWorkerB = class
+  end;
+implementation
+end.
+""".lstrip(),
+    )
+
+    completed = _worker(
+        tmp_path,
+        b'{"action":"find","query":"RepositoryWorker","max_items":50}\n',
+    )
+    response = _lines(completed)[0]
+
+    assert completed.returncode == 0
+    assert {item["name"] for item in response["result"]} == {
+        "TRepositoryWorkerA",
+        "TRepositoryWorkerB",
+    }
+    assert completed.stderr == b""
+
+
 def test_worker_accepts_crlf_and_unicode_requests(tmp_path: Path) -> None:
     _write_source(tmp_path / "Grüße.pas", "unit Grüße; interface implementation end.\n")
 

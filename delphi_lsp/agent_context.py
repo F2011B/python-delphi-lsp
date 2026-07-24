@@ -853,6 +853,7 @@ class AgentContext:
             )
         elif request.project_id:
             self._focus = Focus(project_id=self._workspace.active_project_id)
+            self._require_registry(revision)
         return self._response(request, revision, [self._focus.to_mapping()])
 
     def _handle_metrics(self, request: AgentRequest, revision: str) -> AgentResponse:
@@ -992,7 +993,8 @@ class AgentContext:
         if not project_id:
             raise AgentProtocolError(
                 "project_required",
-                "Select a project before querying symbols.",
+                "Multiple projects were found. Run 'query open', then select one "
+                "with 'query focus --project-id PROJECT_ID'.",
             )
         return project_id
 

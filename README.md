@@ -2,7 +2,7 @@
 
 `python-delphi-lsp` parses Delphi/Object Pascal, builds semantic and project
 indexes, serves LSP, and provides bounded codebase navigation for agents.
-Version 2.3.1 is authored by Dark Light and supports Windows, macOS, and Linux.
+Version 2.3.2 is authored by Dark Light and supports Windows, macOS, and Linux.
 
 ## Install and quick start
 
@@ -126,7 +126,8 @@ available without returning the complete file as agent context.
 Auto-discovery reads `.dpr`, `.dpk`, `.dproj`, `.cfg`, and `.dof` files.
 Its resolution order is:
 
-1. An explicit project selection takes precedence.
+1. An explicit `.dproj`, `.dpr`, or `.dpk` selection takes precedence. An
+   explicit `.dproj` resolves its `MainSource`.
 2. Otherwise, `.dpr` and `.dpk` candidates are considered.
 3. `MainSource` in a `.dproj` contributes its entry project.
 4. A selected entry associates same-stem `.dproj`, `.cfg`, and `.dof`.
@@ -135,11 +136,13 @@ Its resolution order is:
 6. Direct `Unit in 'path/Unit.pas'` references contribute their parent
    directory to unit search paths.
 
-A single discovered project is selected automatically. With no project entry,
-the server uses a synthetic workspace of supported sources. Scans skip build
-and cache directories such as `build`, `dist`, environments, VCS folders,
-`node_modules`, and tool caches. Missing paths and invalid metadata become
-problems; paths are not guessed.
+A single discovered project is selected automatically. With multiple project
+entries, a synthetic repository workspace containing every supported source is
+selected automatically while the concrete projects remain available. With no
+project entry, the same workspace model is used. Scans skip build and cache
+directories such as `build`, `dist`, environments, VCS folders, `node_modules`,
+and tool caches. Missing paths and invalid metadata become problems; paths are
+not guessed.
 
 ## Agent CLI and Interface/Protocol v2
 
@@ -157,7 +160,7 @@ delphi-lsp-agent view --root PATH [--project-file FILE] --layer LAYER
 delphi-lsp-agent index --root PATH [--project-file FILE] [--out FILE]
                        [--workers auto|N]
 delphi-lsp-agent query --root PATH ACTION [VALUE]
-                      [--project-id FILE] [--detail summary|declaration|members|context|body|implementations]
+                      [--project-id ID] [--detail summary|declaration|members|context|body|implementations]
                       [--relation references|callers|callees|uses|used_by|inherits|implements]
                       [--cursor TEXT] [--max-items INT] [--max-chars INT]
 delphi-lsp-agent skill install [--target PATH] [--force]
@@ -188,6 +191,32 @@ delphi-lsp-agent query --root PATH metrics
 delphi-lsp-agent query --root PATH metrics UNIT_QUERY
 delphi-lsp-agent cache status --root PATH --format json
 ```
+
+The repository root is sufficient even when it contains many projects:
+
+```bash
+delphi-lsp-agent cache start --root PATH
+delphi-lsp-agent query --root PATH find TCustomer
+```
+
+This prewarms one bounded repository navigation index and requires no project
+selection. A `.dproj` is optional. Pass one when its project-specific compiler
+settings and `MainSource` should define the index:
+
+```bash
+delphi-lsp-agent cache start --root PATH --project-file relative/path/Main.dproj
+```
+
+An explicit `.dpr` or `.dpk` remains supported. To switch an already running
+repository cache to one of its concrete project views, list the projects and
+focus one by its returned `project_id`:
+
+```bash
+delphi-lsp-agent query --root PATH open
+delphi-lsp-agent query --root PATH focus --project-id PROJECT_ID
+```
+
+Selecting a project this way also prewarms its navigation cache.
 
 `inspect` uses the currently focused target, so call `focus TARGET_ID` before
 `inspect` unless a previous request already selected it.

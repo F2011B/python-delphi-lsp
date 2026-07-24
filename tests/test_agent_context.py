@@ -103,7 +103,9 @@ def test_registry_unreadable_outline_source_reports_a_sanitized_path(tmp_path: P
     assert str(tmp_path) not in caught.value.message
 
 
-def test_multi_project_symbol_actions_require_selection_and_switch_projects(tmp_path: Path) -> None:
+def test_multi_project_symbol_actions_default_to_repository_and_switch_projects(
+    tmp_path: Path,
+) -> None:
     write_source(
         tmp_path / "A.dpr",
         """
@@ -149,10 +151,16 @@ def test_multi_project_symbol_actions_require_selection_and_switch_projects(tmp_
     context = AgentContext.open(tmp_path)
     project_ids = {project.name: project.project_id for project in context.workspace.projects}
 
-    assert context.workspace.active_project is None
-    with pytest.raises(AgentProtocolError) as caught:
-        context.handle({"action": "find", "query": "Only"})
-    assert caught.value.code == "project_required"
+    assert context.workspace.active_project is not None
+    assert context.workspace.active_project.name == "Workspace"
+    repository_result = context.handle({"action": "find", "query": "Only"})
+    assert {item["name"] for item in result_items(repository_result)} == {
+        "AOnly",
+        "BOnly",
+        "TAOnly",
+        "TBOnly",
+    }
+    assert context.navigation_cache_is_warm
 
     a_result = context.handle({"action": "find", "project_id": project_ids["A"], "query": "TAOnly"})
     a_target = card_named(a_result, "TAOnly")
@@ -2225,7 +2233,7 @@ def test_problems_are_project_scoped_paginated_items(tmp_path: Path) -> None:
     assert result_items(response)[0]["kind"] == "cant_find_file"
 
 
-def test_problems_requires_project_in_unselected_multi_project_workspace_without_registry(
+def test_problems_uses_default_repository_project_without_building_registry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2242,11 +2250,14 @@ def test_problems_requires_project_in_unselected_multi_project_workspace_without
     monkeypatch.setattr(agent_context_module, "_build_registry", forbidden_registry)
 
     choices = context.handle({"action": "open"})
-    assert [item["name"] for item in result_items(choices)] == ["A", "B"]
-    assert all(not item["active"] for item in result_items(choices))
-    with pytest.raises(AgentProtocolError) as required:
-        context.handle({"action": "problems"})
-    assert required.value.code == "project_required"
+    projects = [
+        item for item in result_items(choices)
+        if item["item_type"] == "project"
+    ]
+    assert [item["name"] for item in projects] == ["Workspace", "A", "B"]
+    assert [item["name"] for item in projects if item["active"]] == ["Workspace"]
+    response = context.handle({"action": "problems"})
+    assert response.page.total == 0
     assert build_calls == 0
 
 

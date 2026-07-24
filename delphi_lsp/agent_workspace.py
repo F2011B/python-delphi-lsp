@@ -112,6 +112,21 @@ class AgentWorkspace:
         )
         projects: list[AgentProject] = []
         project_paths: dict[str, Path | None] = {}
+        default_project_id = ""
+        if (
+            resolved_project_file is None
+            and len(discovery.project_files) > 1
+        ):
+            default_project_id = make_target_id("project", "", "workspace")
+            projects.append(
+                AgentProject(
+                    project_id=default_project_id,
+                    name="Workspace",
+                    path=".",
+                    kind="workspace",
+                )
+            )
+            project_paths[default_project_id] = None
         if discovery.project_files:
             for value in discovery.project_files:
                 path = Path(value)
@@ -140,7 +155,9 @@ class AgentWorkspace:
             project_paths[project_id] = None
 
         workspace = cls(root_path, discovery, tuple(projects), project_paths)
-        if len(projects) == 1:
+        if default_project_id:
+            workspace.select_project(default_project_id)
+        elif len(projects) == 1:
             workspace.select_project(projects[0].project_id)
         return workspace
 
@@ -305,7 +322,11 @@ class AgentWorkspace:
         project_path = self._project_paths[project_id]
         cached = self._project_cache.get(project_id)
         if project_path is None:
-            discovery = self._discovery if cached is None else discover_workspace_sources(self._root)
+            discovery = (
+                self._discovery
+                if cached is None and self._discovery.source_files
+                else discover_workspace_sources(self._root)
+            )
         else:
             discovery = discover_delphi_project(
                 self._root,

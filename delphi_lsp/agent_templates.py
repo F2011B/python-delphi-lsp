@@ -220,7 +220,7 @@ Inspect Delphi/Object Pascal only through `delphi_codebase`; never raw bash/read
 
 ## Protocol v2 workflow
 
-1. Call `open`. If the requested project is not active, select it with `focus(project_id)`.
+1. Call `open`. A multi-project repository is active as one workspace by default; select a concrete project with `focus(project_id)` only when project-specific compiler context is needed.
 2. Call `find` with a narrow query, then `focus(target_id)` for the returned target.
 3. Inspect focused details in this order as needed: `summary`, `declaration`, `members`, `context`, `body`, `implementations`.
 4. Trace relations with `references`, `callers`, `callees`, `uses`, `used_by`, `inherits`, or `implements`.
