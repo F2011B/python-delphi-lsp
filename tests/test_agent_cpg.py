@@ -2,6 +2,29 @@ from __future__ import annotations
 
 import json
 
+from delphi_lsp.parser import DelphiParser
+
+
+CPG_SOURCE = """unit UnitA;
+interface
+type
+  TThing = class
+    procedure Run;
+  end;
+implementation
+procedure TThing.Run;
+var
+  Value: Integer;
+begin
+  Value := 1;
+  if Value > 0 then
+    Notify(Value)
+  else
+    Value := 2;
+end;
+end.
+"""
+
 
 def test_cpg_nodes_and_edges_have_stable_sanitized_identifiers() -> None:
     from delphi_lsp.agent_cpg import CpgEdge, CpgNode
@@ -147,3 +170,88 @@ def test_cpg_subgraph_enforces_deterministic_record_limit() -> None:
 
     assert len(graph.nodes) == 3
     assert graph.truncated is True
+
+
+def test_builds_target_local_ast_without_retaining_source_text() -> None:
+    from delphi_lsp.agent_cpg import CpgTarget
+    from delphi_lsp.agent_cpg_builder import build_cpg_subgraph
+
+    root = DelphiParser().parse(
+        CPG_SOURCE,
+        "UnitA.pas",
+        build_semantic=False,
+    ).root
+    target = CpgTarget(
+        target_id="target_v2_run",
+        source_path="UnitA.pas",
+        path="UnitA.pas",
+        unit_id="target_v2_unit",
+        name="Run",
+        qualified_name="TThing.Run",
+        kind="method",
+        line=8,
+        column=1,
+    )
+
+    graph = build_cpg_subgraph(
+        target=target,
+        syntax_root=root,
+        candidates={},
+        graph="ast",
+        direction="out",
+        depth=16,
+    )
+
+    labels = {node.label for node in graph.nodes}
+    assert {"ROUTINE", "STATEMENT", "CONTROL", "CALL", "IDENTIFIER"} <= labels
+    assert {edge.label for edge in graph.edges} == {"AST"}
+    assert graph.root_node_id in {node.node_id for node in graph.nodes}
+    assert all(
+        dict(node.properties).get("path") == "UnitA.pas"
+        for node in graph.nodes
+    )
+    serialized = json.dumps(graph.to_items())
+    assert "Notify(Value)" not in serialized
+    assert "Value := 1" not in serialized
+
+
+def test_target_local_ast_is_deterministic_and_unit_scoped() -> None:
+    from delphi_lsp.agent_cpg import CpgTarget
+    from delphi_lsp.agent_cpg_builder import build_cpg_subgraph
+
+    root = DelphiParser().parse(
+        CPG_SOURCE,
+        "UnitA.pas",
+        build_semantic=False,
+    ).root
+    unit = CpgTarget(
+        target_id="target_v2_unit",
+        source_path="UnitA.pas",
+        path="UnitA.pas",
+        unit_id="target_v2_unit",
+        name="UnitA",
+        qualified_name="UnitA",
+        kind="unit",
+        line=1,
+        column=1,
+    )
+
+    first = build_cpg_subgraph(
+        target=unit,
+        syntax_root=root,
+        candidates={},
+        graph="ast",
+        direction="out",
+        depth=16,
+    )
+    second = build_cpg_subgraph(
+        target=unit,
+        syntax_root=root,
+        candidates={},
+        graph="ast",
+        direction="out",
+        depth=16,
+    )
+
+    assert first == second
+    assert len(first.nodes) > 10

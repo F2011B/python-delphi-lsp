@@ -19,6 +19,25 @@ _GRAPH_EDGE_LABELS = {
 }
 
 
+@dataclass(frozen=True, slots=True)
+class CpgTarget:
+    target_id: str
+    source_path: str
+    path: str
+    unit_id: str
+    name: str
+    qualified_name: str
+    kind: str
+    line: int
+    column: int
+    end_line: int = 0
+    end_column: int = 0
+    visibility: str = "unknown"
+    type_name: str = ""
+    owner: str = ""
+    parent_target_id: str = ""
+
+
 def _normalized_identity(value: object) -> object:
     if isinstance(value, str):
         normalized = unicodedata.normalize("NFC", value).replace("\\", "/")
@@ -322,4 +341,10 @@ class CpgSubgraph:
         )
 
 
-__all__ = ["CpgEdge", "CpgNode", "CpgProblem", "CpgSubgraph"]
+__all__ = [
+    "CpgEdge",
+    "CpgNode",
+    "CpgProblem",
+    "CpgSubgraph",
+    "CpgTarget",
+]
