@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from delphi_lsp.parser import DelphiParser
 from delphi_lsp.consts import AttributeName, SyntaxNodeType
 from delphi_lsp.nodes import SyntaxNode
@@ -215,6 +217,49 @@ def test_builds_target_local_ast_without_retaining_source_text() -> None:
     serialized = json.dumps(graph.to_items())
     assert "Notify(Value)" not in serialized
     assert "Value := 1" not in serialized
+
+
+def test_ast_only_query_skips_control_data_and_call_graph_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from delphi_lsp.agent_cpg import CpgTarget
+    from delphi_lsp import agent_cpg_builder
+
+    root = DelphiParser().parse(
+        CPG_SOURCE,
+        "UnitA.pas",
+        build_semantic=False,
+    ).root
+    target = CpgTarget(
+        target_id="target_v2_run",
+        source_path="UnitA.pas",
+        path="UnitA.pas",
+        unit_id="target_v2_unit",
+        name="Run",
+        qualified_name="TThing.Run",
+        kind="method",
+        line=8,
+        column=1,
+    )
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("unrequested graph family was built")
+
+    monkeypatch.setattr(agent_cpg_builder, "_build_cfg", unexpected)
+    monkeypatch.setattr(agent_cpg_builder, "_build_data_flow", unexpected)
+    monkeypatch.setattr(agent_cpg_builder, "_build_calls", unexpected)
+
+    graph = agent_cpg_builder.build_cpg_subgraph(
+        target=target,
+        syntax_root=root,
+        candidates={},
+        graph="ast",
+        direction="out",
+        depth=16,
+    )
+
+    assert graph.edges
+    assert {edge.label for edge in graph.edges} == {"AST"}
 
 
 def test_target_local_ast_is_deterministic_and_unit_scoped() -> None:

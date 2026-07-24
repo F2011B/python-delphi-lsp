@@ -109,31 +109,35 @@ def build_cpg_subgraph(
                 )
             )
         if target.kind in _ROUTINE_KINDS:
-            cfg_nodes, cfg_edges = _build_cfg(
-                target,
-                selected,
-                syntax_nodes,
-            )
-            nodes.extend(cfg_nodes)
-            edges.extend(cfg_edges)
-            edges.extend(
-                _build_data_flow(
+            cfg_edges: list[CpgEdge] = []
+            if graph in {"cfg", "dfg", "full"}:
+                cfg_nodes, cfg_edges = _build_cfg(
+                    target,
                     selected,
                     syntax_nodes,
-                    cfg_edges,
+                )
+                nodes.extend(cfg_nodes)
+                edges.extend(cfg_edges)
+            if graph in {"dfg", "full"}:
+                edges.extend(
+                    _build_data_flow(
+                        selected,
+                        syntax_nodes,
+                        cfg_edges,
+                        root_node,
+                    )
+                )
+            if graph in {"call", "full"}:
+                call_nodes, call_edges, unresolved_calls = _build_calls(
+                    target,
+                    selected,
+                    syntax_nodes,
+                    candidates,
                     root_node,
                 )
-            )
-            call_nodes, call_edges, unresolved_calls = _build_calls(
-                target,
-                selected,
-                syntax_nodes,
-                candidates,
-                root_node,
-            )
-            nodes.extend(call_nodes)
-            edges.extend(call_edges)
-            unresolved += unresolved_calls
+                nodes.extend(call_nodes)
+                edges.extend(call_edges)
+                unresolved += unresolved_calls
     complete = CpgSubgraph.create(
         target_id=target.target_id,
         graph="full",
