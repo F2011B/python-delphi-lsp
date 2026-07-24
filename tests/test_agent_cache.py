@@ -1016,7 +1016,7 @@ def test_readme_documents_bounded_cache_daemon_commands_and_retention_contract()
     assert "cache lifecycle JSON" in readme
     assert "stop status JSON" in readme
     assert "status JSON" in readme
-    assert "Protocol v2 JSON" in readme
+    assert "Protocol v3 JSON" in readme
     assert "writes warnings to stderr" in readme
     assert "A `.dproj` is optional" in readme
     assert "Selecting a project this way also prewarms" in readme

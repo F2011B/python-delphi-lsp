@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark Protocol v2 actions against a verified external GitHub corpus."""
+"""Benchmark Protocol v3 navigation actions against a verified GitHub corpus."""
 
 from __future__ import annotations
 

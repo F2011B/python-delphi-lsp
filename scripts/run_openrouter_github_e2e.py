@@ -413,7 +413,7 @@ def build_probe_command(args: argparse.Namespace, raw_jsonl: Path) -> list[str]:
         "--require-tool",
         "skill:python-delphi-lsp",
         "--require-tool",
-        'delphi_codebase.open:"schema":2',
+        'delphi_codebase.open:"schema":3',
         "--require-tool",
         f"delphi_codebase.find:{args.target_name}",
         "--require-tool",

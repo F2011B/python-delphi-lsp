@@ -104,7 +104,7 @@ def _good_events(target_id: str = "target_v2_123") -> list[dict[str, object]]:
         _tool_event(
             "delphi_codebase",
             {"action": "open", "max_items": 20},
-            json.dumps({"schema": 2, "result": [{"path": path}]}),
+            json.dumps({"schema": 3, "result": [{"path": path}]}),
             start=20,
         ),
         _tool_event(
@@ -112,7 +112,7 @@ def _good_events(target_id: str = "target_v2_123") -> list[dict[str, object]]:
             {"action": "find", "query": "TSynLogInfo", "max_items": 10},
             json.dumps(
                 {
-                    "schema": 2,
+                    "schema": 3,
                     "result": [
                         {
                             "name": "TSynLogInfo",
@@ -128,7 +128,7 @@ def _good_events(target_id: str = "target_v2_123") -> list[dict[str, object]]:
         _tool_event(
             "delphi_codebase",
             {"action": "focus", "target_id": target_id},
-            json.dumps({"schema": 2, "focus": {"target_id": target_id}}),
+            json.dumps({"schema": 3, "focus": {"target_id": target_id}}),
             start=40,
         ),
         _tool_event(
@@ -136,7 +136,7 @@ def _good_events(target_id: str = "target_v2_123") -> list[dict[str, object]]:
             {"action": "inspect", "target_id": target_id, "detail": "declaration"},
             json.dumps(
                 {
-                    "schema": 2,
+                    "schema": 3,
                     "result": [
                         {
                             "path": path,
@@ -304,7 +304,7 @@ def test_defaults_and_probe_command_pin_model_agent_and_strict_evidence(tmp_path
     requirements = [command[index + 1] for index, item in enumerate(command) if item == "--require-tool"]
     assert requirements == [
         "skill:python-delphi-lsp",
-        'delphi_codebase.open:"schema":2',
+        'delphi_codebase.open:"schema":3',
         "delphi_codebase.find:TSynLogInfo",
         "delphi_codebase.focus:target_id",
         "delphi_codebase.inspect:TSynLogInfo",

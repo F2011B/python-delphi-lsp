@@ -25,7 +25,7 @@ def test_readme_documents_opencode_history_and_query_ergonomics() -> None:
     assert "2.0.0" in readme
     assert "persistent session/root worker" in readme
     assert "OpenCode worker stays separate from CLI daemon" in readme
-    assert "current plugin behavior is unchanged" in readme
+    assert "Protocol v3 adds CPG" in readme
     readme_contracts = [
         "delphi-lsp-agent query --root PATH find TCustomer",
         "delphi-lsp-agent query --root PATH focus TARGET_ID",
