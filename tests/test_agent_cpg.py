@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 
 from delphi_lsp.parser import DelphiParser
+from delphi_lsp.consts import AttributeName, SyntaxNodeType
+from delphi_lsp.nodes import SyntaxNode
 
 
 CPG_SOURCE = """unit UnitA;
@@ -255,3 +257,104 @@ def test_target_local_ast_is_deterministic_and_unit_scoped() -> None:
 
     assert first == second
     assert len(first.nodes) > 10
+
+
+def test_routine_cfg_contains_entry_exit_and_conditional_branches() -> None:
+    from delphi_lsp.agent_cpg import CpgTarget
+    from delphi_lsp.agent_cpg_builder import build_cpg_subgraph
+
+    root = DelphiParser().parse(
+        CPG_SOURCE,
+        "UnitA.pas",
+        build_semantic=False,
+    ).root
+    target = CpgTarget(
+        target_id="target_v2_run",
+        source_path="UnitA.pas",
+        path="UnitA.pas",
+        unit_id="target_v2_unit",
+        name="Run",
+        qualified_name="TThing.Run",
+        kind="method",
+        line=8,
+        column=1,
+    )
+
+    graph = build_cpg_subgraph(
+        target=target,
+        syntax_root=root,
+        candidates={},
+        graph="cfg",
+        direction="out",
+        depth=16,
+    )
+
+    labels = {node.label for node in graph.nodes}
+    assert {"ROUTINE", "ENTRY", "EXIT", "CONTROL", "STATEMENT", "CALL"} <= labels
+    assert graph.edges
+    assert {edge.label for edge in graph.edges} == {"CFG"}
+    node_ids = {node.node_id for node in graph.nodes}
+    assert all(
+        edge.source in node_ids and edge.target in node_ids
+        for edge in graph.edges
+    )
+    control_ids = {
+        node.node_id
+        for node in graph.nodes
+        if node.label == "CONTROL"
+        and dict(node.properties).get("syntax_type") == "ntIf"
+    }
+    assert control_ids
+    outgoing = [
+        edge
+        for edge in graph.edges
+        if edge.source in control_ids
+    ]
+    assert len(outgoing) >= 2
+
+
+def test_loop_cfg_has_a_back_edge_and_a_fallthrough() -> None:
+    from delphi_lsp.agent_cpg import CpgTarget
+    from delphi_lsp.agent_cpg_builder import build_cpg_subgraph
+
+    root = SyntaxNode(SyntaxNodeType.ntUnit)
+    root.set_attribute(AttributeName.anName, "Flow")
+    method = root.add_child(SyntaxNodeType.ntMethod)
+    method.set_attribute(AttributeName.anName, "Run")
+    method.line = 2
+    statements = method.add_child(SyntaxNodeType.ntStatements)
+    loop = statements.add_child(SyntaxNodeType.ntWhile)
+    loop.line = 4
+    condition = loop.add_child(SyntaxNodeType.ntIdentifier)
+    condition.set_attribute(AttributeName.anName, "Ready")
+    body = loop.add_child(SyntaxNodeType.ntAssign)
+    body.line = 5
+    after = statements.add_child(SyntaxNodeType.ntAssign)
+    after.line = 6
+    target = CpgTarget(
+        target_id="target_v2_run",
+        source_path="Flow.pas",
+        path="Flow.pas",
+        unit_id="target_v2_unit",
+        name="Run",
+        qualified_name="Run",
+        kind="procedure",
+        line=2,
+        column=1,
+    )
+
+    graph = build_cpg_subgraph(
+        target=target,
+        syntax_root=root,
+        candidates={},
+        graph="cfg",
+        direction="out",
+        depth=16,
+    )
+
+    edge_kinds = {
+        dict(edge.properties).get("kind")
+        for edge in graph.edges
+    }
+    assert "loop_back" in edge_kinds
+    assert "false" in edge_kinds

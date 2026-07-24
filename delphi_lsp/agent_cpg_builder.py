@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 
 from .agent_cpg import CpgEdge, CpgNode, CpgProblem, CpgSubgraph, CpgTarget
 from .consts import AttributeName, SyntaxNodeType
@@ -64,6 +65,7 @@ def build_cpg_subgraph(
     nodes = [root_node]
     edges: list[CpgEdge] = []
     problems: list[CpgProblem] = []
+    syntax_nodes: dict[int, CpgNode] = {}
     if selected is None:
         problems.append(
             CpgProblem(
@@ -75,6 +77,7 @@ def build_cpg_subgraph(
             )
         )
     else:
+        syntax_nodes[id(selected)] = root_node
         stack: list[tuple[SyntaxNode, tuple[int, ...], str]] = [
             (child, (index,), root_node.node_id)
             for index, child in reversed(tuple(enumerate(selected.child_nodes)))
@@ -82,6 +85,7 @@ def build_cpg_subgraph(
         while stack and len(nodes) + len(edges) < record_limit:
             current, syntax_path, parent_id = stack.pop()
             node = _syntax_node(target, current, syntax_path)
+            syntax_nodes[id(current)] = node
             nodes.append(node)
             edges.append(
                 CpgEdge.create(
@@ -104,6 +108,14 @@ def build_cpg_subgraph(
                     column=target.column,
                 )
             )
+        if target.kind in _ROUTINE_KINDS:
+            cfg_nodes, cfg_edges = _build_cfg(
+                target,
+                selected,
+                syntax_nodes,
+            )
+            nodes.extend(cfg_nodes)
+            edges.extend(cfg_edges)
     complete = CpgSubgraph.create(
         target_id=target.target_id,
         graph="full",
@@ -241,6 +253,209 @@ def _syntax_label(typ: SyntaxNodeType) -> str:
     if typ in _SYMBOL_TYPES:
         return "SYMBOL"
     return "EXPRESSION"
+
+
+@dataclass(frozen=True, slots=True)
+class _CfgExit:
+    node_id: str
+    kind: str = "next"
+
+
+@dataclass(frozen=True, slots=True)
+class _CfgFragment:
+    entries: tuple[str, ...]
+    exits: tuple[_CfgExit, ...]
+
+
+def _build_cfg(
+    target: CpgTarget,
+    selected: SyntaxNode,
+    syntax_nodes: Mapping[int, CpgNode],
+) -> tuple[list[CpgNode], list[CpgEdge]]:
+    entry = CpgNode.create(
+        label="ENTRY",
+        identity=(target.target_id, "entry"),
+        properties={
+            "path": target.path,
+            "line": target.line,
+            "column": target.column,
+        },
+    )
+    exit_node = CpgNode.create(
+        label="EXIT",
+        identity=(target.target_id, "exit"),
+        properties={
+            "path": target.path,
+            "line": target.end_line or target.line,
+            "column": target.end_column or target.column,
+        },
+    )
+    edges: list[CpgEdge] = []
+    root_node = syntax_nodes[id(selected)]
+    _cfg_edge(edges, root_node.node_id, entry.node_id, "entry")
+    statements = _first_descendant(selected, SyntaxNodeType.ntStatements)
+    if statements is None:
+        _cfg_edge(edges, entry.node_id, exit_node.node_id, "empty")
+        return [entry, exit_node], edges
+    fragment = _cfg_fragment(statements, syntax_nodes, edges)
+    if not fragment.entries:
+        _cfg_edge(edges, entry.node_id, exit_node.node_id, "empty")
+    else:
+        for fragment_entry in fragment.entries:
+            _cfg_edge(edges, entry.node_id, fragment_entry, "next")
+        for pending in fragment.exits:
+            _cfg_edge(edges, pending.node_id, exit_node.node_id, pending.kind)
+    return [entry, exit_node], edges
+
+
+def _cfg_fragment(
+    syntax: SyntaxNode,
+    syntax_nodes: Mapping[int, CpgNode],
+    edges: list[CpgEdge],
+) -> _CfgFragment:
+    if syntax.typ == SyntaxNodeType.ntStatements:
+        fragments = [
+            _cfg_fragment(child, syntax_nodes, edges)
+            for child in syntax.child_nodes
+            if _is_executable(child)
+        ]
+        fragments = [fragment for fragment in fragments if fragment.entries]
+        if not fragments:
+            return _CfgFragment((), ())
+        for left, right in zip(fragments, fragments[1:]):
+            for pending in left.exits:
+                for entry in right.entries:
+                    _cfg_edge(edges, pending.node_id, entry, pending.kind)
+        return _CfgFragment(fragments[0].entries, fragments[-1].exits)
+
+    node = syntax_nodes.get(id(syntax))
+    if node is None:
+        return _CfgFragment((), ())
+
+    if syntax.typ == SyntaxNodeType.ntIf:
+        branches = _branch_nodes(syntax)
+        if not branches:
+            return _CfgFragment((node.node_id,), (_CfgExit(node.node_id, "false"),))
+        then_fragment = _cfg_fragment(branches[0], syntax_nodes, edges)
+        if then_fragment.entries:
+            for entry in then_fragment.entries:
+                _cfg_edge(edges, node.node_id, entry, "true")
+        exits = list(then_fragment.exits)
+        if len(branches) > 1:
+            else_fragment = _cfg_fragment(branches[1], syntax_nodes, edges)
+            for entry in else_fragment.entries:
+                _cfg_edge(edges, node.node_id, entry, "false")
+            exits.extend(else_fragment.exits)
+        else:
+            exits.append(_CfgExit(node.node_id, "false"))
+        return _CfgFragment((node.node_id,), tuple(exits))
+
+    if syntax.typ in {SyntaxNodeType.ntWhile, SyntaxNodeType.ntFor}:
+        branches = _branch_nodes(syntax)
+        body = branches[-1] if branches else None
+        if body is not None:
+            body_fragment = _cfg_fragment(body, syntax_nodes, edges)
+            for entry in body_fragment.entries:
+                _cfg_edge(edges, node.node_id, entry, "true")
+            for pending in body_fragment.exits:
+                _cfg_edge(edges, pending.node_id, node.node_id, "loop_back")
+        return _CfgFragment(
+            (node.node_id,),
+            (_CfgExit(node.node_id, "false"),),
+        )
+
+    if syntax.typ == SyntaxNodeType.ntRepeat:
+        branches = _branch_nodes(syntax)
+        if not branches:
+            return _CfgFragment((node.node_id,), (_CfgExit(node.node_id, "true"),))
+        body_fragments = [
+            _cfg_fragment(branch, syntax_nodes, edges)
+            for branch in branches
+        ]
+        body_fragments = [fragment for fragment in body_fragments if fragment.entries]
+        if not body_fragments:
+            return _CfgFragment((node.node_id,), (_CfgExit(node.node_id, "true"),))
+        for left, right in zip(body_fragments, body_fragments[1:]):
+            for pending in left.exits:
+                for entry in right.entries:
+                    _cfg_edge(edges, pending.node_id, entry, pending.kind)
+        for pending in body_fragments[-1].exits:
+            _cfg_edge(edges, pending.node_id, node.node_id, "loop_test")
+        for entry in body_fragments[0].entries:
+            _cfg_edge(edges, node.node_id, entry, "loop_back")
+        return _CfgFragment(
+            body_fragments[0].entries,
+            (_CfgExit(node.node_id, "true"),),
+        )
+
+    if syntax.typ in {
+        SyntaxNodeType.ntCase,
+        SyntaxNodeType.ntTry,
+        SyntaxNodeType.ntExcept,
+        SyntaxNodeType.ntFinally,
+    }:
+        branches = _branch_nodes(syntax)
+        exits: list[_CfgExit] = []
+        for branch in branches:
+            fragment = _cfg_fragment(branch, syntax_nodes, edges)
+            for entry in fragment.entries:
+                _cfg_edge(edges, node.node_id, entry, "branch")
+            exits.extend(fragment.exits)
+        if not exits:
+            exits.append(_CfgExit(node.node_id))
+        return _CfgFragment((node.node_id,), tuple(exits))
+
+    if syntax.typ in {SyntaxNodeType.ntRaise, SyntaxNodeType.ntGoto}:
+        return _CfgFragment((node.node_id,), (_CfgExit(node.node_id, "terminal"),))
+
+    return _CfgFragment((node.node_id,), (_CfgExit(node.node_id),))
+
+
+def _branch_nodes(syntax: SyntaxNode) -> list[SyntaxNode]:
+    result: list[SyntaxNode] = []
+    for child in syntax.child_nodes:
+        if child.typ == SyntaxNodeType.ntElse:
+            result.extend(candidate for candidate in child.child_nodes if _is_executable(candidate))
+        elif _is_executable(child):
+            result.append(child)
+    return result
+
+
+def _is_executable(syntax: SyntaxNode) -> bool:
+    return (
+        syntax.typ in _STATEMENT_TYPES
+        or syntax.typ in _CONTROL_TYPES
+        or syntax.typ == SyntaxNodeType.ntCall
+    )
+
+
+def _first_descendant(
+    root: SyntaxNode,
+    typ: SyntaxNodeType,
+) -> SyntaxNode | None:
+    stack = list(reversed(root.child_nodes))
+    while stack:
+        current = stack.pop()
+        if current.typ == typ:
+            return current
+        stack.extend(reversed(current.child_nodes))
+    return None
+
+
+def _cfg_edge(
+    edges: list[CpgEdge],
+    source: str,
+    target: str,
+    kind: str,
+) -> None:
+    edges.append(
+        CpgEdge.create(
+            label="CFG",
+            source=source,
+            target=target,
+            properties={"kind": kind},
+        )
+    )
 
 
 __all__ = ["build_cpg_subgraph"]
