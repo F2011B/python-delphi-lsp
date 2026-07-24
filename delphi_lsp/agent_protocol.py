@@ -10,7 +10,7 @@ import posixpath
 import unicodedata
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SUPPORTED_ACTIONS = (
     'open',
@@ -20,6 +20,7 @@ SUPPORTED_ACTIONS = (
     'focus',
     'problems',
     'metrics',
+    'cpg',
 )
 
 SUPPORTED_DETAILS = (
@@ -41,6 +42,20 @@ SUPPORTED_RELATIONS = (
     'implements',
 )
 
+SUPPORTED_GRAPHS = (
+    'ast',
+    'cfg',
+    'dfg',
+    'call',
+    'full',
+)
+
+SUPPORTED_DIRECTIONS = (
+    'out',
+    'in',
+    'both',
+)
+
 _REQUEST_FIELDS = frozenset(
     {
         'action',
@@ -52,6 +67,9 @@ _REQUEST_FIELDS = frozenset(
         'cursor',
         'max_items',
         'max_chars',
+        'graph',
+        'direction',
+        'depth',
     }
 )
 
@@ -74,6 +92,9 @@ class AgentRequest:
     cursor: str = ''
     max_items: int = 12
     max_chars: int = 12000
+    graph: str = 'full'
+    direction: str = 'out'
+    depth: int = 4
 
     @classmethod
     def from_mapping(cls, mapping: Mapping[str, object]) -> AgentRequest:
@@ -98,9 +119,21 @@ class AgentRequest:
             'cursor': mapping.get('cursor', ''),
             'max_items': mapping.get('max_items', 12),
             'max_chars': mapping.get('max_chars', 12000),
+            'graph': mapping.get('graph', 'full'),
+            'direction': mapping.get('direction', 'out'),
+            'depth': mapping.get('depth', 4),
         }
 
-        for field_name in ('action', 'query', 'target_id', 'project_id', 'detail', 'cursor'):
+        for field_name in (
+            'action',
+            'query',
+            'target_id',
+            'project_id',
+            'detail',
+            'cursor',
+            'graph',
+            'direction',
+        ):
             if not isinstance(values[field_name], str):
                 raise AgentProtocolError('invalid_type', f"Field '{field_name}' must be a string.")
 
@@ -108,22 +141,32 @@ class AgentRequest:
         if relation is not None and not isinstance(relation, str):
             raise AgentProtocolError('invalid_type', "Field 'relation' must be a string or null.")
 
-        for field_name in ('max_items', 'max_chars'):
+        for field_name in ('max_items', 'max_chars', 'depth'):
             value = values[field_name]
             if isinstance(value, bool) or not isinstance(value, int):
                 raise AgentProtocolError('invalid_type', f"Field '{field_name}' must be an integer.")
 
         action = values['action']
         detail = values['detail']
+        graph = values['graph']
+        direction = values['direction']
         if action not in SUPPORTED_ACTIONS:
             raise AgentProtocolError('invalid_action', f'Unsupported action value: {action!r}.')
         if detail not in SUPPORTED_DETAILS:
             raise AgentProtocolError('invalid_detail', f'Unsupported detail value: {detail!r}.')
         if relation is not None and relation not in SUPPORTED_RELATIONS:
             raise AgentProtocolError('invalid_relation', f'Unsupported relation value: {relation!r}.')
+        if graph not in SUPPORTED_GRAPHS:
+            raise AgentProtocolError('invalid_graph', f'Unsupported graph value: {graph!r}.')
+        if direction not in SUPPORTED_DIRECTIONS:
+            raise AgentProtocolError(
+                'invalid_direction',
+                f'Unsupported direction value: {direction!r}.',
+            )
 
         max_items = values['max_items']
         max_chars = values['max_chars']
+        depth = values['depth']
         if not 1 <= max_items <= 50:
             raise AgentProtocolError(
                 'max_items_out_of_range',
@@ -133,6 +176,11 @@ class AgentRequest:
             raise AgentProtocolError(
                 'max_chars_out_of_range',
                 "Field 'max_chars' must be between 256 and 40000.",
+            )
+        if not 1 <= depth <= 16:
+            raise AgentProtocolError(
+                'depth_out_of_range',
+                "Field 'depth' must be between 1 and 16.",
             )
 
         return cls(
@@ -145,6 +193,9 @@ class AgentRequest:
             cursor=values['cursor'],
             max_items=max_items,
             max_chars=max_chars,
+            graph=graph,
+            direction=direction,
+            depth=depth,
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -158,6 +209,9 @@ class AgentRequest:
             'cursor': self.cursor,
             'max_items': self.max_items,
             'max_chars': self.max_chars,
+            'graph': self.graph,
+            'direction': self.direction,
+            'depth': self.depth,
         }
 
 

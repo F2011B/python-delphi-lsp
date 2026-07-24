@@ -48,7 +48,7 @@ class TrackingSequence(Sequence[object]):
 def test_schema_and_supported_values_are_versioned_and_deterministic() -> None:
     protocol = _protocol()
 
-    assert protocol.SCHEMA_VERSION == 2
+    assert protocol.SCHEMA_VERSION == 3
     assert type(protocol.SCHEMA_VERSION) is int
     assert protocol.SUPPORTED_ACTIONS == (
         'open',
@@ -58,6 +58,7 @@ def test_schema_and_supported_values_are_versioned_and_deterministic() -> None:
         'focus',
         'problems',
         'metrics',
+        'cpg',
     )
 
 
@@ -101,6 +102,9 @@ def test_request_defaults_and_serializes_all_protocol_fields() -> None:
     assert request.cursor == ''
     assert request.max_items == 12
     assert request.max_chars == 12000
+    assert request.graph == 'full'
+    assert request.direction == 'out'
+    assert request.depth == 4
     assert request.to_mapping() == {
         'action': 'open',
         'query': '',
@@ -111,6 +115,9 @@ def test_request_defaults_and_serializes_all_protocol_fields() -> None:
         'cursor': '',
         'max_items': 12,
         'max_chars': 12000,
+        'graph': 'full',
+        'direction': 'out',
+        'depth': 4,
     }
 
 
@@ -126,6 +133,9 @@ def test_request_accepts_every_declared_field() -> None:
         'cursor': 'cursor-1',
         'max_items': 50,
         'max_chars': 40000,
+        'graph': 'cfg',
+        'direction': 'both',
+        'depth': 16,
     }
 
     assert protocol.AgentRequest.from_mapping(mapping).to_mapping() == mapping
@@ -158,6 +168,8 @@ def test_request_requires_action_with_stable_error() -> None:
         ('action', 'jump', 'invalid_action', "Unsupported action value: 'jump'."),
         ('detail', 'full', 'invalid_detail', "Unsupported detail value: 'full'."),
         ('relation', 'parents', 'invalid_relation', "Unsupported relation value: 'parents'."),
+        ('graph', 'pdg', 'invalid_graph', "Unsupported graph value: 'pdg'."),
+        ('direction', 'sideways', 'invalid_direction', "Unsupported direction value: 'sideways'."),
     ],
 )
 def test_request_rejects_invalid_enum_values(
@@ -176,7 +188,10 @@ def test_request_rejects_invalid_enum_values(
     assert caught.value.message == message
 
 
-@pytest.mark.parametrize('field', ['action', 'query', 'target_id', 'project_id', 'detail', 'cursor'])
+@pytest.mark.parametrize(
+    'field',
+    ['action', 'query', 'target_id', 'project_id', 'detail', 'cursor', 'graph', 'direction'],
+)
 def test_request_rejects_non_string_string_fields(field: str) -> None:
     protocol = _protocol()
     mapping = {'action': 'open', field: None}
@@ -196,7 +211,7 @@ def test_request_accepts_an_explicit_absent_relation() -> None:
     assert request.relation is None
 
 
-@pytest.mark.parametrize('field', ['max_items', 'max_chars'])
+@pytest.mark.parametrize('field', ['max_items', 'max_chars', 'depth'])
 def test_request_rejects_booleans_as_integers(field: str) -> None:
     protocol = _protocol()
     mapping = {'action': 'find', field: True}
@@ -215,6 +230,8 @@ def test_request_rejects_booleans_as_integers(field: str) -> None:
         ('max_items', 51, 'max_items_out_of_range', "Field 'max_items' must be between 1 and 50."),
         ('max_chars', 255, 'max_chars_out_of_range', "Field 'max_chars' must be between 256 and 40000."),
         ('max_chars', 40001, 'max_chars_out_of_range', "Field 'max_chars' must be between 256 and 40000."),
+        ('depth', 0, 'depth_out_of_range', "Field 'depth' must be between 1 and 16."),
+        ('depth', 17, 'depth_out_of_range', "Field 'depth' must be between 1 and 16."),
     ],
 )
 def test_request_rejects_out_of_range_limits(
@@ -298,7 +315,7 @@ def test_success_response_contains_the_complete_versioned_envelope() -> None:
 
     assert list(mapping) == ['schema', 'workspace_revision', 'focus', 'result', 'page', 'context']
     assert mapping == {
-        'schema': 2,
+        'schema': 3,
         'workspace_revision': 'revision-7',
         'focus': {'project_id': 'project-1', 'unit_id': 'unit-1', 'target_id': 'target-1'},
         'result': {'items': [{'id': 'target-1'}]},
@@ -433,7 +450,7 @@ def test_cursor_decoder_rejects_a_negative_offset() -> None:
             'fingerprint': 'find:item',
             'offset': -1,
             'revision': 'revision-2',
-            'schema': 2,
+            'schema': 3,
         }
     )
 
