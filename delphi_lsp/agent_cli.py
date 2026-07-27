@@ -34,6 +34,7 @@ from .agent_protocol import (
     SUPPORTED_RELATIONS,
 )
 from .agent_templates import install_opencode_support, install_skill
+from .agent_wiki import WikiExportError, export_okf_wiki
 from .parallel_outline import ParallelOutlineError, parse_worker_setting
 
 
@@ -91,6 +92,19 @@ def build_parser() -> argparse.ArgumentParser:
     index.add_argument("--out", type=Path, default=Path(".delphi-lsp") / "agent-index" / "index.json")
     index.add_argument("--workers", type=parse_worker_setting, default=0)
     index.set_defaults(func=_index)
+
+    wiki = subcommands.add_parser("wiki", help="Export a portable Markdown knowledge wiki.")
+    wiki_commands = wiki.add_subparsers(dest="wiki_command", required=True)
+    wiki_export = wiki_commands.add_parser(
+        "export",
+        help="Export all indexed codebase knowledge as an Open Knowledge Format bundle.",
+    )
+    wiki_export.add_argument("--root", type=Path, default=Path("."))
+    wiki_export.add_argument("--project-file", type=Path)
+    wiki_export.add_argument("--out", type=Path, default=Path(".delphi-lsp") / "wiki")
+    wiki_export.add_argument("--workers", type=parse_worker_setting, default=0)
+    wiki_export.add_argument("--force", action="store_true")
+    wiki_export.set_defaults(func=_wiki_export)
 
     skill = subcommands.add_parser("skill", help="Install agent skill templates.")
     skill_commands = skill.add_subparsers(dest="skill_command", required=True)
@@ -286,6 +300,24 @@ def _index(args: argparse.Namespace) -> None:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(args.out)
+
+
+def _wiki_export(args: argparse.Namespace) -> None:
+    args.root = _workspace_root(args.root)
+    output = args.out
+    if not output.is_absolute():
+        output = args.root / output
+    try:
+        result = export_okf_wiki(
+            args.root,
+            output,
+            project_file=args.project_file,
+            workers=args.workers,
+            force=args.force,
+        )
+    except WikiExportError as error:
+        raise _CliError("wiki_export_failed", str(error)) from None
+    _write_json(result.to_mapping())
 
 
 def _skill_install(args: argparse.Namespace) -> None:

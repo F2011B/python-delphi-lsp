@@ -315,7 +315,7 @@ def _symbols_payload(index: CodebaseIndex, *, query: str) -> dict[str, Any]:
             continue
         symbols.append(_symbol_item(symbol))
     symbols.sort(key=lambda item: (item["name"].casefold(), item["path"].casefold(), item["line"]))
-    return {"layer": "symbols", "root": index.root, "query": query, "items": symbols[:200]}
+    return {"layer": "symbols", "root": index.root, "query": query, "items": symbols}
 
 
 def _symbol_payload(index: CodebaseIndex, *, query: str) -> dict[str, Any]:

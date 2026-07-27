@@ -6,7 +6,9 @@ from pathlib import Path
 import pytest
 
 import delphi_lsp.metrics as metrics_module
+import delphi_lsp.agent_metrics as agent_metrics_module
 from delphi_lsp.agent_context import AgentContext
+from delphi_lsp.agent_metrics import build_path_metrics
 from delphi_lsp.agent_protocol import AgentProtocolError
 
 
@@ -95,6 +97,36 @@ def test_metrics_stream_units_without_materializing_a_project_source_map(
     )
 
     assert response_items(response)[0]["unit_count"] == 3
+
+
+def test_path_metrics_reads_each_source_once_without_project_source_map(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = open_metric_context(tmp_path)
+    del context
+    source_files = sorted(tmp_path.glob("*.pas")) + sorted(tmp_path.glob("*.dpr"))
+    real_read = agent_metrics_module.read_source_text
+    reads: dict[Path, int] = {}
+
+    def counted_read(path: Path) -> str:
+        resolved = path.resolve()
+        reads[resolved] = reads.get(resolved, 0) + 1
+        return real_read(path)
+
+    monkeypatch.setattr(agent_metrics_module, "read_source_text", counted_read)
+    monkeypatch.setattr(
+        metrics_module,
+        "analyze_project",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("project source map was materialized")
+        ),
+    )
+
+    result = build_path_metrics(tmp_path, source_files, workers=1)
+
+    assert result.unit_count == 3
+    assert reads == {path.resolve(): 1 for path in source_files}
 
 
 def test_parallel_metrics_match_serial_metrics(tmp_path: Path) -> None:

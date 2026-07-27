@@ -2,7 +2,7 @@
 
 `python-delphi-lsp` parses Delphi/Object Pascal, builds semantic and project
 indexes, serves LSP, and provides bounded codebase navigation for agents.
-Version 3.0.0 is authored by Dark Light and supports Windows, macOS, and Linux.
+Version 3.1.0 is authored by Dark Light and supports Windows, macOS, and Linux.
 
 ## Install and quick start
 
@@ -159,6 +159,8 @@ delphi-lsp-agent view --root PATH [--project-file FILE] --layer LAYER
                       [--workers auto|N]
 delphi-lsp-agent index --root PATH [--project-file FILE] [--out FILE]
                        [--workers auto|N]
+delphi-lsp-agent wiki export --root PATH [--project-file FILE] [--out DIRECTORY]
+                             [--workers auto|N] [--force]
 delphi-lsp-agent query --root PATH ACTION [VALUE]
                       [--project-id ID] [--detail summary|declaration|members|context|body|implementations]
                       [--relation references|callers|callees|uses|used_by|inherits|implements]
@@ -183,6 +185,40 @@ delphi-lsp-agent cache stop --root PATH
 `cache status --format json` outputs status JSON to stdout and the same warning stream on stderr.
 `cache stop` outputs stop status JSON and may include warnings on stderr.
 `query` outputs Protocol v3 JSON responses and writes warnings to stderr.
+
+### Open Knowledge Format wiki export
+
+Export the complete unique knowledge represented by the layered codebase views
+as a portable Markdown wiki:
+
+```bash
+delphi-lsp-agent wiki export --root PATH --out codebase-wiki
+```
+
+When `--out` is relative, it is resolved below `--root`; the default is
+`.delphi-lsp/wiki`. The command builds the semantic index once, deep-indexes
+discovered projects, calculates workspace and unit metrics, and writes:
+
+- an OKF 0.2 root `index.md`;
+- linked project, unit, and symbol concepts;
+- declaration and implementation source fragments;
+- resolved and unresolved semantic references;
+- discovery/project problems and complete metric records;
+- Protocol v3, relation, CPG, cache, and layer-mapping reference concepts.
+
+Every non-index concept is UTF-8 Markdown with YAML frontmatter and a non-empty
+`type`. Readable filenames include a stable digest, so overloads and equal names
+from different units remain distinct even on case-insensitive filesystems.
+Output order and content are deterministic. The finished bundle replaces the
+destination only after generation succeeds; an existing non-empty destination
+requires `--force`, and unsafe root/ancestor/symlink targets are rejected.
+
+Pages are streamed to disk, decoded source retention is bounded, and metrics
+process source paths without materializing the entire source corpus. Lazy CPG
+subgraphs are documented rather than eagerly multiplied across all possible
+targets; a focused live `cpg` query remains the bounded way to obtain one graph.
+The bundle structure follows the
+[Open Knowledge Format 0.2 specification](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md).
 
 ```bash
 delphi-lsp-agent query --root PATH find TCustomer
@@ -290,7 +326,8 @@ outside the root workspace.
 `metrics`. For example, `delphi-lsp-agent view --layer metrics --format json`
 returns a project summary and detailed unit metric objects; `--query` filters
 units by name or path.
-`index` materializes overview, projects, and problems JSON. `skill install`
+`index` materializes overview, projects, and problems JSON. `wiki export`
+materializes the same navigational knowledge as a linked OKF Markdown bundle. `skill install`
 writes the skill; `opencode install` writes the package-named skill, Markdown
 agent, and plugin. The two deprecated write flags are harmless aliases and do
 not change user configuration.
