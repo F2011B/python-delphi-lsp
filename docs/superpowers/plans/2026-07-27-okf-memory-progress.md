@@ -17,6 +17,7 @@
 - Modify: `delphi_lsp/agent_layers.py`
 
 - [ ] Add a test that calls `build_codebase_index(..., index_projects=True, retain_project_syntax=False)` and asserts that parsed-unit names, paths, error flags, and dependency membership remain present while every `syntax_tree` is `None`.
+- [ ] Add repository-scope tests proving external SDK units/includes and recursively found example projects do not enter a main-project wiki closure.
 - [ ] Run the focused test and confirm it fails because `retain_project_syntax` is not accepted.
 - [ ] Add the keyword-only flag with default `True`, and replace each stored deep result with a metadata-equivalent `ProjectIndexResult` containing `dataclasses.replace(unit, syntax_tree=None)` when the flag is false.
 - [ ] Run the focused test and the existing codebase/progress tests.

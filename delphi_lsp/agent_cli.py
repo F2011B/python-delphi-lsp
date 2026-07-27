@@ -34,7 +34,7 @@ from .agent_protocol import (
     SUPPORTED_RELATIONS,
 )
 from .agent_templates import install_opencode_support, install_skill
-from .agent_wiki import WikiExportError, export_okf_wiki
+from .agent_wiki import WikiExportError, WikiProgressEvent, export_okf_wiki
 from .parallel_outline import ParallelOutlineError, parse_worker_setting
 
 
@@ -104,6 +104,11 @@ def build_parser() -> argparse.ArgumentParser:
     wiki_export.add_argument("--out", type=Path, default=Path(".delphi-lsp") / "wiki")
     wiki_export.add_argument("--workers", type=parse_worker_setting, default=0)
     wiki_export.add_argument("--force", action="store_true")
+    wiki_export.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress progress output on stderr.",
+    )
     wiki_export.set_defaults(func=_wiki_export)
 
     skill = subcommands.add_parser("skill", help="Install agent skill templates.")
@@ -307,6 +312,7 @@ def _wiki_export(args: argparse.Namespace) -> None:
     output = args.out
     if not output.is_absolute():
         output = args.root / output
+    renderer = None if args.quiet else _WikiProgressRenderer(sys.stderr)
     try:
         result = export_okf_wiki(
             args.root,
@@ -314,10 +320,69 @@ def _wiki_export(args: argparse.Namespace) -> None:
             project_file=args.project_file,
             workers=args.workers,
             force=args.force,
+            on_progress=renderer,
         )
     except WikiExportError as error:
         raise _CliError("wiki_export_failed", str(error)) from None
+    finally:
+        if renderer is not None:
+            renderer.finish()
     _write_json(result.to_mapping())
+
+
+class _WikiProgressRenderer:
+    def __init__(self, stream: TextIO) -> None:
+        self.stream = stream
+        self.is_tty = bool(getattr(stream, "isatty", lambda: False)())
+        self._last_phase = ""
+        self._last_milestone = -1
+        self._line_open = False
+
+    def __call__(self, event: WikiProgressEvent) -> None:
+        percent = self._percent(event)
+        milestone = percent // 25 if percent is not None else 0
+        phase_changed = event.phase != self._last_phase
+        should_render = (
+            self.is_tty
+            or phase_changed
+            or milestone != self._last_milestone
+            or event.phase == "complete"
+        )
+        if not should_render:
+            return
+
+        if self.is_tty and phase_changed and self._line_open:
+            self.stream.write("\n")
+        line = self._line(event, percent)
+        if self.is_tty:
+            self.stream.write(f"\r{line}\x1b[K")
+            self._line_open = True
+        else:
+            self.stream.write(line + "\n")
+        self.stream.flush()
+        self._last_phase = event.phase
+        self._last_milestone = milestone
+
+    def finish(self) -> None:
+        if self.is_tty and self._line_open:
+            self.stream.write("\n")
+            self.stream.flush()
+            self._line_open = False
+
+    @staticmethod
+    def _percent(event: WikiProgressEvent) -> int | None:
+        if event.total is None or event.total <= 0:
+            return None
+        return min(100, max(0, int(event.completed * 100 / event.total)))
+
+    @staticmethod
+    def _line(event: WikiProgressEvent, percent: int | None) -> str:
+        progress = (
+            f"{percent:3d}% ({event.completed}/{event.total})"
+            if percent is not None
+            else f"{event.completed} completed"
+        )
+        return f"[wiki] {event.phase:<13} {progress}  {event.detail}"
 
 
 def _skill_install(args: argparse.Namespace) -> None:

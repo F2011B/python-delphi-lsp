@@ -7,7 +7,11 @@ import json
 
 from .metrics import analyze_project
 from .parallel_outline import OutlineResult, OutlineTask, ParallelBuildStats, run_outline_tasks
-from .project_discovery import DelphiProjectDiscovery, discover_delphi_project
+from .project_discovery import (
+    DelphiProjectDiscovery,
+    discover_delphi_project,
+    populate_workspace_sources,
+)
 from .project_indexer import ProjectIndexResult, ProjectIndexer
 from .progress import ProgressCallback, ProgressEvent
 from .semantic import Scope, SourceRange, Symbol, SymbolIndex, SymbolKind
@@ -30,11 +34,34 @@ def build_codebase_index(
     *,
     project_file: str | Path | None = None,
     index_projects: bool = False,
+    main_projects_only: bool = False,
+    retain_project_syntax: bool = True,
+    project_source_roots: Iterable[str | Path] = (),
     on_progress: ProgressCallback | None = None,
     workers: int = 0,
 ) -> CodebaseIndex:
     progress = _MonotonicProgress(on_progress)
-    discovery = discover_delphi_project(root, project_file=project_file, on_progress=progress)
+    root_path = Path(root).expanduser().resolve()
+    discovery = discover_delphi_project(
+        root_path,
+        project_file=project_file,
+        main_projects_only=main_projects_only,
+        scan_workspace_sources=not (main_projects_only and index_projects),
+        on_progress=progress,
+    )
+    project_results: dict[str, ProjectIndexResult] = {}
+    if index_projects and main_projects_only:
+        project_results = _build_project_results(
+            discovery,
+            retain_project_syntax=retain_project_syntax,
+            source_roots=tuple(project_source_roots),
+            progress=progress,
+            on_progress=on_progress,
+        )
+        _set_project_source_inventory(discovery, project_results)
+        if not discovery.project_files:
+            populate_workspace_sources(discovery, on_progress=progress)
+
     models: dict[str, SemanticModel] = {}
     lines_processed = 0
     symbols_discovered = 0
@@ -83,7 +110,7 @@ def build_codebase_index(
     _emit_progress(
         progress,
         "relations",
-        str(Path(root).expanduser().resolve()),
+        str(root_path),
         len(discovery.source_files),
         len(discovery.source_files),
         len(discovery.source_files),
@@ -92,19 +119,17 @@ def build_codebase_index(
         symbols_discovered=sum(len(items) for items in symbol_index.name_index.values()),
     )
 
-    project_results: dict[str, ProjectIndexResult] = {}
-    if index_projects:
-        for project in discovery.project_files:
-            indexer = ProjectIndexer(
-                search_paths=discovery.search_paths,
-                include_paths=discovery.include_paths,
-                defines=discovery.defines,
-                on_progress=progress,
-            )
-            project_results[project] = indexer.index(project)
+    if index_projects and not main_projects_only:
+        project_results = _build_project_results(
+            discovery,
+            retain_project_syntax=retain_project_syntax,
+            source_roots=tuple(project_source_roots),
+            progress=progress,
+            on_progress=on_progress,
+        )
 
     index = CodebaseIndex(
-        root=str(Path(root).expanduser().resolve()),
+        root=str(root_path),
         discovery=discovery,
         models=models,
         symbol_index=symbol_index,
@@ -114,7 +139,7 @@ def build_codebase_index(
     _emit_progress(
         progress,
         "complete",
-        str(Path(root).expanduser().resolve()),
+        str(root_path),
         len(discovery.source_files),
         len(discovery.source_files),
         len(discovery.source_files),
@@ -123,6 +148,68 @@ def build_codebase_index(
         symbols_discovered=sum(len(items) for items in symbol_index.name_index.values()),
     )
     return index
+
+
+def _build_project_results(
+    discovery: DelphiProjectDiscovery,
+    *,
+    retain_project_syntax: bool,
+    source_roots: tuple[str | Path, ...],
+    progress: ProgressCallback,
+    on_progress: ProgressCallback | None,
+) -> dict[str, ProjectIndexResult]:
+    project_results: dict[str, ProjectIndexResult] = {}
+    project_total = len(discovery.project_files)
+    for ordinal, project in enumerate(discovery.project_files, start=1):
+        indexer = ProjectIndexer(
+            search_paths=discovery.search_paths,
+            include_paths=discovery.include_paths,
+            defines=discovery.defines,
+            on_progress=progress,
+            source_roots=source_roots,
+        )
+        raw_result = indexer.index(project)
+        result = raw_result
+        if not retain_project_syntax:
+            result = replace(
+                raw_result,
+                parsed_units=[
+                    replace(unit, syntax_tree=None)
+                    for unit in raw_result.parsed_units
+                ],
+            )
+        project_results[project] = result
+        _emit_progress(
+            on_progress,
+            "projects",
+            project,
+            project_total,
+            ordinal,
+            project_total,
+            "main project indexed",
+        )
+        del raw_result
+        del indexer
+    return project_results
+
+
+def _set_project_source_inventory(
+    discovery: DelphiProjectDiscovery,
+    project_results: dict[str, ProjectIndexResult],
+) -> None:
+    sources: dict[str, str] = {}
+    for result in project_results.values():
+        for unit in result.parsed_units:
+            resolved = str(Path(unit.path).expanduser().resolve())
+            sources.setdefault(resolved.casefold(), resolved)
+        for include in result.include_files:
+            resolved = str(Path(include.path).expanduser().resolve())
+            sources.setdefault(resolved.casefold(), resolved)
+    discovery.source_files = sorted(sources.values(), key=str.casefold)
+    discovery.unit_paths = {}
+    for source in discovery.source_files:
+        key = Path(source).stem.casefold()
+        discovery.unit_paths.setdefault(key, []).append(source)
 
 
 def _emit_progress(

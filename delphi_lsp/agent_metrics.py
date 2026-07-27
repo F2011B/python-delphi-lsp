@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from dataclasses import replace
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from .agent_workspace import (
     AgentWorkspace,
@@ -25,6 +25,7 @@ from .source_reader import read_source_text
 
 _LARGE_PROJECT_UNIT_THRESHOLD = 256
 _LARGE_PROJECT_BYTE_THRESHOLD = 16 * 1024 * 1024
+MetricProgressCallback = Callable[[int, int, str], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +171,7 @@ def build_path_metrics(
     include_paths: Iterable[str | Path] = (),
     project_name: str = "",
     workers: int = 0,
+    on_progress: MetricProgressCallback | None = None,
 ) -> ProjectMetrics:
     """Analyze file paths without retaining the complete source corpus in RAM."""
 
@@ -203,12 +205,18 @@ def build_path_metrics(
     include_path_values = tuple(str(Path(value)) for value in include_paths)
     analyzed_units: list[UnitMetrics] = []
     problems: list[MetricProblem] = []
+    total_files = len(unit_paths) + len(include_files)
+    completed_files = 0
 
     def consume_result(result: _MetricResult) -> None:
+        nonlocal completed_files
         if result.metrics is not None:
             analyzed_units.append(result.metrics)
         if result.problem is not None:
             problems.append(result.problem)
+        completed_files += 1
+        if on_progress is not None:
+            on_progress(completed_files, total_files, result.source_path)
 
     run_outline_tasks(
         (
@@ -242,6 +250,12 @@ def build_path_metrics(
                     message="Could not read include file.",
                 )
             )
+        finally:
+            completed_files += 1
+            if on_progress is not None:
+                on_progress(completed_files, total_files, str(path))
+    if total_files == 0 and on_progress is not None:
+        on_progress(1, 1, "")
     metrics = aggregate_project_metrics(
         analyzed_units,
         include_loc=include_loc,

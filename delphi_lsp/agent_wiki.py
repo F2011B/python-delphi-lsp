@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import asdict, dataclass
 import hashlib
+from itertools import chain
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -10,12 +11,13 @@ import re
 import shutil
 import tempfile
 import unicodedata
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable, Iterator
 
 from ._version import __version__
 from .agent_layers import (
     CodebaseIndex,
     _all_symbols,
+    _iter_symbols,
     _source_fragment,
     build_codebase_index,
     layer_payload,
@@ -55,13 +57,19 @@ class WikiExportResult:
         }
 
 
-@dataclass(frozen=True)
-class _SymbolRecord:
-    symbol: Symbol
-    page: PurePosixPath
+@dataclass(frozen=True, slots=True)
+class WikiProgressEvent:
+    phase: str
+    completed: int
+    total: int | None
+    path: str
+    detail: str
 
 
-@dataclass(frozen=True)
+WikiProgressCallback = Callable[[WikiProgressEvent], None]
+
+
+@dataclass(frozen=True, slots=True)
 class _UnitRecord:
     source_path: str
     name: str
@@ -95,6 +103,7 @@ def export_okf_wiki(
     project_file: str | Path | None = None,
     workers: int = 0,
     force: bool = False,
+    on_progress: WikiProgressCallback | None = None,
 ) -> WikiExportResult:
     """Export all unique layered codebase knowledge as an OKF 0.2 bundle."""
 
@@ -102,10 +111,42 @@ def export_okf_wiki(
     requested_output, output_path = _resolve_output_destination(output)
     _validate_paths(root_path, output_path, force=force)
 
+    def forward_index_progress(event: Any) -> None:
+        if event.phase in {"inventory", "detail"}:
+            return
+        if event.detail in {"project index started", "project index complete"}:
+            return
+        phase = {
+            "outline": "index",
+            "relations": "relations",
+            "projects": "projects",
+            "complete": "index",
+        }.get(event.phase, "discovery")
+        _emit_wiki_progress(
+            on_progress,
+            phase,
+            event.files_completed,
+            event.files_total,
+            event.path,
+            event.detail,
+        )
+
+    _emit_wiki_progress(
+        on_progress,
+        "discovery",
+        0,
+        None,
+        str(root_path),
+        "discovering repository sources",
+    )
     index = build_codebase_index(
         root_path,
         project_file=project_file,
         index_projects=True,
+        main_projects_only=True,
+        retain_project_syntax=False,
+        project_source_roots=(root_path,),
+        on_progress=forward_index_progress,
         workers=workers,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -113,9 +154,23 @@ def export_okf_wiki(
         tempfile.mkdtemp(prefix=f".{output_path.name}.tmp-", dir=output_path.parent)
     )
     try:
-        writer = _WikiWriter(index, temporary, workers=workers)
+        writer = _WikiWriter(
+            index,
+            temporary,
+            workers=workers,
+            on_progress=on_progress,
+        )
         writer.write()
         documents = writer.documents
+        symbol_count = writer.symbol_count
+        _emit_wiki_progress(
+            on_progress,
+            "install",
+            0,
+            1,
+            str(output_path),
+            "installing completed bundle",
+        )
         _install_completed_bundle(
             temporary,
             output_path,
@@ -127,13 +182,34 @@ def export_okf_wiki(
             shutil.rmtree(temporary, ignore_errors=True)
         raise
 
-    return WikiExportResult(
+    result = WikiExportResult(
         output=str(output_path),
         documents=documents,
         projects=len(index.discovery.project_files),
         units=len(index.models),
-        symbols=writer.symbol_count,
+        symbols=symbol_count,
     )
+    _emit_wiki_progress(
+        on_progress,
+        "complete",
+        1,
+        1,
+        str(output_path),
+        "wiki export complete",
+    )
+    return result
+
+
+def _emit_wiki_progress(
+    callback: WikiProgressCallback | None,
+    phase: str,
+    completed: int,
+    total: int | None,
+    path: str,
+    detail: str,
+) -> None:
+    if callback is not None:
+        callback(WikiProgressEvent(phase, completed, total, path, detail))
 
 
 def _resolve_output_destination(output: str | Path) -> tuple[Path, Path]:
@@ -210,32 +286,34 @@ def _revalidate_output_destination(requested: Path, canonical: Path) -> None:
 
 
 class _WikiWriter:
-    def __init__(self, index: CodebaseIndex, destination: Path, *, workers: int = 0) -> None:
+    def __init__(
+        self,
+        index: CodebaseIndex,
+        destination: Path,
+        *,
+        workers: int = 0,
+        on_progress: WikiProgressCallback | None = None,
+    ) -> None:
         self.index = index
         self.destination = destination
         self.workers = workers
+        self._on_progress = on_progress
         self.documents = 0
         self._source_cache: dict[str, list[str]] = _BoundedSourceCache()
-        self.symbols = self._symbol_records()
+        self._symbol_count = sum(1 for _symbol in self._iter_unique_symbols())
         self.units = self._unit_records()
-        self._symbol_by_key = {
-            _symbol_key(record.symbol): record for record in self.symbols
-        }
         self._unit_by_source = {
             _normalized_source(record.source_path): record for record in self.units
         }
         self._unit_by_name = {record.name.casefold(): record for record in self.units}
-        self._references_by_target: dict[
-            tuple[str, str, str, int, int, int, int], list[SymbolReference]
-        ] = {}
+        self._references_by_target: dict[int, list[SymbolReference]] = {}
         self._projects_by_source: dict[str, list[tuple[str, PurePosixPath]]] = {}
         self._metric_page_by_source: dict[str, PurePosixPath] = {}
-        self._unresolved_references: list[SymbolReference] = []
         self._collect_references()
 
     @property
     def symbol_count(self) -> int:
-        return len(self.symbols)
+        return self._symbol_count
 
     def write(self) -> None:
         self._write_root_index()
@@ -249,32 +327,18 @@ class _WikiWriter:
         self._write_problems()
         self._write_reference_docs()
 
-    def _symbol_records(self) -> list[_SymbolRecord]:
-        unique: dict[tuple[str, str, str, int, int, int, int], Symbol] = {}
+    def _iter_unique_symbols(self) -> Iterator[Symbol]:
+        seen: set[bytes] = set()
         for symbol in _all_symbols(self.index):
             if symbol.kind.value == "unit":
                 continue
-            unique.setdefault(_symbol_key(symbol), symbol)
-        records = [
-            _SymbolRecord(
-                symbol,
-                PurePosixPath("symbols")
-                / _document_name(
-                    symbol.name,
-                    "|".join(str(part) for part in _symbol_key(symbol)),
-                ),
-            )
-            for symbol in unique.values()
-        ]
-        return sorted(
-            records,
-            key=lambda record: (
-                record.symbol.name.casefold(),
-                _normalized_source(record.symbol.decl_range.file_name),
-                record.symbol.decl_range.start_line,
-                record.symbol.decl_range.start_col,
-            ),
-        )
+            digest = hashlib.sha256(
+                _symbol_identity(symbol).encode("utf-8")
+            ).digest()
+            if digest in seen:
+                continue
+            seen.add(digest)
+            yield symbol
 
     def _unit_records(self) -> list[_UnitRecord]:
         records = [
@@ -289,26 +353,52 @@ class _WikiWriter:
         return sorted(records, key=lambda record: (record.name.casefold(), record.source_path.casefold()))
 
     def _collect_references(self) -> None:
-        seen_unresolved: set[tuple[str, str, int, int, str]] = set()
         for model in self.index.models.values():
             for reference in model.references:
                 if reference.resolved is None:
-                    key = (
-                        reference.name.casefold(),
-                        reference.ref_range.file_name,
-                        reference.ref_range.start_line,
-                        reference.ref_range.start_col,
-                        reference.kind.value,
-                    )
-                    if key not in seen_unresolved:
-                        seen_unresolved.add(key)
-                        self._unresolved_references.append(reference)
                     continue
-                key = _symbol_key(reference.resolved)
+                key = id(reference.resolved)
                 self._references_by_target.setdefault(key, []).append(reference)
-        self._unresolved_references.sort(key=_reference_sort_key)
         for references in self._references_by_target.values():
             references.sort(key=_reference_sort_key)
+
+    def _iter_unresolved_references(self) -> Iterator[SymbolReference]:
+        seen: set[tuple[str, str, int, int, str]] = set()
+        for _source, model in sorted(
+            self.index.models.items(),
+            key=lambda item: item[0].casefold(),
+        ):
+            for reference in sorted(model.references, key=_reference_sort_key):
+                if reference.resolved is not None:
+                    continue
+                key = (
+                    reference.name.casefold(),
+                    reference.ref_range.file_name,
+                    reference.ref_range.start_line,
+                    reference.ref_range.start_col,
+                    reference.kind.value,
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                yield reference
+
+    def _progress(
+        self,
+        phase: str,
+        completed: int,
+        total: int | None,
+        path: str,
+        detail: str,
+    ) -> None:
+        _emit_wiki_progress(
+            self._on_progress,
+            phase,
+            completed,
+            total,
+            path,
+            detail,
+        )
 
     def _write_root_index(self) -> None:
         body = [
@@ -343,7 +433,7 @@ class _WikiWriter:
             f"- Projects: {overview['project_count']}",
             f"- Sources: {overview['source_count']}",
             f"- Units: {overview['unit_count']}",
-            f"- Symbols: {len(self.symbols)}",
+            f"- Symbols: {self.symbol_count}",
             "",
             "## Defines",
             "",
@@ -380,7 +470,7 @@ class _WikiWriter:
             f"- Open Knowledge Format: `{OKF_VERSION}`",
             f"- Projects: {len(self.index.discovery.project_files)}",
             f"- Units: {len(self.units)}",
-            f"- Symbols: {len(self.symbols)}",
+            f"- Symbols: {self.symbol_count}",
             "",
             "## Coverage",
             "",
@@ -405,7 +495,8 @@ class _WikiWriter:
     def _write_projects(self) -> None:
         payload = layer_payload(self.index, "projects")
         pages: list[tuple[str, PurePosixPath]] = []
-        for item in payload["items"]:
+        total = len(payload["items"])
+        for ordinal, item in enumerate(payload["items"], start=1):
             project_path = str(item["path"])
             title = Path(project_path).name
             page = PurePosixPath("projects") / _document_name(title, _normalized_source(project_path))
@@ -472,6 +563,13 @@ class _WikiWriter:
                 tags=("delphi", "project"),
                 body=body,
             )
+            self._progress(
+                "projects",
+                ordinal,
+                total,
+                project_path,
+                "project page written",
+            )
         self._directory_index(
             PurePosixPath("projects/index.md"),
             "Projects",
@@ -481,25 +579,19 @@ class _WikiWriter:
 
     def _write_units(self) -> None:
         pages: list[tuple[str, PurePosixPath]] = []
-        symbol_records_by_source: dict[str, list[_SymbolRecord]] = {}
-        source_ordered_records = sorted(
-            self.symbols,
-            key=lambda record: (
-                _normalized_source(record.symbol.decl_range.file_name),
-                record.symbol.decl_range.start_line,
-                record.symbol.decl_range.start_col,
-                record.symbol.name.casefold(),
-            ),
-        )
-        for record in source_ordered_records:
-            symbol_records_by_source.setdefault(
-                _normalized_source(record.symbol.decl_range.file_name), []
-            ).append(record)
-
-        for unit in self.units:
+        total = len(self.units)
+        for ordinal, unit in enumerate(self.units, start=1):
             pages.append((unit.name, unit.page))
-            symbols = symbol_records_by_source.get(_normalized_source(unit.source_path), [])
             model = self.index.models[unit.source_path]
+            symbols = sorted(
+                _iter_symbols(model.unit_scope, include_unit=False),
+                key=lambda symbol: (
+                    symbol.decl_range.start_line,
+                    symbol.decl_range.start_col,
+                    symbol.name.casefold(),
+                    symbol.kind.value,
+                ),
+            )
             references = sorted(model.references, key=_reference_sort_key)
             projects = self._projects_by_source.get(
                 _normalized_source(unit.source_path), []
@@ -525,9 +617,9 @@ class _WikiWriter:
                 ]
             )
             body.extend(
-                f"- {_link(record.symbol.name, record.page)} "
-                f"— `{record.symbol.kind.value}` at line {record.symbol.decl_range.start_line}"
-                for record in symbols
+                f"- {_link(symbol.name, _symbol_page(symbol))} "
+                f"— `{symbol.kind.value}` at line {symbol.decl_range.start_line}"
+                for symbol in symbols
             )
             if not symbols:
                 body.append("- None")
@@ -555,6 +647,13 @@ class _WikiWriter:
                 tags=("delphi", "unit"),
                 body=body,
             )
+            self._progress(
+                "units",
+                ordinal,
+                total,
+                unit.source_path,
+                "unit page written",
+            )
         pages.sort(key=lambda item: (item[0].casefold(), item[1].as_posix()))
         self._directory_index(
             PurePosixPath("units/index.md"),
@@ -564,41 +663,33 @@ class _WikiWriter:
         )
 
     def _write_symbols(self) -> None:
-        pages: list[tuple[str, PurePosixPath]] = []
-        children_by_owner: dict[tuple[str, str], list[_SymbolRecord]] = {}
-        source_ordered_records = sorted(
-            self.symbols,
-            key=lambda record: (
-                _normalized_source(record.symbol.decl_range.file_name),
-                record.symbol.decl_range.start_line,
-                record.symbol.decl_range.start_col,
-                record.symbol.name.casefold(),
+        source_ordered_symbols = sorted(
+            self._iter_unique_symbols(),
+            key=lambda symbol: (
+                _normalized_source(symbol.decl_range.file_name),
+                symbol.decl_range.start_line,
+                symbol.decl_range.start_col,
+                symbol.name.casefold(),
+                symbol.kind.value,
             ),
         )
-        for record in source_ordered_records:
-            owner = _symbol_owner(record.symbol)
-            children_by_owner.setdefault(
-                (_normalized_source(record.symbol.decl_range.file_name), owner.casefold()),
-                [],
-            ).append(record)
-
-        for record in source_ordered_records:
-            symbol = record.symbol
-            pages.append((f"{symbol.name} ({symbol.kind.value})", record.page))
+        total = len(source_ordered_symbols)
+        for ordinal, symbol in enumerate(source_ordered_symbols, start=1):
+            page = _symbol_page(symbol)
             source = self._display_path(symbol.decl_range.file_name)
             unit = self._unit_by_source.get(_normalized_source(symbol.decl_range.file_name))
             owner = _symbol_owner(symbol)
-            owner_record = self._find_symbol_owner(symbol)
-            children = [
-                child
-                for child in children_by_owner.get(
-                    (_normalized_source(symbol.decl_range.file_name), symbol.name.casefold()),
-                    [],
-                )
-                if child.page != record.page
-            ]
+            owner_symbol = symbol.scope.owner
+            owner_page = (
+                _symbol_page(owner_symbol)
+                if owner_symbol is not None
+                and owner_symbol.kind.value != "unit"
+                and owner_symbol is not symbol
+                else None
+            )
+            children = self._direct_symbol_children(symbol)
             fragment = _source_fragment(symbol.decl_range, "declaration", self._source_cache)
-            references = self._references_by_target.get(_symbol_key(symbol), [])
+            references = self._references_by_target.get(id(symbol), [])
             modifiers = sorted(value.value for value in symbol.modifiers)
             body = [
                 f"# {_escape(symbol.name)}",
@@ -607,7 +698,7 @@ class _WikiWriter:
                 f"- Type: `{_escape_code(symbol.type_ref.display_name())}`",
                 f"- Visibility: `{symbol.visibility.value}`",
                 f"- Owner: "
-                f"{_link(owner, owner_record.page) if owner_record else f'`{_escape_code(owner)}`'}",
+                f"{_link(owner, owner_page) if owner_page else f'`{_escape_code(owner)}`'}",
                 f"- Unit: {_link(unit.name, unit.page) if unit else '`unknown`'}",
                 f"- Location: `{_escape_code(source)}:{symbol.decl_range.start_line}:"
                 f"{symbol.decl_range.start_col}`",
@@ -635,7 +726,7 @@ class _WikiWriter:
                 )
             body.extend(["", "## Members", ""])
             body.extend(
-                f"- {_link(child.symbol.name, child.page)} — `{child.symbol.kind.value}`"
+                f"- {_link(child.name, _symbol_page(child))} — `{child.kind.value}`"
                 for child in children
             )
             if not children:
@@ -645,7 +736,7 @@ class _WikiWriter:
             if not references:
                 body.append("- None")
             self._concept(
-                record.page,
+                page,
                 concept_type=f"Delphi {symbol.kind.value.replace('_', ' ').title()} Symbol",
                 title=symbol.name,
                 description=(
@@ -655,50 +746,123 @@ class _WikiWriter:
                 tags=("delphi", "symbol", symbol.kind.value),
                 body=body,
             )
-        pages.sort(key=lambda item: (item[0].casefold(), item[1].as_posix()))
-        self._directory_index(
+            self._progress(
+                "symbols",
+                ordinal,
+                total,
+                symbol.decl_range.file_name,
+                f"symbol page written: {symbol.name}",
+            )
+
+        name_ordered_symbols = sorted(
+            self._iter_unique_symbols(),
+            key=lambda symbol: (
+                symbol.name.casefold(),
+                _normalized_source(symbol.decl_range.file_name),
+                symbol.decl_range.start_line,
+                symbol.decl_range.start_col,
+                symbol.kind.value,
+            ),
+        )
+        self._directory_index_iter(
             PurePosixPath("symbols/index.md"),
             "Symbols",
-            pages,
+            (
+                (f"{symbol.name} ({symbol.kind.value})", _symbol_page(symbol))
+                for symbol in name_ordered_symbols
+            ),
             empty="No non-unit symbols were indexed.",
         )
 
+    @staticmethod
+    def _direct_symbol_children(symbol: Symbol) -> list[Symbol]:
+        if symbol.member_scope is None:
+            return []
+        children = [
+            child
+            for symbols in symbol.member_scope.symbols.values()
+            for child in symbols
+            if child is not symbol and child.kind.value != "unit"
+        ]
+        return sorted(
+            children,
+            key=lambda child: (
+                child.name.casefold(),
+                child.kind.value,
+                child.decl_range.start_line,
+                child.decl_range.start_col,
+            ),
+        )
+
     def _write_references(self) -> None:
-        resolved_pages = [
-            (f"{record.symbol.name} ({len(self._references_by_target[_symbol_key(record.symbol)])})", record.page)
-            for record in self.symbols
-            if _symbol_key(record.symbol) in self._references_by_target
-        ]
+        resolved_symbols = sorted(
+            (
+                symbol
+                for symbol in self._iter_unique_symbols()
+                if id(symbol) in self._references_by_target
+            ),
+            key=lambda symbol: (
+                symbol.name.casefold(),
+                _normalized_source(symbol.decl_range.file_name),
+                symbol.decl_range.start_line,
+                symbol.decl_range.start_col,
+            ),
+        )
         unresolved_page = PurePosixPath("references/unresolved.md")
-        unresolved_body = [
-            "# Unresolved semantic references",
-            "",
-            "These names were observed by the tolerant semantic index but could "
-            "not be resolved soundly in the current workspace.",
-            "",
-            *self._reference_lines(self._unresolved_references),
-        ]
-        if not self._unresolved_references:
-            unresolved_body.append("- None")
-        self._concept(
+        unresolved_count = sum(1 for _ in self._iter_unresolved_references())
+
+        def unresolved_body() -> Iterator[str]:
+            yield "# Unresolved semantic references"
+            yield ""
+            yield (
+                "These names were observed by the tolerant semantic index but "
+                "could not be resolved soundly in the current workspace."
+            )
+            yield ""
+            if unresolved_count:
+                yield from self._iter_reference_lines(
+                    self._iter_unresolved_references()
+                )
+            else:
+                yield "- None"
+
+        self._concept_iter(
             unresolved_page,
             concept_type="Delphi Unresolved References",
             title="Unresolved semantic references",
             description="References that remain unresolved in the tolerant semantic index.",
             tags=("delphi", "references", "diagnostics"),
-            body=unresolved_body,
+            body=unresolved_body(),
         )
-        lines = [
-            "# References",
-            "",
-            "Resolved references are embedded on their target symbol pages.",
-            "",
-        ]
-        lines.extend(f"- {_link(label, page)}" for label, page in resolved_pages)
-        if not resolved_pages:
-            lines.append("- No resolved references")
-        lines.extend(["", f"- {_link('Unresolved references', unresolved_page)}"])
-        self._write(PurePosixPath("references/index.md"), "\n".join(lines) + "\n")
+
+        def reference_index_lines() -> Iterator[str]:
+            yield "# References"
+            yield ""
+            yield "Resolved references are embedded on their target symbol pages."
+            yield ""
+            if resolved_symbols:
+                for symbol in resolved_symbols:
+                    count = len(self._references_by_target[id(symbol)])
+                    yield f"- {_link(f'{symbol.name} ({count})', _symbol_page(symbol))}"
+            else:
+                yield "- No resolved references"
+            yield ""
+            yield f"- {_link('Unresolved references', unresolved_page)}"
+
+        self._write_lines(
+            PurePosixPath("references/index.md"),
+            reference_index_lines(),
+        )
+        self._progress(
+            "references",
+            1,
+            1,
+            str(unresolved_page),
+            (
+                f"reference pages written ({len(resolved_symbols)} resolved "
+                f"targets, {unresolved_count} unresolved)"
+            ),
+        )
 
     def _write_problems(self) -> None:
         payload = layer_payload(self.index, "problems")
@@ -731,6 +895,14 @@ class _WikiWriter:
         project_name = "Workspace"
         if len(self.index.discovery.project_files) == 1:
             project_name = Path(self.index.discovery.project_files[0]).stem
+        metric_source_total = len(self.index.discovery.source_files)
+        self._progress(
+            "metrics",
+            0,
+            metric_source_total or 1,
+            self.index.root,
+            "calculating source metrics",
+        )
         metrics = build_path_metrics(
             self.index.root,
             self.index.discovery.source_files,
@@ -738,6 +910,13 @@ class _WikiWriter:
             include_paths=self.index.discovery.include_paths,
             project_name=project_name,
             workers=self.workers,
+            on_progress=lambda completed, total, path: self._progress(
+                "metrics",
+                completed,
+                total,
+                path,
+                "source metrics calculated",
+            ),
         )
         payload = {
             "project": metrics.to_mapping(),
@@ -767,7 +946,8 @@ class _WikiWriter:
         )
 
         unit_pages: list[tuple[str, PurePosixPath]] = []
-        for item in payload["items"]:
+        metric_item_total = len(payload["items"])
+        for ordinal, item in enumerate(payload["items"], start=1):
             unit = self._find_unit(str(item["path"]), str(item["name"]))
             metric_identity = (
                 _normalized_source(unit.source_path)
@@ -805,6 +985,13 @@ class _WikiWriter:
                 description=f"Architecture and maintainability metrics for {item['name']}.",
                 tags=("delphi", "metrics", "unit"),
                 body=body,
+            )
+            self._progress(
+                "metric-pages",
+                ordinal,
+                metric_item_total,
+                str(item["path"]),
+                "unit metric page written",
             )
         self._directory_index(
             PurePosixPath("metrics/units/index.md"),
@@ -922,23 +1109,27 @@ class _WikiWriter:
         )
 
     def _reference_lines(self, references: Iterable[SymbolReference]) -> list[str]:
-        lines: list[str] = []
+        return list(self._iter_reference_lines(references))
+
+    def _iter_reference_lines(
+        self,
+        references: Iterable[SymbolReference],
+    ) -> Iterator[str]:
         for reference in references:
             location = (
                 f"{self._display_path(reference.ref_range.file_name)}:"
                 f"{reference.ref_range.start_line}:{reference.ref_range.start_col}"
             )
-            target = self._symbol_by_key.get(_symbol_key(reference.resolved)) if reference.resolved else None
             target_text = (
-                f" → {_link(reference.resolved.name, target.page)}"
-                if reference.resolved is not None and target is not None
+                f" → {_link(reference.resolved.name, _symbol_page(reference.resolved))}"
+                if reference.resolved is not None
+                and reference.resolved.kind.value != "unit"
                 else ""
             )
-            lines.append(
+            yield (
                 f"- `{reference.kind.value}` `{_escape_code(reference.name)}` at "
                 f"`{_escape_code(location)}`{target_text}"
             )
-        return lines
 
     def _find_unit(self, source: str, name: str) -> _UnitRecord | None:
         source_path = Path(source).expanduser()
@@ -947,11 +1138,6 @@ class _WikiWriter:
         return self._unit_by_source.get(
             _normalized_source(str(source_path))
         ) or self._unit_by_name.get(name.casefold())
-
-    def _find_symbol_owner(self, symbol: Symbol) -> _SymbolRecord | None:
-        if symbol.scope.owner is None:
-            return None
-        return self._symbol_by_key.get(_symbol_key(symbol.scope.owner))
 
     def _display_path(self, value: str) -> str:
         if not value:
@@ -983,6 +1169,27 @@ class _WikiWriter:
         ]
         self._write(page, "\n".join([*frontmatter, *body]).rstrip() + "\n")
 
+    def _concept_iter(
+        self,
+        page: PurePosixPath,
+        *,
+        concept_type: str,
+        title: str,
+        description: str,
+        tags: tuple[str, ...],
+        body: Iterable[str],
+    ) -> None:
+        frontmatter = (
+            "---",
+            f"type: {json.dumps(concept_type, ensure_ascii=False)}",
+            f"title: {json.dumps(title, ensure_ascii=False)}",
+            f"description: {json.dumps(description, ensure_ascii=False)}",
+            f"tags: {json.dumps(list(tags), ensure_ascii=False)}",
+            'status: "stable"',
+            "---",
+        )
+        self._write_lines(page, chain(frontmatter, body))
+
     def _directory_index(
         self,
         page: PurePosixPath,
@@ -997,25 +1204,68 @@ class _WikiWriter:
             body.append(empty)
         self._write(page, "\n".join(body).rstrip() + "\n")
 
+    def _directory_index_iter(
+        self,
+        page: PurePosixPath,
+        title: str,
+        items: Iterable[tuple[str, PurePosixPath]],
+        *,
+        empty: str,
+    ) -> None:
+        iterator = iter(items)
+        first = next(iterator, None)
+
+        def lines() -> Iterator[str]:
+            yield f"# {_escape(title)}"
+            yield ""
+            if first is None:
+                yield empty
+                return
+            yield f"- {_link(first[0], first[1])}"
+            for label, target in iterator:
+                yield f"- {_link(label, target)}"
+
+        self._write_lines(page, lines())
+
     def _write(self, relative_path: PurePosixPath, text: str) -> None:
         target = self.destination.joinpath(*relative_path.parts)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding="utf-8", newline="\n")
         self.documents += 1
 
+    def _write_lines(
+        self,
+        relative_path: PurePosixPath,
+        lines: Iterable[str],
+    ) -> None:
+        target = self.destination.joinpath(*relative_path.parts)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("w", encoding="utf-8", newline="\n") as stream:
+            for line in lines:
+                stream.write(line)
+                stream.write("\n")
+        self.documents += 1
 
-def _symbol_key(symbol: Symbol | None) -> tuple[str, str, str, int, int, int, int]:
-    if symbol is None:
-        return ("", "", "", 0, 0, 0, 0)
+
+def _symbol_identity(symbol: Symbol) -> str:
     source_range = symbol.decl_range
-    return (
-        _normalized_source(source_range.file_name),
-        symbol.name.casefold(),
-        symbol.kind.value,
-        source_range.start_line,
-        source_range.start_col,
-        source_range.end_line,
-        source_range.end_col,
+    return "|".join(
+        (
+            _normalized_source(source_range.file_name),
+            symbol.name.casefold(),
+            symbol.kind.value,
+            str(source_range.start_line),
+            str(source_range.start_col),
+            str(source_range.end_line),
+            str(source_range.end_col),
+        )
+    )
+
+
+def _symbol_page(symbol: Symbol) -> PurePosixPath:
+    return PurePosixPath("symbols") / _document_name(
+        symbol.name,
+        _symbol_identity(symbol),
     )
 
 
@@ -1080,5 +1330,7 @@ __all__ = [
     "OKF_VERSION",
     "WikiExportError",
     "WikiExportResult",
+    "WikiProgressCallback",
+    "WikiProgressEvent",
     "export_okf_wiki",
 ]

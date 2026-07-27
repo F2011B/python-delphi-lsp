@@ -10,6 +10,53 @@ from delphi_lsp.project_indexer import ProjectIndexer, ProjectProblemType
 
 
 class ProjectIndexerTests(unittest.TestCase):
+    def test_source_roots_skip_external_units_and_includes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            repository = base / 'repository'
+            external = base / 'delphi-sdk'
+            repository.mkdir()
+            external.mkdir()
+            project = repository / 'Main.dpr'
+            project.write_text(
+                "program Main; uses LocalUnit, SystemUnit; begin end.\n",
+                encoding='utf-8',
+            )
+            (repository / 'LocalUnit.pas').write_text(
+                "unit LocalUnit; interface {$I System.inc} implementation end.\n",
+                encoding='utf-8',
+            )
+            (external / 'SystemUnit.pas').write_text(
+                "unit SystemUnit; interface implementation end.\n",
+                encoding='utf-8',
+            )
+            (external / 'System.inc').write_text(
+                "const SystemValue = 1;\n",
+                encoding='utf-8',
+            )
+
+            read_paths: list[Path] = []
+            original_read = Path.read_bytes
+
+            def record_read(path: Path) -> bytes:
+                read_paths.append(path.resolve())
+                return original_read(path)
+
+            with mock.patch.object(Path, 'read_bytes', record_read):
+                result = ProjectIndexer(
+                    search_paths=[str(external)],
+                    include_paths=[str(external)],
+                    source_roots=[repository],
+                ).index(str(project))
+
+            self.assertEqual(
+                {unit.name for unit in result.parsed_units},
+                {'Main', 'LocalUnit'},
+            )
+            self.assertIn('SystemUnit', result.not_found_units)
+            self.assertEqual(result.include_files, [])
+            self.assertNotIn((external / 'System.inc').resolve(), read_paths)
+
     def test_source_transform_receives_normalized_newlines_for_supported_encodings(self) -> None:
         source = 'unit Newlines;\ninterface\nimplementation\nend.\n'
         encoded_sources = {

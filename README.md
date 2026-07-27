@@ -160,7 +160,7 @@ delphi-lsp-agent view --root PATH [--project-file FILE] --layer LAYER
 delphi-lsp-agent index --root PATH [--project-file FILE] [--out FILE]
                        [--workers auto|N]
 delphi-lsp-agent wiki export --root PATH [--project-file FILE] [--out DIRECTORY]
-                             [--workers auto|N] [--force]
+                             [--workers auto|N] [--force] [--quiet]
 delphi-lsp-agent query --root PATH ACTION [VALUE]
                       [--project-id ID] [--detail summary|declaration|members|context|body|implementations]
                       [--relation references|callers|callees|uses|used_by|inherits|implements]
@@ -197,7 +197,7 @@ delphi-lsp-agent wiki export --root PATH --out codebase-wiki
 
 When `--out` is relative, it is resolved below `--root`; the default is
 `.delphi-lsp/wiki`. The command builds the semantic index once, deep-indexes
-discovered projects, calculates workspace and unit metrics, and writes:
+main projects, calculates workspace and unit metrics, and writes:
 
 - an OKF 0.2 root `index.md`;
 - linked project, unit, and symbol concepts;
@@ -205,6 +205,17 @@ discovered projects, calculates workspace and unit metrics, and writes:
 - resolved and unresolved semantic references;
 - discovery/project problems and complete metric records;
 - Protocol v3, relation, CPG, cache, and layer-mapping reference concepts.
+
+Without `--project-file`, the exporter selects repository main projects:
+non-example project entries in the repository root, or, when none exist, the
+shallowest configured `.dproj` entries. Recursively discovered example,
+sample, test, benchmark, and vendor projects are not promoted to project
+pages. With `--project-file`, only that explicit entry is selected. Project
+dependency traversal and include loading are confined to the repository root,
+so Delphi SDK and other external standard units are recorded as unresolved
+dependencies instead of being parsed. If no main project can be identified,
+the exporter falls back to the repository source inventory without inventing
+project pages.
 
 Every non-index concept is UTF-8 Markdown with YAML frontmatter and a non-empty
 `type`. Readable filenames include a stable digest, so overloads and equal names
@@ -219,6 +230,10 @@ subgraphs are documented rather than eagerly multiplied across all possible
 targets; a focused live `cpg` query remains the bounded way to obtain one graph.
 The bundle structure follows the
 [Open Knowledge Format 0.2 specification](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md).
+
+Progress is shown on `stderr` while the final machine-readable JSON summary
+remains the only record on `stdout`. Redirected progress is throttled to
+milestones; pass `--quiet` to suppress it completely.
 
 ```bash
 delphi-lsp-agent query --root PATH find TCustomer

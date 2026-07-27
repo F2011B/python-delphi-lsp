@@ -76,6 +76,7 @@ class ProjectIndexer:
         on_progress: ProgressCallback | None = None,
         backend: ParserBackend | str = ParserBackend.DELPHIAST,
         mode: ParserMode | str = ParserMode.STRICT,
+        source_roots: Iterable[str | Path] = (),
     ) -> None:
         self.search_paths = [Path(path) for path in search_paths]
         self.include_paths = [Path(path) for path in include_paths]
@@ -87,6 +88,9 @@ class ProjectIndexer:
         self.on_progress = on_progress
         self.backend = normalize_backend(backend)
         self.mode = normalize_mode(mode)
+        self.source_roots = tuple(
+            Path(path).expanduser().resolve() for path in source_roots
+        )
 
         self._parsed_units: dict[str, UnitInfo] = {}
         self._problems: list[ProjectProblem] = []
@@ -328,7 +332,11 @@ class ProjectIndexer:
             if key in seen:
                 continue
             seen.add(key)
-            if candidate.exists() and candidate.is_file():
+            if (
+                candidate.exists()
+                and candidate.is_file()
+                and self._source_is_allowed(candidate)
+            ):
                 return candidate
         return None
 
@@ -340,11 +348,22 @@ class ProjectIndexer:
             if resolved is None:
                 return None
             content, resolved_path = resolved
+            if not self._source_is_allowed(Path(resolved_path)):
+                return None
             cache_key = f'{include_name.casefold()}::{resolved_path.casefold()}'
             self._include_files[cache_key] = IncludeFileInfo(name=include_name, path=resolved_path)
             return content, resolved_path
 
         return wrapped
+
+    def _source_is_allowed(self, path: Path) -> bool:
+        if not self.source_roots:
+            return True
+        try:
+            resolved = path.expanduser().resolve()
+        except OSError:
+            return False
+        return any(resolved.is_relative_to(root) for root in self.source_roots)
 
     def _emit_progress(self, phase: str, path: str, detail: str) -> None:
         if self.on_progress is not None:
@@ -369,7 +388,11 @@ class ProjectIndexer:
         search_roots = [parent, self._project_folder, *self.include_paths, *self.search_paths]
         for root in search_roots:
             candidate = (root / include_path).resolve()
-            if candidate.exists() and candidate.is_file():
+            if (
+                candidate.exists()
+                and candidate.is_file()
+                and self._source_is_allowed(candidate)
+            ):
                 try:
                     content = read_source_text(candidate)
                 except OSError:

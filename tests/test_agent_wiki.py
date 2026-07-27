@@ -5,11 +5,24 @@ import re
 import subprocess
 import sys
 import textwrap
+import tracemalloc
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from delphi_lsp.agent_wiki import WikiExportError, export_okf_wiki
+from delphi_lsp.agent_layers import CodebaseIndex
+from delphi_lsp.agent_wiki import WikiExportError, _WikiWriter, export_okf_wiki
+from delphi_lsp.parallel_outline import ParallelBuildStats
+from delphi_lsp.semantic import (
+    Scope,
+    ScopeKind,
+    SourceRange,
+    Symbol,
+    SymbolIndex,
+    SymbolKind,
+)
+from delphi_lsp.semantic_builder import SemanticModel
 
 
 def _write(path: Path, text: str) -> None:
@@ -98,6 +111,71 @@ def _assert_internal_links_resolve(bundle: Path) -> None:
             assert resolved.resolve().is_file(), f"{source}: broken link {target}"
 
 
+def test_writer_initialization_does_not_retain_a_global_symbol_catalog(
+    tmp_path: Path,
+) -> None:
+    symbol_count = 5_000
+    source = str(tmp_path / "Large.pas")
+    scope = Scope(ScopeKind.UNIT, "Large")
+    for line in range(1, symbol_count + 1):
+        source_range = SourceRange(source, line, 1, line, 10)
+        scope.define(
+            Symbol(
+                name=f"Symbol{line:05d}",
+                kind=SymbolKind.CONSTANT,
+                decl_range=source_range,
+                name_range=source_range,
+                scope=scope,
+            )
+        )
+    model = SemanticModel(scope, SymbolIndex())
+    discovery = SimpleNamespace(
+        project_files=[],
+        source_files=[source],
+        defines=[],
+        include_paths=[],
+        search_paths=[],
+        problems=[],
+    )
+    index = CodebaseIndex(
+        str(tmp_path),
+        discovery,
+        {source: model},
+        SymbolIndex(),
+        {},
+        ParallelBuildStats(1, 1, 1, 0.0, 0),
+    )
+
+    tracemalloc.start()
+    writer = _WikiWriter(index, tmp_path / "wiki", workers=1)
+    retained, _peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    assert writer.symbol_count == symbol_count
+    assert not hasattr(writer, "symbols")
+    assert retained < symbol_count * 256
+
+
+def test_export_reports_progress_through_completion(tmp_path: Path) -> None:
+    repository = tmp_path / "repo"
+    _make_repository(repository)
+    events: list[object] = []
+
+    export_okf_wiki(
+        repository,
+        tmp_path / "wiki",
+        workers=1,
+        on_progress=events.append,
+    )
+
+    assert events
+    assert events[-1].phase == "complete"
+    assert events[-1].completed == events[-1].total == 1
+    assert {"index", "metrics", "symbols", "complete"} <= {
+        event.phase for event in events
+    }
+
+
 def test_export_okf_wiki_contains_all_layered_knowledge_and_valid_links(tmp_path: Path) -> None:
     repository = tmp_path / "repo"
     output = tmp_path / "knowledge"
@@ -158,6 +236,91 @@ def test_export_okf_wiki_contains_all_layered_knowledge_and_valid_links(tmp_path
     _assert_internal_links_resolve(output)
 
 
+def test_export_indexes_only_main_project_dependency_closure(tmp_path: Path) -> None:
+    repository = tmp_path / "repo"
+    output = tmp_path / "knowledge"
+    _make_repository(repository)
+    _write(
+        repository / "vendor" / "DUnitX" / "DUnitXExamples.dpr",
+        """
+        program DUnitXExamples;
+        uses DUnitXFramework in 'DUnitXFramework.pas';
+        begin
+        end.
+        """,
+    )
+    _write(
+        repository / "vendor" / "DUnitX" / "DUnitXExamples.dproj",
+        """
+        <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+          <PropertyGroup>
+            <MainSource>DUnitXExamples.dpr</MainSource>
+          </PropertyGroup>
+        </Project>
+        """,
+    )
+    _write(
+        repository / "vendor" / "DUnitX" / "DUnitXFramework.pas",
+        """
+        unit DUnitXFramework;
+        interface
+        type TDUnitXFramework = class end;
+        implementation
+        end.
+        """,
+    )
+
+    result = export_okf_wiki(repository, output, workers=1)
+
+    assert result.projects == 1
+    assert result.units == 3
+    project_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (output / "projects").glob("*.md")
+    )
+    unit_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (output / "units").glob("*.md")
+    )
+    assert "DUnitXExamples" not in project_text
+    assert "DUnitXFramework" not in unit_text
+
+
+def test_explicit_project_file_overrides_main_project_selection(tmp_path: Path) -> None:
+    repository = tmp_path / "repo"
+    output = tmp_path / "knowledge"
+    _make_repository(repository)
+    _write(
+        repository / "examples" / "ExampleApp.dpr",
+        """
+        program ExampleApp;
+        uses ExampleUnit in 'ExampleUnit.pas';
+        begin
+        end.
+        """,
+    )
+    _write(
+        repository / "examples" / "ExampleUnit.pas",
+        "unit ExampleUnit; interface implementation end.",
+    )
+
+    result = export_okf_wiki(
+        repository,
+        output,
+        project_file=Path("examples/ExampleApp.dpr"),
+        workers=1,
+    )
+
+    assert result.projects == 1
+    assert result.units == 2
+    project_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (output / "projects").glob("*.md")
+    )
+    assert "ExampleApp" in project_text
+    assert "Main.dpr" not in project_text
+
+
 def test_export_is_deterministic_and_force_replaces_only_destination(tmp_path: Path) -> None:
     repository = tmp_path / "repo"
     first = tmp_path / "first"
@@ -181,6 +344,30 @@ def test_export_is_deterministic_and_force_replaces_only_destination(tmp_path: P
     export_okf_wiki(repository, first, workers=1, force=True)
     assert not stale.exists()
     assert (repository / "Main.dpr").is_file()
+
+
+def test_failed_force_export_preserves_previous_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = tmp_path / "repo"
+    output = tmp_path / "wiki"
+    _make_repository(repository)
+    export_okf_wiki(repository, output, workers=1)
+    marker = output / "KEEP.md"
+    marker.write_text("previous complete export\n", encoding="utf-8")
+
+    def fail_symbols(_writer: _WikiWriter) -> None:
+        raise RuntimeError("simulated export failure")
+
+    monkeypatch.setattr(_WikiWriter, "_write_symbols", fail_symbols)
+
+    with pytest.raises(RuntimeError, match="simulated export failure"):
+        export_okf_wiki(repository, output, workers=1, force=True)
+
+    assert marker.read_text(encoding="utf-8") == "previous complete export\n"
+    assert (output / "index.md").is_file()
+    assert not list(tmp_path.glob(".wiki.tmp-*"))
 
 
 def test_export_rejects_unsafe_destination(tmp_path: Path) -> None:
@@ -344,4 +531,35 @@ def test_agent_cli_exports_okf_wiki_and_reports_json_summary(tmp_path: Path) -> 
     assert payload["okf_version"] == "0.2"
     assert payload["output"] == str(output.resolve())
     assert payload["documents"] == len(list(output.rglob("*.md")))
+    assert "[wiki]" in completed.stderr
+    assert "100%" in completed.stderr
+    assert len(completed.stderr.splitlines()) <= 80
+
+
+def test_agent_cli_quiet_suppresses_wiki_progress(tmp_path: Path) -> None:
+    repository = tmp_path / "repo"
+    output = tmp_path / "wiki"
+    _make_repository(repository)
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "delphi_lsp.agent_cli",
+            "wiki",
+            "export",
+            "--root",
+            str(repository),
+            "--out",
+            str(output),
+            "--workers",
+            "1",
+            "--quiet",
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    assert json.loads(completed.stdout)["output"] == str(output.resolve())
     assert completed.stderr == ""

@@ -146,6 +146,29 @@ def test_parallel_layered_index_matches_serial_models_symbols_and_layers(tmp_pat
     assert parallel.parallel_stats.effective_workers == 2
 
 
+def test_deep_project_results_can_discard_syntax_trees_after_indexing(
+    tmp_path: Path,
+) -> None:
+    make_project(tmp_path)
+
+    index = build_codebase_index(
+        tmp_path,
+        index_projects=True,
+        retain_project_syntax=False,
+        workers=1,
+    )
+
+    assert index.project_results
+    parsed_units = [
+        unit
+        for result in index.project_results.values()
+        for unit in result.parsed_units
+    ]
+    assert {unit.name for unit in parsed_units} >= {"Main", "Worker"}
+    assert all(unit.path for unit in parsed_units)
+    assert all(unit.syntax_tree is None for unit in parsed_units)
+
+
 def test_implementation_layer_exposes_only_queried_method_body(tmp_path: Path) -> None:
     make_project(tmp_path)
 

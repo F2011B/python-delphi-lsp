@@ -68,6 +68,7 @@ def discover_delphi_project(
     root: str | os.PathLike[str],
     *,
     project_file: str | os.PathLike[str] | None = None,
+    main_projects_only: bool = False,
     include_paths: Iterable[str | os.PathLike[str]] = (),
     search_paths: Iterable[str | os.PathLike[str]] = (),
     defines: Iterable[str] = (),
@@ -159,7 +160,11 @@ def discover_delphi_project(
     candidates = (
         []
         if explicit_dproj is not None and project_path is None
-        else _project_candidates(root_path, project_path)
+        else _project_candidates(
+            root_path,
+            project_path,
+            main_projects_only=main_projects_only,
+        )
     )
     for project in candidates:
         key = str(project).casefold()
@@ -326,7 +331,12 @@ def _emit_progress(
         )
 
 
-def _project_candidates(root: Path, explicit: Path | None) -> list[Path]:
+def _project_candidates(
+    root: Path,
+    explicit: Path | None,
+    *,
+    main_projects_only: bool = False,
+) -> list[Path]:
     if explicit is not None:
         return [explicit]
     candidates: list[Path] = []
@@ -340,7 +350,71 @@ def _project_candidates(root: Path, explicit: Path | None) -> list[Path]:
     for candidate in [*dproj_mains, *candidates]:
         if candidate.exists() and candidate.is_file() and candidate not in candidates:
             candidates.append(candidate)
-    return sorted(candidates, key=lambda path: str(path).casefold())
+    candidates = sorted(set(candidates), key=lambda path: str(path).casefold())
+    if not main_projects_only or not candidates:
+        return candidates
+
+    primary = [
+        candidate
+        for candidate in candidates
+        if not _is_auxiliary_project(candidate, root)
+    ]
+    configured = [
+        candidate
+        for candidate in primary
+        if candidate.with_suffix(".dproj").is_file()
+    ]
+    root_entries = [
+        candidate
+        for candidate in primary
+        if candidate.parent == root
+    ]
+    scoped = root_entries or configured
+    if not scoped:
+        return []
+    minimum_depth = min(
+        len(candidate.parent.relative_to(root).parts)
+        for candidate in scoped
+    )
+    return [
+        candidate
+        for candidate in scoped
+        if len(candidate.parent.relative_to(root).parts) == minimum_depth
+    ]
+
+
+_AUXILIARY_PROJECT_PARTS = {
+    "benchmark",
+    "benchmarks",
+    "demo",
+    "demos",
+    "ex",
+    "example",
+    "examples",
+    "sample",
+    "samples",
+    "test",
+    "tests",
+    "testing",
+    "thirdparty",
+    "third-party",
+    "vendor",
+    "vendors",
+}
+
+
+def _is_auxiliary_project(path: Path, root: Path) -> bool:
+    relative = path.relative_to(root)
+    directory_parts = {part.casefold() for part in relative.parent.parts}
+    if directory_parts & _AUXILIARY_PROJECT_PARTS:
+        return True
+    stem = path.stem.casefold()
+    return (
+        "example" in stem
+        or "sample" in stem
+        or stem.startswith("test")
+        or stem.endswith("tests")
+    )
 
 
 def _read_dpr_paths(

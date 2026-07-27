@@ -25,6 +25,15 @@ entry for every symbol.
 
 ## Memory design
 
+The wiki's project scope is a main-project dependency closure, not every
+recursively discovered `.dpr`. An explicit `--project-file` is authoritative.
+Otherwise, non-example root entry files are selected; when none exist, the
+shallowest configured non-example `.dproj` entries are used. Example, sample,
+test, benchmark, and vendor projects are excluded. Dependency and include
+resolution cannot leave the canonical repository root. If no main entry
+exists, the exporter inventories repository sources but creates no synthetic
+project pages.
+
 `build_codebase_index` gains an opt-in project-result compaction mode. A deep
 project is still fully parsed so dependency discovery, include files, missing
 units, parse flags, and diagnostics remain identical. Immediately after each
@@ -40,9 +49,16 @@ paths and range tuples. Unit and symbol pages build only per-unit or per-symbol
 temporary lists. Symbol directory index entries are streamed after a
 deterministic name-order pass.
 
-The resulting Markdown content, stable names, link targets, and concept counts
-remain unchanged. The acceptance gate is at least a 30 percent reduction from
-the 378.8 MiB one-worker mORMot2 peak, with all internal links still resolving.
+Within the selected scope, Markdown content, stable names, and link targets
+remain unchanged; manifest counts reflect that scope. The acceptance gate is
+at least a 30 percent reduction from the 378.8 MiB one-worker mORMot2 peak,
+with all internal links still resolving.
+
+The final equivalent full-source fallback measurement on mORMot2 retained all
+541 repository sources and 78,324 symbols while reducing peak RSS to 245.4 MiB
+and elapsed time to 57.2 seconds. This is a 35.2 percent peak-memory reduction
+and a 33.5 percent runtime reduction. Repositories with identifiable main
+projects additionally avoid unrelated project/source closures.
 
 ## Progress design
 
@@ -69,4 +85,3 @@ renderer for automation.
   `--quiet` suppresses progress.
 - Run the focused wiki/progress tests, the full suite, link validation, and the
   mORMot2 peak-RSS benchmark.
-
