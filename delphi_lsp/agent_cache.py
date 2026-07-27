@@ -25,6 +25,7 @@ from watchfiles import watch
 from ._version import __version__
 from .agent_context import AgentContext
 from .agent_protocol import AgentProtocolError
+from .project_config import load_project_path_config
 
 
 DEFAULT_MAX_MEMORY_BYTES = 512 * 1024**2
@@ -1137,6 +1138,7 @@ def start_cache(
         raise ValueError("idle_timeout must be greater than zero.")
     if not math.isfinite(startup_timeout) or startup_timeout <= 0:
         raise ValueError("startup_timeout must be greater than zero.")
+    load_project_path_config(root)
     with _process_start_lock(root):
         with _start_lock(root, startup_timeout):
             return _start_cache_unlocked(

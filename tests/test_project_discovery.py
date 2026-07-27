@@ -13,11 +13,136 @@ from delphi_lsp.project_discovery import (
 )
 from delphi_lsp.project_indexer import ProjectIndexer
 from delphi_lsp.lsp_server import LspWorkspaceState, WorkspaceConfig
+from delphi_lsp.project_config import ProjectConfigError
 
 
 def write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(textwrap.dedent(text).strip() + "\n", encoding="utf-8")
+
+
+def write_project(root: Path, relative_entry: str) -> Path:
+    entry = root / relative_entry
+    write_text(entry, f"program {entry.stem}; begin end.")
+    write_text(
+        entry.with_suffix(".dproj"),
+        f"""
+        <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+          <PropertyGroup>
+            <MainSource>{entry.name}</MainSource>
+          </PropertyGroup>
+        </Project>
+        """,
+    )
+    return entry
+
+
+def test_toml_selects_all_included_monorepo_projects_and_excludes_last(
+    tmp_path: Path,
+) -> None:
+    desktop = write_project(tmp_path, "apps/Desktop/Desktop.dpr")
+    service = write_project(tmp_path, "platform/services/deep/ApiServer.dpr")
+    write_project(tmp_path, "apps/examples/Demo.dpr")
+    write_project(tmp_path, "vendor/DUnitX/DUnitXExamples.dpr")
+    write_text(
+        tmp_path / ".delphi-lsp.toml",
+        """
+        [projects]
+        include = ["apps/**", "platform/services/deep/ApiServer.dproj"]
+        exclude = ["**/examples/**", "vendor/**"]
+        """,
+    )
+
+    discovery = discover_delphi_project(
+        tmp_path,
+        main_projects_only=True,
+        scan_workspace_sources=False,
+    )
+
+    assert discovery.project_files == sorted(
+        [str(desktop.resolve()), str(service.resolve())],
+        key=str.casefold,
+    )
+    assert str((tmp_path / ".delphi-lsp.toml").resolve()) in discovery.config_files
+    assert str(desktop.with_suffix(".dproj").resolve()) in discovery.config_files
+    assert str(service.with_suffix(".dproj").resolve()) in discovery.config_files
+
+
+def test_explicit_project_file_bypasses_toml_project_filters(tmp_path: Path) -> None:
+    example = write_project(tmp_path, "examples/ExplicitDemo.dpr")
+    write_text(
+        tmp_path / ".delphi-lsp.toml",
+        """
+        [projects]
+        include = ["apps/**"]
+        exclude = ["examples/**"]
+        """,
+    )
+
+    discovery = discover_delphi_project(
+        tmp_path,
+        project_file=example,
+        main_projects_only=True,
+        scan_workspace_sources=False,
+    )
+
+    assert discovery.project_files == [str(example.resolve())]
+
+
+def test_toml_can_select_dproj_whose_name_differs_from_main_source(
+    tmp_path: Path,
+) -> None:
+    entry = tmp_path / "services" / "ApiServer.dpr"
+    write_text(entry, "program ApiServer; begin end.")
+    write_text(
+        tmp_path / "services" / "Production.dproj",
+        """
+        <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+          <PropertyGroup>
+            <MainSource>ApiServer.dpr</MainSource>
+          </PropertyGroup>
+        </Project>
+        """,
+    )
+    write_text(
+        tmp_path / ".delphi-lsp.toml",
+        """
+        [projects]
+        include = ["services/Production.dproj"]
+        """,
+    )
+
+    discovery = discover_delphi_project(
+        tmp_path,
+        main_projects_only=True,
+        scan_workspace_sources=False,
+    )
+
+    assert discovery.project_files == [str(entry.resolve())]
+    assert str((tmp_path / "services" / "Production.dproj").resolve()) in (
+        discovery.config_files
+    )
+
+
+def test_toml_project_filters_fail_when_no_project_matches(tmp_path: Path) -> None:
+    write_project(tmp_path, "apps/Desktop.dpr")
+    config_path = tmp_path / ".delphi-lsp.toml"
+    write_text(
+        config_path,
+        """
+        [projects]
+        include = ["services/**"]
+        """,
+    )
+
+    with pytest.raises(ProjectConfigError, match="matched no Delphi projects") as raised:
+        discover_delphi_project(
+            tmp_path,
+            main_projects_only=True,
+            scan_workspace_sources=False,
+        )
+
+    assert str(config_path) in str(raised.value)
 
 
 def test_discovery_value_preserves_original_positional_constructor_order() -> None:

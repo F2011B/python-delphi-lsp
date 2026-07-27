@@ -210,7 +210,9 @@ Without `--project-file`, the exporter selects repository main projects:
 non-example project entries in the repository root, or, when none exist, the
 shallowest configured `.dproj` entries. Recursively discovered example,
 sample, test, benchmark, and vendor projects are not promoted to project
-pages. With `--project-file`, only that explicit entry is selected. Project
+pages. A repository `.delphi-lsp.toml` can replace this heuristic with the
+explicit monorepo selection described below. With `--project-file`, only that
+explicit entry is selected. Project
 dependency traversal and include loading are confined to the repository root,
 so Delphi SDK and other external standard units are recorded as unresolved
 dependencies instead of being parsed. If no main project can be identified,
@@ -254,7 +256,9 @@ delphi-lsp-agent query --root PATH find TCustomer
 ```
 
 This prewarms one bounded repository navigation index and requires no project
-selection. A `.dproj` is optional. Pass one when its project-specific compiler
+selection. A `.dproj` is optional. For repeatable monorepo selection, add a
+`.delphi-lsp.toml` file as described below. Pass one project explicitly when
+its project-specific compiler
 settings and `MainSource` should define the index:
 
 ```bash
@@ -271,6 +275,44 @@ delphi-lsp-agent query --root PATH focus --project-id PROJECT_ID
 ```
 
 Selecting a project this way also prewarms its navigation cache.
+
+### TOML project selection for monorepos
+
+Place `.delphi-lsp.toml` in the repository root to define which `.dpr`,
+`.dpk`, or companion `.dproj` projects belong to the codebase:
+
+```toml
+[projects]
+include = [
+  "apps/**",
+  "services/Api/ApiServer.dproj",
+  "packages/*/Runtime.dpk",
+]
+exclude = [
+  "**/examples/**",
+  "**/tests/**",
+  "vendor/**",
+]
+```
+
+Paths are relative to the repository root, case-insensitive, and use `/` on
+every operating system. An exact directory name covers all descendants. `*`
+matches within one path segment, while `**` crosses directory boundaries.
+Absolute paths and `..` traversal are rejected.
+
+When `include` is non-empty, only matching project entries remain. Matching a
+`.dproj` selects the `.dpr` or `.dpk` from its `MainSource`. The `exclude`
+list is applied afterward, so `exclude` always wins. With active TOML filters,
+all remaining matches are main projects even when they occur at different
+directory depths; the built-in shallow-project and example-name heuristic is
+not applied.
+
+The same selection is used by `cache`, `worker`, `query`, `view`, `index`,
+wiki export, and language-server discovery. An explicit `--project-file`
+bypasses the TOML include/exclude selection for that invocation. If configured
+filters matched no Delphi projects, the command stops with a configuration
+error instead of silently parsing every source file in the repository. Restart
+an already running cache daemon after changing the project selection file.
 
 `inspect` uses the currently focused target, so call `focus TARGET_ID` before
 `inspect` unless a previous request already selected it.

@@ -9,6 +9,11 @@ import re
 import xml.etree.ElementTree as ET
 
 from .progress import ProgressCallback, ProgressEvent
+from .project_config import (
+    ProjectConfigError,
+    ProjectPathConfig,
+    load_project_path_config,
+)
 
 
 SOURCE_EXTENSIONS = (".pas", ".dpr", ".dpk", ".inc")
@@ -52,6 +57,7 @@ class DelphiProjectDiscovery:
     search_path_origins: dict[str, list[str]] = field(default_factory=dict)
     include_path_origins: dict[str, list[str]] = field(default_factory=dict)
     define_origins: dict[str, list[str]] = field(default_factory=dict)
+    project_config: ProjectPathConfig | None = None
 
 
 _DPR_UNIT_RE = re.compile(
@@ -76,12 +82,16 @@ def discover_delphi_project(
     on_progress: ProgressCallback | None = None,
 ) -> DelphiProjectDiscovery:
     root_path = Path(root).expanduser().resolve()
+    project_config = load_project_path_config(root_path)
     project_path = Path(project_file).expanduser() if project_file is not None else None
     if project_path is not None:
         if not project_path.is_absolute():
             project_path = root_path / project_path
         project_path = project_path.resolve()
-    discovery = DelphiProjectDiscovery(root=str(root_path))
+    discovery = DelphiProjectDiscovery(
+        root=str(root_path),
+        project_config=project_config,
+    )
     _emit_progress(on_progress, "discovery", str(root_path), 0, 0, None, "project discovery started")
 
     seen_search: set[str] = set()
@@ -89,6 +99,11 @@ def discover_delphi_project(
     seen_defines: set[str] = set()
     seen_projects: set[str] = set()
     seen_configs: set[str] = set()
+    project_configs: dict[str, tuple[Path, ...]] = {}
+    if project_config is not None:
+        config_key = str(project_config.source).casefold()
+        seen_configs.add(config_key)
+        discovery.config_files.append(str(project_config.source))
 
     def add_path(
         target: list[str],
@@ -164,6 +179,8 @@ def discover_delphi_project(
             root_path,
             project_path,
             main_projects_only=main_projects_only,
+            project_config=project_config,
+            project_configs=project_configs,
         )
     )
     for project in candidates:
@@ -179,7 +196,10 @@ def discover_delphi_project(
                 seen_search,
                 discovery.search_path_origins,
             )
-        dproj_candidates = [project.with_suffix(".dproj")]
+        dproj_candidates = [
+            *project_configs.get(str(project).casefold(), ()),
+            project.with_suffix(".dproj"),
+        ]
         if explicit_dproj is not None:
             dproj_candidates.insert(0, explicit_dproj)
         for dproj in dproj_candidates:
@@ -336,22 +356,59 @@ def _project_candidates(
     explicit: Path | None,
     *,
     main_projects_only: bool = False,
+    project_config: ProjectPathConfig | None = None,
+    project_configs: dict[str, tuple[Path, ...]] | None = None,
 ) -> list[Path]:
     if explicit is not None:
         return [explicit]
     candidates: list[Path] = []
+    aliases: dict[str, list[Path]] = {}
+    configs_by_entry: dict[str, list[Path]] = {}
     for ext in PROJECT_EXTENSIONS:
         candidates.extend(_walk_sources(root, f"*{ext}"))
-    dproj_mains: list[Path] = []
+    for candidate in candidates:
+        key = str(candidate).casefold()
+        aliases.setdefault(key, []).append(candidate)
+        companion = candidate.with_suffix(".dproj")
+        if companion.is_file():
+            aliases[key].append(companion)
+            configs_by_entry.setdefault(key, []).append(companion)
     for dproj in _walk_sources(root, "*.dproj"):
         main = _main_source_from_dproj(dproj)
         if main is not None:
-            dproj_mains.append((dproj.parent / main).resolve())
-    for candidate in [*dproj_mains, *candidates]:
-        if candidate.exists() and candidate.is_file() and candidate not in candidates:
-            candidates.append(candidate)
-    candidates = sorted(set(candidates), key=lambda path: str(path).casefold())
+            entry = (dproj.parent / main).resolve()
+            key = str(entry).casefold()
+            aliases.setdefault(key, []).extend((entry, dproj))
+            configs_by_entry.setdefault(key, []).append(dproj)
+            candidates.append(entry)
+    candidates = sorted(
+        {
+            candidate
+            for candidate in candidates
+            if candidate.exists() and candidate.is_file()
+        },
+        key=lambda path: str(path).casefold(),
+    )
+    if project_config is not None and project_config.has_filters:
+        candidates = [
+            candidate
+            for candidate in candidates
+            if project_config.selects(
+                *aliases.get(
+                    str(candidate).casefold(),
+                    (candidate, candidate.with_suffix(".dproj")),
+                )
+            )
+        ]
+        if not candidates:
+            raise ProjectConfigError(
+                f"{project_config.source}: configured [projects] filters matched "
+                "no Delphi projects."
+            )
+        _set_project_configs(project_configs, configs_by_entry, candidates)
+        return candidates
     if not main_projects_only or not candidates:
+        _set_project_configs(project_configs, configs_by_entry, candidates)
         return candidates
 
     primary = [
@@ -376,11 +433,30 @@ def _project_candidates(
         len(candidate.parent.relative_to(root).parts)
         for candidate in scoped
     )
-    return [
+    selected = [
         candidate
         for candidate in scoped
         if len(candidate.parent.relative_to(root).parts) == minimum_depth
     ]
+    _set_project_configs(project_configs, configs_by_entry, selected)
+    return selected
+
+
+def _set_project_configs(
+    target: dict[str, tuple[Path, ...]] | None,
+    configs_by_entry: dict[str, list[Path]],
+    selected: list[Path],
+) -> None:
+    if target is None:
+        return
+    for candidate in selected:
+        key = str(candidate).casefold()
+        configs = sorted(
+            set(configs_by_entry.get(key, ())),
+            key=lambda path: str(path).casefold(),
+        )
+        if configs:
+            target[key] = tuple(configs)
 
 
 _AUXILIARY_PROJECT_PARTS = {

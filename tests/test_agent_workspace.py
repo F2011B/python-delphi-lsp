@@ -37,6 +37,29 @@ def test_open_auto_selects_one_project_with_deterministic_mapping(tmp_path: Path
     assert workspace.focus == Focus(project_id=expected_id, unit_id="", target_id="")
 
 
+def test_open_exposes_only_toml_selected_monorepo_projects(tmp_path: Path) -> None:
+    write_text(tmp_path / "apps" / "A" / "A.dpr", "program A; begin end.")
+    write_text(tmp_path / "services" / "deep" / "B.dpr", "program B; begin end.")
+    write_text(tmp_path / "examples" / "Demo.dpr", "program Demo; begin end.")
+    write_text(
+        tmp_path / ".delphi-lsp.toml",
+        """
+        [projects]
+        include = ["apps/**", "services/**"]
+        exclude = ["**/examples/**"]
+        """,
+    )
+
+    workspace = AgentWorkspace.open(tmp_path)
+
+    assert [project.name for project in workspace.projects] == [
+        "Workspace",
+        "A",
+        "B",
+    ]
+    assert all(project.name != "Demo" for project in workspace.projects)
+
+
 def test_selected_project_always_supplies_outline_transform_for_small_sources(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

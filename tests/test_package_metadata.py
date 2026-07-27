@@ -108,6 +108,12 @@ def test_readme_documents_v3_release_plugin_protocol_discovery_and_vllm_proof() 
     assert 'abstractness' in readme
     assert 'distance from the main sequence' in readme
     assert '--probe metrics' in readme
+    assert '`.delphi-lsp.toml`' in readme
+    assert '[projects]' in readme
+    assert 'include = [' in readme
+    assert 'exclude = [' in readme
+    assert 'exclude` always wins' in readme
+    assert 'matched no Delphi projects' in readme
 
 
 def test_root_opencode_config_is_portable_and_has_no_pythonpath_requirement() -> None:

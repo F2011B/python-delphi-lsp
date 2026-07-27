@@ -36,6 +36,7 @@ from .agent_protocol import (
 from .agent_templates import install_opencode_support, install_skill
 from .agent_wiki import WikiExportError, WikiProgressEvent, export_okf_wiki
 from .parallel_outline import ParallelOutlineError, parse_worker_setting
+from .project_config import ProjectConfigError
 
 
 _MAX_WORKER_RECORD_BYTES = 1024 * 1024
@@ -245,6 +246,10 @@ def main(argv: list[str] | None = None) -> int:
         return _cache_error(error)
     except ParallelOutlineError as error:
         sys.stderr.write(f"cli_error:parallel_failed: {error}\n")
+        sys.stderr.flush()
+        return 1
+    except ProjectConfigError as error:
+        sys.stderr.write(f"cli_error:project_config_invalid: {error}\n")
         sys.stderr.flush()
         return 1
     except BrokenPipeError:

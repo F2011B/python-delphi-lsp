@@ -216,6 +216,40 @@ def test_view_resolves_relative_project_file_from_root(tmp_path: Path) -> None:
     assert not any(problem["kind"] == "cant_read_project" for problem in payload["problems"])
 
 
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ("view", "--layer", "overview", "--format", "json"),
+        ("index",),
+        ("wiki", "export"),
+        ("worker",),
+        ("cache", "start", "--startup-timeout", "1"),
+    ],
+)
+def test_cli_reports_invalid_project_toml_without_traceback(
+    tmp_path: Path,
+    arguments: tuple[str, ...],
+) -> None:
+    (tmp_path / "Main.dpr").write_text(
+        "program Main; begin end.\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / ".delphi-lsp.toml"
+    config_path.write_text("[projects\n", encoding="utf-8")
+    command = [*arguments, "--root", str(tmp_path)]
+    if arguments[:2] == ("wiki", "export"):
+        command.extend(["--out", str(tmp_path / "wiki"), "--quiet"])
+
+    completed = _run_cli(*command)
+
+    assert completed.returncode == 1
+    assert completed.stdout == ""
+    assert completed.stderr.startswith(
+        f"cli_error:project_config_invalid: {config_path}: Invalid TOML:"
+    )
+    assert "Traceback" not in completed.stderr
+
+
 @pytest.mark.parametrize("command", ["skill", "opencode"])
 def test_install_conflict_is_reported_without_traceback(
     tmp_path: Path,

@@ -286,6 +286,39 @@ def test_export_indexes_only_main_project_dependency_closure(tmp_path: Path) -> 
     assert "DUnitXFramework" not in unit_text
 
 
+def test_export_uses_toml_project_paths_across_monorepo_depths(tmp_path: Path) -> None:
+    repository = tmp_path / "repo"
+    output = tmp_path / "knowledge"
+    _write(repository / "apps" / "A" / "A.dpr", "program A; begin end.")
+    _write(
+        repository / "services" / "deep" / "B.dpr",
+        "program B; begin end.",
+    )
+    _write(
+        repository / "examples" / "Demo.dpr",
+        "program Demo; begin end.",
+    )
+    _write(
+        repository / ".delphi-lsp.toml",
+        """
+        [projects]
+        include = ["apps/**", "services/**"]
+        exclude = ["**/examples/**"]
+        """,
+    )
+
+    result = export_okf_wiki(repository, output, workers=1)
+
+    assert result.projects == 2
+    project_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (output / "projects").glob("*.md")
+    )
+    assert "# A" in project_text
+    assert "# B" in project_text
+    assert "Demo" not in project_text
+
+
 def test_explicit_project_file_overrides_main_project_selection(tmp_path: Path) -> None:
     repository = tmp_path / "repo"
     output = tmp_path / "knowledge"
