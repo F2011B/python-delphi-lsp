@@ -28,12 +28,12 @@ def test_lsp_console_script_dependencies_are_installed_by_default() -> None:
     assert '"lsprotocol>=2023.0.1"' in project
 
 
-def test_release_metadata_declares_3_0_0_sole_namespace_author_and_windows_support() -> None:
+def test_release_metadata_declares_3_1_0_sole_namespace_author_and_windows_support() -> None:
     pyproject = (ROOT / 'pyproject.toml').read_text(encoding='utf-8')
     project = _section('project', pyproject)
     scripts = _section('project.scripts', pyproject)
 
-    assert 'version = "3.0.0"' in project
+    assert 'version = "3.1.0"' in project
     assert '"Operating System :: OS Independent"' in project
     assert '"Operating System :: Microsoft :: Windows"' in project
     assert '"Operating System :: MacOS"' in project
@@ -83,7 +83,9 @@ def test_readme_documents_v3_release_plugin_protocol_discovery_and_vllm_proof() 
     assert 'Auto-discovery reads `.dpr`, `.dpk`, `.dproj`, `.cfg`, and `.dof` files' in readme
     assert 'no file-size threshold' in readme
     assert 'final answer' in readme
-    assert 'Version 3.0.0' in readme
+    assert 'Version 3.1.0' in readme
+    assert 'delphi-lsp-agent wiki export --root PATH' in readme
+    assert 'Open Knowledge Format 0.2 specification' in readme
     assert '`cpg`' in readme
     assert '`ast`, `cfg`, `dfg`, `call`, and `full`' in readme
     assert '`graph`, `direction`, and `depth`' in readme
@@ -168,3 +170,13 @@ def test_release_3_0_0_notes_document_protocol_cpg_and_performance_gate() -> Non
     assert '22.62' in notes
     assert '98.43 percent' in notes
     assert 'one source' in notes
+
+
+def test_release_3_1_0_notes_document_okf_export_and_symbols_fix() -> None:
+    notes = (ROOT / 'docs' / 'release-3.1.0.md').read_text(encoding='utf-8')
+
+    assert '# Python Delphi LSP 3.1.0' in notes
+    assert 'Open Knowledge Format 0.2' in notes
+    assert 'wiki export' in notes
+    assert 'all symbols' in notes
+    assert 'PyPI' in notes
