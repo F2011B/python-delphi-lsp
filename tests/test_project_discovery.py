@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import delphi_lsp.project_discovery as project_discovery_module
 from delphi_lsp.project_discovery import (
     DelphiProjectDiscovery,
     DiscoveryProblem,
@@ -143,6 +144,100 @@ def test_toml_project_filters_fail_when_no_project_matches(tmp_path: Path) -> No
         )
 
     assert str(config_path) in str(raised.value)
+
+
+def test_workspace_exclude_prunes_complete_directories_before_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    main = write_project(tmp_path, "Main.dpr")
+    write_project(tmp_path, "vendor/DUnitX/DUnitXExamples.dpr")
+    write_text(
+        tmp_path / "vendor" / "DUnitX" / "Framework.pas",
+        "unit Framework; interface implementation end.",
+    )
+    write_text(
+        tmp_path / "vendor" / "DUnitX" / "Framework.inc",
+        "const VendorValue = 1;",
+    )
+    write_text(
+        tmp_path / ".delphi-lsp.toml",
+        """
+        [workspace]
+        exclude = ["vendor"]
+        """,
+    )
+    inspected_dproj: list[Path] = []
+    real_main_source = project_discovery_module._main_source_from_dproj
+
+    def record_main_source(path: Path) -> str | None:
+        inspected_dproj.append(path.resolve())
+        return real_main_source(path)
+
+    monkeypatch.setattr(
+        project_discovery_module,
+        "_main_source_from_dproj",
+        record_main_source,
+    )
+
+    discovery = discover_delphi_project(tmp_path)
+
+    assert discovery.project_files == [str(main.resolve())]
+    assert all(
+        not Path(path).resolve().is_relative_to((tmp_path / "vendor").resolve())
+        for path in discovery.source_files
+    )
+    assert all(
+        not path.is_relative_to((tmp_path / "vendor").resolve())
+        for path in inspected_dproj
+    )
+
+
+def test_workspace_exclude_rejects_explicit_project_inside_boundary(
+    tmp_path: Path,
+) -> None:
+    blocked = write_project(tmp_path, "vendor/Blocked.dpr")
+    write_text(
+        tmp_path / ".delphi-lsp.toml",
+        """
+        [workspace]
+        exclude = ["vendor"]
+        """,
+    )
+
+    with pytest.raises(ProjectConfigError, match="workspace.exclude"):
+        discover_delphi_project(
+            tmp_path,
+            project_file=blocked,
+            scan_workspace_sources=False,
+        )
+
+
+def test_workspace_exclude_rejects_explicit_dproj_with_excluded_main_source(
+    tmp_path: Path,
+) -> None:
+    write_text(
+        tmp_path / "Main.dproj",
+        """
+        <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+          <PropertyGroup>
+            <MainSource>vendor/Main.dpr</MainSource>
+          </PropertyGroup>
+        </Project>
+        """,
+    )
+    write_project(tmp_path, "vendor/Main.dpr")
+    write_text(
+        tmp_path / ".delphi-lsp.toml",
+        '[workspace]\nexclude = ["vendor"]\n',
+    )
+
+    with pytest.raises(ProjectConfigError, match="workspace.exclude"):
+        discover_delphi_project(
+            tmp_path,
+            project_file=tmp_path / "Main.dproj",
+            scan_workspace_sources=False,
+        )
 
 
 def test_discovery_value_preserves_original_positional_constructor_order() -> None:
@@ -715,3 +810,34 @@ def test_lsp_workspace_config_auto_discovers_project_paths(tmp_path: Path) -> No
     assert str((tmp_path / "src").resolve()) in state.config.search_paths
     assert str((tmp_path / "include").resolve()) in state.config.include_paths
     assert "MSWINDOWS" in state.config.defines
+
+
+def test_lsp_workspace_scan_prunes_workspace_excluded_directories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_text(
+        tmp_path / "Allowed.pas",
+        "unit Allowed; interface implementation end.",
+    )
+    blocked = tmp_path / "vendor" / "Blocked.pas"
+    write_text(blocked, "unit Blocked; interface implementation end.")
+    write_text(
+        tmp_path / ".delphi-lsp.toml",
+        '[workspace]\nexclude = ["vendor"]\n',
+    )
+    real_read = Path.read_bytes
+    reads: list[Path] = []
+
+    def recording_read(path: Path) -> bytes:
+        reads.append(path.resolve())
+        return real_read(path)
+
+    monkeypatch.setattr(Path, "read_bytes", recording_read)
+
+    state = LspWorkspaceState()
+    state.configure(WorkspaceConfig(roots=[str(tmp_path)], eager_index=True))
+
+    assert str((tmp_path / "Allowed.pas").resolve()) in state.workspace_files
+    assert str(blocked.resolve()) not in state.workspace_files
+    assert blocked.resolve() not in reads

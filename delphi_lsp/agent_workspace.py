@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 import unicodedata
@@ -18,6 +19,7 @@ from .project_discovery import (
     discover_workspace_sources,
     populate_workspace_sources,
 )
+from .project_config import ProjectPathConfig
 from .project_indexer import IncludeFileInfo, ProjectIndexResult, ProjectIndexer, UnitInfo
 
 
@@ -185,6 +187,11 @@ class AgentWorkspace:
         return tuple(discovery.defines)
 
     @property
+    def project_config(self) -> ProjectPathConfig | None:
+        discovery = self._active_discovery or self._discovery
+        return discovery.project_config
+
+    @property
     def active_project(self) -> AgentProject | None:
         return next(
             (project for project in self._projects if project.project_id == self._active_project_id),
@@ -348,6 +355,7 @@ class AgentWorkspace:
                 include_paths=discovery.include_paths,
                 defines=discovery.defines,
                 source_transform=_outline_agent_source,
+                project_config=discovery.project_config,
             )
             result = indexer.index(str(project_path))
         fingerprint = _selection_fingerprint(discovery, result, root=self._root)
@@ -615,6 +623,7 @@ def _selection_state(
         "directories": _directory_snapshots(
             _selection_snapshot_specs(discovery, result),
             root=root,
+            project_config=discovery.project_config,
         ),
     }
 
@@ -631,11 +640,20 @@ def _selection_paths(
     if result is not None:
         paths.update(unit.path for unit in result.parsed_units)
         paths.update(include.path for include in result.include_files)
-        paths.update(_explicit_dependency_paths(result))
-    return paths
+        paths.update(_explicit_dependency_paths(result, discovery.project_config))
+    if discovery.project_config is None:
+        return paths
+    return {
+        path
+        for path in paths
+        if not discovery.project_config.excludes_workspace_path(path)
+    }
 
 
-def _explicit_dependency_paths(result: ProjectIndexResult) -> set[str]:
+def _explicit_dependency_paths(
+    result: ProjectIndexResult,
+    project_config: ProjectPathConfig | None,
+) -> set[str]:
     paths: dict[str, str] = {}
     for unit in sorted(
         result.parsed_units,
@@ -654,7 +672,11 @@ def _explicit_dependency_paths(result: ProjectIndexResult) -> set[str]:
                     if not candidate.is_absolute():
                         candidate = declaring_folder / candidate
                     resolved = str(candidate.resolve())
-                    paths.setdefault(resolved.casefold(), resolved)
+                    if (
+                        project_config is None
+                        or not project_config.excludes_workspace_path(resolved)
+                    ):
+                        paths.setdefault(resolved.casefold(), resolved)
             pending.extend(reversed(node.child_nodes))
     return set(paths.values())
 
@@ -672,6 +694,11 @@ def _selection_snapshot_specs(
         recursive: tuple[str, ...] = (),
     ) -> None:
         resolved = path.expanduser().resolve()
+        if (
+            discovery.project_config is not None
+            and discovery.project_config.excludes_workspace_path(resolved)
+        ):
+            return
         key = str(resolved).casefold()
         spec = specs.setdefault(
             key,
@@ -718,6 +745,7 @@ def _directory_snapshots(
     specs: list[_DirectorySnapshotSpec],
     *,
     root: Path,
+    project_config: ProjectPathConfig | None,
 ) -> list[dict[str, object]]:
     snapshots: list[dict[str, object]] = []
     for spec in specs:
@@ -727,14 +755,48 @@ def _directory_snapshots(
         try:
             if spec.immediate_extensions:
                 for candidate in directory.iterdir():
-                    if candidate.suffix.casefold() in spec.immediate_extensions and candidate.is_file():
+                    if (
+                        (
+                            project_config is None
+                            or not project_config.excludes_workspace_path(candidate)
+                        )
+                        and candidate.suffix.casefold() in spec.immediate_extensions
+                        and candidate.is_file()
+                    ):
                         entries.add(str(candidate.resolve()))
             if spec.recursive_extensions:
-                for candidate in directory.rglob("*"):
-                    if any(part in SKIP_DIRS for part in candidate.parts):
-                        continue
-                    if candidate.suffix.casefold() in spec.recursive_extensions and candidate.is_file():
-                        entries.add(str(candidate.resolve()))
+                if project_config is None:
+                    for candidate in directory.rglob("*"):
+                        if any(part in SKIP_DIRS for part in candidate.parts):
+                            continue
+                        if (
+                            candidate.suffix.casefold() in spec.recursive_extensions
+                            and candidate.is_file()
+                        ):
+                            entries.add(str(candidate.resolve()))
+                else:
+                    for current_name, directory_names, file_names in os.walk(
+                        directory,
+                        followlinks=False,
+                    ):
+                        current = Path(current_name)
+                        directory_names[:] = [
+                            name
+                            for name in directory_names
+                            if name not in SKIP_DIRS
+                            and not project_config.excludes_workspace_path(
+                                current / name
+                            )
+                        ]
+                        for name in file_names:
+                            candidate = current / name
+                            if (
+                                candidate.suffix.casefold()
+                                in spec.recursive_extensions
+                                and not project_config.excludes_workspace_path(candidate)
+                                and candidate.is_file()
+                            ):
+                                entries.add(str(candidate.resolve()))
         except OSError:
             readable = False
         snapshots.append(

@@ -88,6 +88,14 @@ def discover_delphi_project(
         if not project_path.is_absolute():
             project_path = root_path / project_path
         project_path = project_path.resolve()
+        if (
+            project_config is not None
+            and project_config.excludes_workspace_path(project_path)
+        ):
+            raise ProjectConfigError(
+                f"{project_config.source}: explicit project {project_path} is "
+                "excluded by workspace.exclude."
+            )
     discovery = DelphiProjectDiscovery(
         root=str(root_path),
         project_config=project_config,
@@ -172,6 +180,15 @@ def discover_delphi_project(
             explicit_dproj,
             discovery,
         )
+        if (
+            project_path is not None
+            and project_config is not None
+            and project_config.excludes_workspace_path(project_path)
+        ):
+            raise ProjectConfigError(
+                f"{project_config.source}: explicit project {project_path} is "
+                "excluded by workspace.exclude."
+            )
     candidates = (
         []
         if explicit_dproj is not None and project_path is None
@@ -310,7 +327,13 @@ def discover_workspace_sources(
     on_progress: ProgressCallback | None = None,
 ) -> DelphiProjectDiscovery:
     root_path = Path(root).expanduser().resolve()
-    discovery = DelphiProjectDiscovery(root=str(root_path))
+    project_config = load_project_path_config(root_path)
+    discovery = DelphiProjectDiscovery(
+        root=str(root_path),
+        project_config=project_config,
+    )
+    if project_config is not None:
+        discovery.config_files.append(str(project_config.source))
     _emit_progress(on_progress, "discovery", str(root_path), 0, 0, None, "workspace discovery started")
     populate_workspace_sources(discovery, on_progress=on_progress)
     _emit_progress(
@@ -365,7 +388,7 @@ def _project_candidates(
     aliases: dict[str, list[Path]] = {}
     configs_by_entry: dict[str, list[Path]] = {}
     for ext in PROJECT_EXTENSIONS:
-        candidates.extend(_walk_sources(root, f"*{ext}"))
+        candidates.extend(_walk_sources(root, f"*{ext}", project_config))
     for candidate in candidates:
         key = str(candidate).casefold()
         aliases.setdefault(key, []).append(candidate)
@@ -373,7 +396,7 @@ def _project_candidates(
         if companion.is_file():
             aliases[key].append(companion)
             configs_by_entry.setdefault(key, []).append(companion)
-    for dproj in _walk_sources(root, "*.dproj"):
+    for dproj in _walk_sources(root, "*.dproj", project_config):
         main = _main_source_from_dproj(dproj)
         if main is not None:
             entry = (dproj.parent / main).resolve()
@@ -385,7 +408,12 @@ def _project_candidates(
         {
             candidate
             for candidate in candidates
-            if candidate.exists() and candidate.is_file()
+            if candidate.exists()
+            and candidate.is_file()
+            and (
+                project_config is None
+                or not project_config.excludes_workspace_path(candidate)
+            )
         },
         key=lambda path: str(path).casefold(),
     )
@@ -725,7 +753,7 @@ def _scan_sources(
     *,
     on_progress: ProgressCallback | None = None,
 ) -> None:
-    for path in _walk_files(root):
+    for path in _walk_files(root, discovery.project_config):
         if path.suffix.casefold() not in SOURCE_EXTENSIONS:
             continue
         resolved = path.resolve()
@@ -746,15 +774,22 @@ def _scan_sources(
     discovery.source_files.sort(key=lambda item: (item.casefold(), item))
 
 
-def _walk_sources(root: Path, pattern: str) -> list[Path]:
+def _walk_sources(
+    root: Path,
+    pattern: str,
+    project_config: ProjectPathConfig | None = None,
+) -> list[Path]:
     results: list[Path] = []
-    for path in _walk_files(root):
+    for path in _walk_files(root, project_config):
         if path.match(pattern):
             results.append(path.resolve())
     return results
 
 
-def _walk_files(root: Path) -> Iterator[Path]:
+def _walk_files(
+    root: Path,
+    project_config: ProjectPathConfig | None = None,
+) -> Iterator[Path]:
     def handle_error(error: OSError) -> None:
         if _is_path_too_long(error):
             return
@@ -765,12 +800,23 @@ def _walk_files(root: Path) -> Iterator[Path]:
         followlinks=False,
         onerror=handle_error,
     ):
-        directory_names[:] = sorted(
-            name for name in directory_names if name not in SKIP_DIRS
-        )
         current = Path(directory)
+        directory_names[:] = sorted(
+            name
+            for name in directory_names
+            if name not in SKIP_DIRS
+            and (
+                project_config is None
+                or not project_config.excludes_workspace_path(current / name)
+            )
+        )
         for name in sorted(file_names):
             path = current / name
+            if (
+                project_config is not None
+                and project_config.excludes_workspace_path(path)
+            ):
+                continue
             try:
                 if path.is_file():
                     yield path
@@ -796,6 +842,11 @@ def _add_resolved_path(
 ) -> None:
     resolved = _resolve_project_path(value, base=base, origin=origin, discovery=discovery)
     if resolved is None:
+        return
+    if (
+        discovery.project_config is not None
+        and discovery.project_config.excludes_workspace_path(resolved)
+    ):
         return
     key = str(resolved).casefold()
     if key not in seen:

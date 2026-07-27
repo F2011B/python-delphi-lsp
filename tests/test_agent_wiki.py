@@ -319,6 +319,65 @@ def test_export_uses_toml_project_paths_across_monorepo_depths(tmp_path: Path) -
     assert "Demo" not in project_text
 
 
+def test_export_never_reads_workspace_excluded_dependency_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = tmp_path / "repo"
+    output = tmp_path / "knowledge"
+    _write(
+        repository / "Main.dpr",
+        """
+        program Main;
+        uses
+          AllowedUnit in 'AllowedUnit.pas',
+          BlockedUnit in 'vendor/BlockedUnit.pas';
+        begin
+        end.
+        """,
+    )
+    _write(
+        repository / "AllowedUnit.pas",
+        (
+            "unit AllowedUnit; interface "
+            "{$I vendor/Hidden.inc} implementation end."
+        ),
+    )
+    blocked = repository / "vendor" / "BlockedUnit.pas"
+    _write(
+        blocked,
+        "unit BlockedUnit; interface implementation end.",
+    )
+    blocked_include = repository / "vendor" / "Hidden.inc"
+    _write(blocked_include, "const HiddenValue = 1;")
+    _write(
+        repository / ".delphi-lsp.toml",
+        """
+        [workspace]
+        exclude = ["vendor"]
+        """,
+    )
+    read_paths: list[Path] = []
+    real_read = Path.read_bytes
+
+    def record_read(path: Path) -> bytes:
+        read_paths.append(path.resolve())
+        return real_read(path)
+
+    monkeypatch.setattr(Path, "read_bytes", record_read)
+
+    result = export_okf_wiki(repository, output, workers=1)
+
+    assert result.units == 2
+    assert blocked.resolve() not in read_paths
+    assert blocked_include.resolve() not in read_paths
+    unit_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (output / "units").glob("*.md")
+    )
+    assert "BlockedUnit" not in unit_text
+
+
 def test_explicit_project_file_overrides_main_project_selection(tmp_path: Path) -> None:
     repository = tmp_path / "repo"
     output = tmp_path / "knowledge"

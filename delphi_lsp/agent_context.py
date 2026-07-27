@@ -33,6 +33,7 @@ from .navigation_cache import NavigationShardStore, navigation_cache_key
 from .nodes import CompoundSyntaxNode, SyntaxNode
 from .parser import DelphiParser
 from .parser_backend import ParserMode
+from .project_config import ProjectPathConfig, workspace_include_loader
 from .semantic import (
     Scope,
     ScopeKind,
@@ -131,12 +132,14 @@ class _SourceDocument:
         *,
         defines: tuple[str, ...] = (),
         include_paths: tuple[str, ...] = (),
+        project_config: ProjectPathConfig | None = None,
     ) -> None:
         self.source_path = source_path
         self.display_path = display_path
         self.text = text
         self.defines = defines
         self.include_paths = include_paths
+        self.project_config = project_config
         self.line_starts = _line_starts(text)
         self.tokens = tuple(_lex_delphi(text))
         self.token_starts = tuple(token.start for token in self.tokens)
@@ -211,6 +214,10 @@ class _SourceDocument:
                 self._full_parse_result = DelphiParser(
                     defines=self.defines,
                     include_paths=self.include_paths,
+                    include_loader=workspace_include_loader(
+                        self.project_config,
+                        self.include_paths,
+                    ),
                 ).parse(self.text, str(self.source_path), build_semantic=False)
             except Exception:
                 self._full_parse_result = None
@@ -223,6 +230,7 @@ class _SourceSpec:
     display_path: str
     defines: tuple[str, ...]
     include_paths: tuple[str, ...]
+    project_config: ProjectPathConfig | None = None
 
 
 class _SourceStore:
@@ -252,6 +260,7 @@ class _SourceStore:
             read_source_text(spec.source_path),
             defines=spec.defines,
             include_paths=spec.include_paths,
+            project_config=spec.project_config,
         )
         if document.retained_bytes > self._max_loaded_bytes:
             return document
@@ -911,6 +920,10 @@ class AgentContext:
             parsed = DelphiParser(
                 defines=document.defines,
                 include_paths=document.include_paths,
+                include_loader=workspace_include_loader(
+                    document.project_config,
+                    document.include_paths,
+                ),
                 mode=(
                     ParserMode.TOLERANT
                     if len(self._workspace.units) >= 256
@@ -1353,6 +1366,7 @@ def _build_registry(
             unit_display_path(workspace.root, unit),
             workspace.defines,
             workspace.include_paths,
+            workspace.project_config,
         )
         for unit in units
     }

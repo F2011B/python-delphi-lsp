@@ -10,6 +10,7 @@ import delphi_lsp.agent_metrics as agent_metrics_module
 from delphi_lsp.agent_context import AgentContext
 from delphi_lsp.agent_metrics import build_path_metrics
 from delphi_lsp.agent_protocol import AgentProtocolError
+from delphi_lsp.project_config import load_project_path_config
 
 
 def write_source(path: Path, source: str) -> None:
@@ -127,6 +128,49 @@ def test_path_metrics_reads_each_source_once_without_project_source_map(
 
     assert result.unit_count == 3
     assert reads == {path.resolve(): 1 for path in source_files}
+
+
+def test_path_metrics_never_loads_includes_from_workspace_excluded_directories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_path = tmp_path / "Allowed.pas"
+    blocked_include = tmp_path / "vendor" / "Hidden.inc"
+    write_source(
+        source_path,
+        """
+        unit Allowed;
+        interface
+        {$I vendor/Hidden.inc}
+        implementation
+        end.
+        """,
+    )
+    write_source(blocked_include, "const HiddenValue = 1;")
+    (tmp_path / ".delphi-lsp.toml").write_text(
+        '[workspace]\nexclude = ["vendor"]\n',
+        encoding="utf-8",
+    )
+    config = load_project_path_config(tmp_path)
+    assert config is not None
+    real_read = Path.read_bytes
+    reads: list[Path] = []
+
+    def recording_read(path: Path) -> bytes:
+        reads.append(path.resolve())
+        return real_read(path)
+
+    monkeypatch.setattr(Path, "read_bytes", recording_read)
+
+    result = build_path_metrics(
+        tmp_path,
+        [source_path],
+        workers=1,
+        project_config=config,
+    )
+
+    assert result.unit_count == 1
+    assert blocked_include.resolve() not in reads
 
 
 def test_parallel_metrics_match_serial_metrics(tmp_path: Path) -> None:

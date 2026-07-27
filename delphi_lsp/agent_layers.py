@@ -167,6 +167,7 @@ def _build_project_results(
             defines=discovery.defines,
             on_progress=progress,
             source_roots=source_roots,
+            project_config=discovery.project_config,
         )
         raw_result = indexer.index(project)
         result = raw_result

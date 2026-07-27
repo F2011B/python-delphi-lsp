@@ -114,6 +114,10 @@ def test_readme_documents_v3_release_plugin_protocol_discovery_and_vllm_proof() 
     assert 'exclude = [' in readme
     assert 'exclude` always wins' in readme
     assert 'matched no Delphi projects' in readme
+    assert '[workspace]' in readme
+    assert 'never traversed or parsed' in readme
+    assert '`projects.exclude`' in readme
+    assert '`workspace.exclude`' in readme
 
 
 def test_root_opencode_config_is_portable_and_has_no_pythonpath_requirement() -> None:

@@ -291,7 +291,13 @@ include = [
 exclude = [
   "**/examples/**",
   "**/tests/**",
-  "vendor/**",
+]
+
+[workspace]
+exclude = [
+  "vendor",
+  "generated/**",
+  "thirdparty/legacy",
 ]
 ```
 
@@ -307,12 +313,23 @@ all remaining matches are main projects even when they occur at different
 directory depths; the built-in shallow-project and example-name heuristic is
 not applied.
 
+Use `projects.exclude` when a directory may still contain shared units but its
+project entries must not become selectable projects. Use `workspace.exclude`
+for a hard boundary. Matching directories are never traversed or parsed, and
+neither is any file below them. They cannot be reintroduced by
+`projects.include` or an explicit `--project-file`. Unit dependencies and
+include directives resolving into those directories are reported as
+unavailable without reading the files.
+For complete directory pruning, an exact entry such as `"vendor"` is enough;
+`"generated/**"` also excludes the `generated` directory itself.
+
 The same selection is used by `cache`, `worker`, `query`, `view`, `index`,
 wiki export, and language-server discovery. An explicit `--project-file`
-bypasses the TOML include/exclude selection for that invocation. If configured
-filters matched no Delphi projects, the command stops with a configuration
-error instead of silently parsing every source file in the repository. Restart
-an already running cache daemon after changing the project selection file.
+bypasses `projects.include` and `projects.exclude` for that invocation, but
+never bypasses `workspace.exclude`. If no project remains, the command reports
+that the configured filters matched no Delphi projects and stops instead of
+silently parsing every source file in the repository. Restart an already
+running cache daemon after changing the path configuration.
 
 `inspect` uses the currently focused target, so call `focus TARGET_ID` before
 `inspect` unless a previous request already selected it.

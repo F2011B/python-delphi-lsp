@@ -6,6 +6,7 @@ from typing import Iterable
 from .consts import AttributeName
 from .nodes import SyntaxNode
 from .parser import DelphiParser
+from .preprocessor import IncludeLoader
 from .semantic import Scope, ScopeKind, SymbolIndex
 from .semantic_builder import SemanticBuilder, SemanticModel
 
@@ -21,12 +22,14 @@ def build_workspace_semantics(
     *,
     include_paths: Iterable[str] = (),
     defines: Iterable[str] = (),
+    include_loader: IncludeLoader | None = None,
     preprocessor_options=None,
     collect_references: bool = True,
 ) -> WorkspaceSemanticResult:
     parser = DelphiParser(
         include_paths=include_paths,
         defines=defines,
+        include_loader=include_loader,
         preprocessor_options=preprocessor_options,
     )
     roots: dict[str, SyntaxNode] = {}

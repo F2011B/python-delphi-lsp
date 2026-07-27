@@ -6,10 +6,69 @@ from unittest import mock
 
 from delphi_lsp.lsp_server import outline_source
 from delphi_lsp.parser import DelphiParser
+from delphi_lsp.project_config import load_project_path_config
 from delphi_lsp.project_indexer import ProjectIndexer, ProjectProblemType
 
 
 class ProjectIndexerTests(unittest.TestCase):
+    def test_workspace_exclude_blocks_dependency_and_include_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repository = Path(tmp)
+            vendor = repository / 'vendor'
+            vendor.mkdir()
+            project = repository / 'Main.dpr'
+            project.write_text(
+                (
+                    "program Main; uses LocalUnit in 'LocalUnit.pas', "
+                    "BlockedUnit in 'vendor/BlockedUnit.pas'; begin end.\n"
+                ),
+                encoding='utf-8',
+            )
+            (repository / 'LocalUnit.pas').write_text(
+                (
+                    "unit LocalUnit; interface {$I vendor/Hidden.inc} "
+                    "implementation end.\n"
+                ),
+                encoding='utf-8',
+            )
+            blocked_unit = vendor / 'BlockedUnit.pas'
+            blocked_unit.write_text(
+                "unit BlockedUnit; interface implementation end.\n",
+                encoding='utf-8',
+            )
+            blocked_include = vendor / 'Hidden.inc'
+            blocked_include.write_text(
+                "const HiddenValue = 1;\n",
+                encoding='utf-8',
+            )
+            (repository / '.delphi-lsp.toml').write_text(
+                "[workspace]\nexclude = ['vendor']\n",
+                encoding='utf-8',
+            )
+            config = load_project_path_config(repository)
+            self.assertIsNotNone(config)
+            read_paths: list[Path] = []
+            original_read = Path.read_bytes
+
+            def record_read(path: Path) -> bytes:
+                read_paths.append(path.resolve())
+                return original_read(path)
+
+            with mock.patch.object(Path, 'read_bytes', record_read):
+                result = ProjectIndexer(
+                    project_config=config,
+                    source_roots=[repository],
+                ).index(str(project))
+
+            self.assertEqual(
+                {unit.name for unit in result.parsed_units},
+                {'Main', 'LocalUnit'},
+            )
+            self.assertIn('BlockedUnit', result.not_found_units)
+            self.assertEqual(result.include_files, [])
+            self.assertNotIn(blocked_unit.resolve(), read_paths)
+            self.assertNotIn(blocked_include.resolve(), read_paths)
+
     def test_source_roots_skip_external_units_and_includes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

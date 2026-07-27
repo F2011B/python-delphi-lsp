@@ -13,6 +13,7 @@ from .consts import AttributeName, SyntaxNodeType
 from .nodes import SyntaxNode
 from .parser import DelphiParser
 from .parser_backend import ParserMode
+from .project_config import workspace_include_loader
 from .project_indexer import ProjectIndexer, ProjectProblem
 from .semantic import (
     GenericInstanceTypeRef,
@@ -273,6 +274,10 @@ class ProjectRelationIndex:
                 parsed = DelphiParser(
                     include_paths=self._workspace.include_paths,
                     defines=self._workspace.defines,
+                    include_loader=workspace_include_loader(
+                        self._workspace.project_config,
+                        self._workspace.include_paths,
+                    ),
                     mode=(
                         ParserMode.TOLERANT
                         if len(self._workspace.units) >= 256
@@ -739,6 +744,7 @@ def _load_project_roots(
             include_paths=workspace.include_paths,
             defines=workspace.defines,
             mode=parser_mode,
+            project_config=workspace.project_config,
         )
         result = indexer.index(str(project_path.resolve()))
         roots = {
@@ -752,6 +758,10 @@ def _load_project_roots(
     parser = DelphiParser(
         include_paths=workspace.include_paths,
         defines=workspace.defines,
+        include_loader=workspace_include_loader(
+            workspace.project_config,
+            workspace.include_paths,
+        ),
         mode=parser_mode,
     )
     roots: dict[str, SyntaxNode] = {}

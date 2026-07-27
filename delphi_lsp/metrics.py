@@ -13,6 +13,7 @@ from .lark_tokens import KEYWORDS
 from .nodes import SyntaxNode
 from .parser import DelphiParser
 from .parser_backend import ParserMode, normalize_mode
+from .preprocessor import IncludeLoader
 from .semantic import Scope, SymbolKind
 
 
@@ -261,6 +262,7 @@ def analyze_unit(
     *,
     defines: Iterable[str] = (),
     include_paths: Iterable[str] = (),
+    include_loader: IncludeLoader | None = None,
     parser_mode: ParserMode | str = ParserMode.STRICT,
 ) -> UnitMetrics:
     scan = _scan_source(source)
@@ -271,6 +273,7 @@ def analyze_unit(
         parsed = DelphiParser(
             defines=tuple(defines),
             include_paths=tuple(include_paths),
+            include_loader=include_loader,
             mode=normalize_mode(parser_mode),
         ).parse(source, path, build_semantic=True)
         root = parsed.root

@@ -908,6 +908,7 @@ class _WikiWriter:
             self.index.discovery.source_files,
             defines=self.index.discovery.defines,
             include_paths=self.index.discovery.include_paths,
+            project_config=self.index.discovery.project_config,
             project_name=project_name,
             workers=self.workers,
             on_progress=lambda completed, total, path: self._progress(

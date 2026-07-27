@@ -73,6 +73,30 @@ def test_missing_configuration_is_not_an_active_filter(tmp_path: Path) -> None:
     assert load_project_path_config(tmp_path) is None
 
 
+def test_workspace_exclude_matches_complete_directories_and_files(
+    tmp_path: Path,
+) -> None:
+    _write_config(
+        tmp_path,
+        """
+        [workspace]
+        exclude = ["vendor", "generated/**", "**/temp/**"]
+        """,
+    )
+
+    config = load_project_path_config(tmp_path)
+
+    assert config is not None
+    assert config.workspace_exclude == ("vendor", "generated/**", "**/temp/**")
+    assert config.excludes_workspace_path(tmp_path / "vendor")
+    assert config.excludes_workspace_path(tmp_path / "vendor" / "UnitA.pas")
+    assert config.excludes_workspace_path(tmp_path / "generated")
+    assert config.excludes_workspace_path(tmp_path / "generated" / "v2" / "Api.pas")
+    assert config.excludes_workspace_path(tmp_path / "apps" / "temp")
+    assert config.excludes_workspace_path(tmp_path / "apps" / "temp" / "Cache.pas")
+    assert not config.excludes_workspace_path(tmp_path / "src" / "UnitA.pas")
+
+
 @pytest.mark.parametrize(
     ("text", "message"),
     [
@@ -84,6 +108,9 @@ def test_missing_configuration_is_not_an_active_filter(tmp_path: Path) -> None:
         ("[projects]\ninclude = ['../outside/**']\n", "must not contain '..'"),
         ("[projects]\ninclude = ['C:/outside/**']\n", "repository-relative"),
         ("[projects]\ninclude = ['']\n", "must not be empty"),
+        ("[workspace]\nunknown = []\n", "Unsupported key"),
+        ("[workspace]\nexclude = 'vendor'\n", "must be an array"),
+        ("[workspace]\nexclude = ['../vendor']\n", "must not contain '..'"),
     ],
 )
 def test_rejects_invalid_project_configuration(

@@ -20,6 +20,7 @@ from .metrics import (
 )
 from .parallel_outline import run_outline_tasks
 from .parser_backend import ParserMode
+from .project_config import ProjectPathConfig, workspace_include_loader
 from .source_reader import read_source_text
 
 
@@ -37,6 +38,7 @@ class _MetricTask:
     defines: tuple[str, ...]
     include_paths: tuple[str, ...]
     parser_mode: ParserMode
+    project_config: ProjectPathConfig | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +68,10 @@ def _analyze_metric_task(task: _MetricTask) -> _MetricResult:
         task.display_path,
         defines=task.defines,
         include_paths=task.include_paths,
+        include_loader=workspace_include_loader(
+            task.project_config,
+            task.include_paths,
+        ),
         parser_mode=task.parser_mode,
     )
     return _MetricResult(
@@ -114,6 +120,7 @@ def build_workspace_metrics(
                 workspace.defines,
                 workspace.include_paths,
                 parser_mode,
+                workspace.project_config,
             )
             for ordinal, unit in enumerate(units)
         ),
@@ -169,6 +176,7 @@ def build_path_metrics(
     *,
     defines: Iterable[str] = (),
     include_paths: Iterable[str | Path] = (),
+    project_config: ProjectPathConfig | None = None,
     project_name: str = "",
     workers: int = 0,
     on_progress: MetricProgressCallback | None = None,
@@ -182,6 +190,11 @@ def build_path_metrics(
         if not path.is_absolute():
             path = root_path / path
         path = path.resolve()
+        if (
+            project_config is not None
+            and project_config.excludes_workspace_path(path)
+        ):
+            continue
         unique_paths.setdefault(str(path).replace("\\", "/").casefold(), path)
     unit_paths = [
         path for path in unique_paths.values() if path.suffix.casefold() in {".pas", ".dpr", ".dpk"}
@@ -228,6 +241,7 @@ def build_path_metrics(
                 define_values,
                 include_path_values,
                 parser_mode,
+                project_config,
             )
             for ordinal, path in enumerate(unit_paths)
         ),

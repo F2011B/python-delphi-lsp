@@ -11,6 +11,7 @@ from .parser import DelphiParser
 from .parser_backend import ParserBackend, ParserMode, normalize_backend, normalize_mode
 from .preprocessor import IncludeLoader
 from .progress import ProgressCallback, ProgressEvent
+from .project_config import ProjectPathConfig
 from .source_reader import read_source_text
 
 
@@ -77,6 +78,7 @@ class ProjectIndexer:
         backend: ParserBackend | str = ParserBackend.DELPHIAST,
         mode: ParserMode | str = ParserMode.STRICT,
         source_roots: Iterable[str | Path] = (),
+        project_config: ProjectPathConfig | None = None,
     ) -> None:
         self.search_paths = [Path(path) for path in search_paths]
         self.include_paths = [Path(path) for path in include_paths]
@@ -91,6 +93,7 @@ class ProjectIndexer:
         self.source_roots = tuple(
             Path(path).expanduser().resolve() for path in source_roots
         )
+        self.project_config = project_config
 
         self._parsed_units: dict[str, UnitInfo] = {}
         self._problems: list[ProjectProblem] = []
@@ -135,6 +138,9 @@ class ProjectIndexer:
 
     def _parse_unit(self, unit_name: str, file_path: Path, *, is_project: bool) -> None:
         if self._aborting:
+            return
+        if not self._source_is_allowed(file_path):
+            self._not_found_units.add(unit_name)
             return
 
         normalized_name = unit_name.casefold()
@@ -357,12 +363,17 @@ class ProjectIndexer:
         return wrapped
 
     def _source_is_allowed(self, path: Path) -> bool:
-        if not self.source_roots:
-            return True
         try:
             resolved = path.expanduser().resolve()
         except OSError:
             return False
+        if (
+            self.project_config is not None
+            and self.project_config.excludes_workspace_path(resolved)
+        ):
+            return False
+        if not self.source_roots:
+            return True
         return any(resolved.is_relative_to(root) for root in self.source_roots)
 
     def _emit_progress(self, phase: str, path: str, detail: str) -> None:

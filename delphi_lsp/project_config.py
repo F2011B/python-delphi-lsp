@@ -3,8 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 import re
+
+from .preprocessor import IncludeLoader
+from .source_reader import read_source_text
 
 try:
     import tomllib
@@ -14,6 +17,7 @@ except ModuleNotFoundError:  # pragma: no cover - exercised by Python 3.10 CI
 
 CONFIG_FILE_NAME = ".delphi-lsp.toml"
 _PROJECT_KEYS = frozenset({"include", "exclude"})
+_WORKSPACE_KEYS = frozenset({"exclude"})
 _WINDOWS_ABSOLUTE_RE = re.compile(r"^[A-Za-z]:/")
 
 
@@ -27,6 +31,7 @@ class ProjectPathConfig:
     source: Path
     include: tuple[str, ...] = ()
     exclude: tuple[str, ...] = ()
+    workspace_exclude: tuple[str, ...] = ()
 
     @property
     def has_filters(self) -> bool:
@@ -44,6 +49,12 @@ class ProjectPathConfig:
             return False
         return not _matches_any(relative_paths, self.exclude)
 
+    def excludes_workspace_path(self, path: str | Path) -> bool:
+        relative = _repository_relative_path(path, self.root)
+        if relative is None:
+            return False
+        return _matches_any((relative,), self.workspace_exclude)
+
 
 def load_project_path_config(root: str | Path) -> ProjectPathConfig | None:
     root_path = Path(root).expanduser().resolve()
@@ -56,43 +67,95 @@ def load_project_path_config(root: str | Path) -> ProjectPathConfig | None:
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ProjectConfigError(f"{config_path}: Invalid TOML: {exc}") from exc
 
-    projects = document.get("projects")
-    if projects is None:
-        return ProjectPathConfig(root=root_path, source=config_path.resolve())
-    if not isinstance(projects, Mapping):
-        raise ProjectConfigError(f"{config_path}: [projects] must be a TOML table.")
-    unknown = sorted(set(projects) - _PROJECT_KEYS)
-    if unknown:
-        rendered = ", ".join(str(key) for key in unknown)
-        raise ProjectConfigError(
-            f"{config_path}: Unsupported key in [projects]: {rendered}."
-        )
-    include = _load_patterns(projects, "include", config_path)
-    exclude = _load_patterns(projects, "exclude", config_path)
+    projects = _load_table(document, "projects", _PROJECT_KEYS, config_path)
+    workspace = _load_table(document, "workspace", _WORKSPACE_KEYS, config_path)
+    include = _load_patterns(projects, "include", config_path, section="projects")
+    exclude = _load_patterns(projects, "exclude", config_path, section="projects")
+    workspace_exclude = _load_patterns(
+        workspace,
+        "exclude",
+        config_path,
+        section="workspace",
+    )
     return ProjectPathConfig(
         root=root_path,
         source=config_path.resolve(),
         include=include,
         exclude=exclude,
+        workspace_exclude=workspace_exclude,
     )
+
+
+def workspace_include_loader(
+    project_config: ProjectPathConfig | None,
+    include_paths: Iterable[str | Path] = (),
+) -> IncludeLoader | None:
+    """Build an include loader that enforces the repository's hard path boundary."""
+
+    if project_config is None or not project_config.workspace_exclude:
+        return None
+    search_paths = tuple(
+        Path(path).expanduser().resolve()
+        for path in include_paths
+    )
+
+    def load(parent_file: str, include_name: str) -> tuple[str, str] | None:
+        include_path = Path(include_name.replace("\\", "/"))
+        parent = Path(parent_file).expanduser().resolve().parent
+        for base in (parent, *search_paths):
+            candidate = (base / include_path).resolve()
+            if project_config.excludes_workspace_path(candidate):
+                continue
+            try:
+                if candidate.is_file():
+                    return read_source_text(candidate), str(candidate)
+            except (OSError, UnicodeError):
+                continue
+        return None
+
+    return load
+
+
+def _load_table(
+    document: Mapping[str, Any],
+    name: str,
+    supported_keys: frozenset[str],
+    config_path: Path,
+) -> Mapping[str, Any]:
+    table = document.get(name, {})
+    if not isinstance(table, Mapping):
+        raise ProjectConfigError(f"{config_path}: [{name}] must be a TOML table.")
+    unknown = sorted(set(table) - supported_keys)
+    if unknown:
+        rendered = ", ".join(str(key) for key in unknown)
+        raise ProjectConfigError(
+            f"{config_path}: Unsupported key in [{name}]: {rendered}."
+        )
+    return table
 
 
 def _load_patterns(
     projects: Mapping[str, Any],
     name: str,
     config_path: Path,
+    *,
+    section: str,
 ) -> tuple[str, ...]:
     values = projects.get(name, [])
     if not isinstance(values, list):
         raise ProjectConfigError(
-            f"{config_path}: projects.{name} must be an array of strings."
+            f"{config_path}: {section}.{name} must be an array of strings."
         )
     if any(not isinstance(value, str) for value in values):
         raise ProjectConfigError(
-            f"{config_path}: projects.{name} must contain only strings."
+            f"{config_path}: {section}.{name} must contain only strings."
         )
     normalized = tuple(
-        _normalize_pattern(value, config_path=config_path, setting=name)
+        _normalize_pattern(
+            value,
+            config_path=config_path,
+            setting=f"{section}.{name}",
+        )
         for value in values
     )
     return tuple(dict.fromkeys(normalized))
@@ -105,15 +168,15 @@ def _normalize_pattern(value: str, *, config_path: Path, setting: str) -> str:
     pattern = pattern.rstrip("/")
     if not pattern:
         raise ProjectConfigError(
-            f"{config_path}: projects.{setting} patterns must not be empty."
+            f"{config_path}: {setting} patterns must not be empty."
         )
     if pattern.startswith("/") or _WINDOWS_ABSOLUTE_RE.match(pattern):
         raise ProjectConfigError(
-            f"{config_path}: projects.{setting} patterns must be repository-relative."
+            f"{config_path}: {setting} patterns must be repository-relative."
         )
     if any(part == ".." for part in pattern.split("/")):
         raise ProjectConfigError(
-            f"{config_path}: projects.{setting} patterns must not contain '..'."
+            f"{config_path}: {setting} patterns must not contain '..'."
         )
     return pattern
 
@@ -140,6 +203,10 @@ def _matches_any(paths: tuple[str, ...], patterns: tuple[str, ...]) -> bool:
 def _path_matches_pattern(path: str, pattern: str) -> bool:
     if not any(token in pattern for token in ("*", "?")):
         return path == pattern or path.startswith(f"{pattern}/")
+    if pattern.endswith("/**"):
+        directory_pattern = pattern[:-3].rstrip("/")
+        if _compile_pattern(directory_pattern).fullmatch(path):
+            return True
     return bool(_compile_pattern(pattern).fullmatch(path))
 
 
@@ -172,4 +239,5 @@ __all__ = [
     "ProjectConfigError",
     "ProjectPathConfig",
     "load_project_path_config",
+    "workspace_include_loader",
 ]

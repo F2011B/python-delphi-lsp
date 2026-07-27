@@ -25,6 +25,11 @@ from .semantic_builder import SemanticBuilder, SemanticModel
 from .source_reader import read_source_text
 from .workspace import WorkspaceSemanticResult, build_workspace_semantics
 from .project_discovery import discover_delphi_project
+from .project_config import (
+    ProjectPathConfig,
+    load_project_path_config,
+    workspace_include_loader,
+)
 from ._version import __version__
 
 
@@ -66,8 +71,18 @@ class LspWorkspaceState:
     workspace_symbol_query_cache: dict[str, WorkspaceSemanticResult] = field(default_factory=dict)
     workspace_files: set[str] = field(default_factory=set)
     file_cache: dict[str, FileSnapshot] = field(default_factory=dict)
+    project_configs: tuple[ProjectPathConfig, ...] = field(
+        default_factory=tuple,
+        init=False,
+        repr=False,
+    )
 
     def configure(self, config: WorkspaceConfig) -> None:
+        self.project_configs = tuple(
+            loaded
+            for root in config.roots
+            if (loaded := load_project_path_config(root)) is not None
+        )
         self.config = self._with_discovered_config(config)
         self.workspace_files = set()
         self.file_cache = {}
@@ -185,11 +200,34 @@ class LspWorkspaceState:
     def _scan_workspace_files(self) -> list[str]:
         files: list[str] = []
         for root in self.config.roots:
-            root_path = Path(root)
+            root_path = Path(root).expanduser()
             if not root_path.exists():
                 continue
-            for ext in self.config.extensions:
-                files.extend(str(path) for path in root_path.rglob(f'*{ext}'))
+            project_config = self._project_config_for(root_path)
+            extensions = {extension.casefold() for extension in self.config.extensions}
+            for directory, directory_names, file_names in os.walk(
+                root_path,
+                followlinks=False,
+            ):
+                current = Path(directory)
+                directory_names[:] = [
+                    name
+                    for name in directory_names
+                    if (
+                        project_config is None
+                        or not project_config.excludes_workspace_path(current / name)
+                    )
+                ]
+                for name in file_names:
+                    path = current / name
+                    if path.suffix.casefold() not in extensions:
+                        continue
+                    if (
+                        project_config is not None
+                        and project_config.excludes_workspace_path(path)
+                    ):
+                        continue
+                    files.append(str(path))
         return files
 
     def _refresh_file_cache(self) -> None:
@@ -244,6 +282,8 @@ class LspWorkspaceState:
         path = Path(file_name)
         if not path.exists():
             return None
+        if self._is_workspace_excluded(path):
+            return None
         try:
             text = read_source_text(path)
         except (OSError, UnicodeError):
@@ -263,6 +303,10 @@ class LspWorkspaceState:
             {file_name: text},
             include_paths=self.config.include_paths,
             defines=self.config.defines,
+            include_loader=workspace_include_loader(
+                self._project_config_for(Path(file_name)),
+                self.config.include_paths,
+            ),
         )
         return result.models.get(file_name)
 
@@ -289,10 +333,33 @@ class LspWorkspaceState:
         path = Path(file_name)
         if not path.exists():
             return None
+        if self._is_workspace_excluded(path):
+            return None
         try:
             return read_source_text(path)
         except (OSError, UnicodeError):
             return None
+
+    def _project_config_for(self, path: Path) -> ProjectPathConfig | None:
+        try:
+            resolved = path.expanduser().resolve()
+        except OSError:
+            return None
+        matches = [
+            config
+            for config in self.project_configs
+            if resolved == config.root or resolved.is_relative_to(config.root)
+        ]
+        if not matches:
+            return None
+        return max(matches, key=lambda config: len(config.root.parts))
+
+    def _is_workspace_excluded(self, path: Path) -> bool:
+        project_config = self._project_config_for(path)
+        return (
+            project_config is not None
+            and project_config.excludes_workspace_path(path)
+        )
 
     def _outline_workspace_semantics(
         self,
