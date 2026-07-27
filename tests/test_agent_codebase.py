@@ -287,6 +287,37 @@ def test_default_layer_index_does_not_deep_parse_project_dependencies(tmp_path: 
     assert "TWorker" in symbols
 
 
+def test_symbols_layer_does_not_hide_symbols_after_first_200_sorted_names(
+    tmp_path: Path,
+) -> None:
+    declarations = "\n".join(
+        f"  _Internal{index:03d} = Integer;"
+        for index in range(205)
+    )
+    write_text(
+        tmp_path / "ManySymbols.pas",
+        f"""
+        unit ManySymbols;
+
+        interface
+
+        type
+        {declarations}
+          VisibleSymbol = Integer;
+
+        implementation
+
+        end.
+        """,
+    )
+
+    payload = layer_payload(build_codebase_index(tmp_path), "symbols")
+    names = {item["name"] for item in payload["items"]}
+
+    assert "VisibleSymbol" in names
+    assert len(names) == 206
+
+
 def test_agent_cli_outputs_symbol_layer_as_json(tmp_path: Path) -> None:
     make_project(tmp_path)
 
