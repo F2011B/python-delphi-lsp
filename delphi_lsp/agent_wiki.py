@@ -427,7 +427,16 @@ class _WikiWriter:
     def _write_units(self) -> None:
         pages: list[tuple[str, PurePosixPath]] = []
         symbol_records_by_source: dict[str, list[_SymbolRecord]] = {}
-        for record in self.symbols:
+        source_ordered_records = sorted(
+            self.symbols,
+            key=lambda record: (
+                _normalized_source(record.symbol.decl_range.file_name),
+                record.symbol.decl_range.start_line,
+                record.symbol.decl_range.start_col,
+                record.symbol.name.casefold(),
+            ),
+        )
+        for record in source_ordered_records:
             symbol_records_by_source.setdefault(
                 _normalized_source(record.symbol.decl_range.file_name), []
             ).append(record)
@@ -470,6 +479,7 @@ class _WikiWriter:
                 tags=("delphi", "unit"),
                 body=body,
             )
+        pages.sort(key=lambda item: (item[0].casefold(), item[1].as_posix()))
         self._directory_index(
             PurePosixPath("units/index.md"),
             "Units",
@@ -480,14 +490,23 @@ class _WikiWriter:
     def _write_symbols(self) -> None:
         pages: list[tuple[str, PurePosixPath]] = []
         children_by_owner: dict[tuple[str, str], list[_SymbolRecord]] = {}
-        for record in self.symbols:
+        source_ordered_records = sorted(
+            self.symbols,
+            key=lambda record: (
+                _normalized_source(record.symbol.decl_range.file_name),
+                record.symbol.decl_range.start_line,
+                record.symbol.decl_range.start_col,
+                record.symbol.name.casefold(),
+            ),
+        )
+        for record in source_ordered_records:
             owner = _symbol_owner(record.symbol)
             children_by_owner.setdefault(
                 (_normalized_source(record.symbol.decl_range.file_name), owner.casefold()),
                 [],
             ).append(record)
 
-        for record in self.symbols:
+        for record in source_ordered_records:
             symbol = record.symbol
             pages.append((f"{symbol.name} ({symbol.kind.value})", record.page))
             source = self._display_path(symbol.decl_range.file_name)
@@ -560,6 +579,7 @@ class _WikiWriter:
                 tags=("delphi", "symbol", symbol.kind.value),
                 body=body,
             )
+        pages.sort(key=lambda item: (item[0].casefold(), item[1].as_posix()))
         self._directory_index(
             PurePosixPath("symbols/index.md"),
             "Symbols",
@@ -902,7 +922,7 @@ def _symbol_owner(symbol: Symbol) -> str:
 
 
 def _normalized_source(value: str) -> str:
-    return os.path.normcase(os.path.abspath(value)).replace("\\", "/").casefold()
+    return os.path.normcase(os.path.abspath(value)).replace("\\", "/")
 
 
 def _reference_sort_key(reference: SymbolReference) -> tuple[str, int, int, str, str]:
@@ -919,7 +939,7 @@ def _document_name(label: str, identity: str) -> str:
     normalized = unicodedata.normalize("NFKD", label)
     ascii_label = normalized.encode("ascii", "ignore").decode("ascii").casefold()
     slug = re.sub(r"[^a-z0-9]+", "-", ascii_label).strip("-")[:64] or "concept"
-    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
     return f"{slug}-{digest}.md"
 
 
