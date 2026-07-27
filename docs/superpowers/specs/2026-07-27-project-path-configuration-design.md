@@ -21,6 +21,12 @@ exclude = [
   "**/examples/**",
   "legacy/**",
 ]
+
+[workspace]
+exclude = [
+  "vendor",
+  "generated/**",
+]
 ```
 
 Patterns are repository-relative, case-insensitive, and use `/` separators.
@@ -31,6 +37,12 @@ parent traversal (`..`) are invalid.
 Both project entry files and their companion `.dproj` files participate in
 matching. This lets a `.dproj` path select the `.dpr` or `.dpk` named by its
 `MainSource`.
+
+`projects.exclude` removes project entries from the selected project set.
+`workspace.exclude` is a harder boundary: matching directories are pruned
+before traversal, and matching files cannot be loaded later as units or
+includes. An exact directory excludes its complete subtree. Workspace
+exclusions win over project includes and explicit `--project-file` selection.
 
 ## Selection Rules
 
@@ -46,6 +58,8 @@ matching. This lets a `.dproj` path select the `.dpr` or `.dpk` named by its
    precise error. It must not fall back to parsing all repository sources.
 7. Without configured project filters, existing discovery behavior is
    unchanged.
+8. A path matched by `workspace.exclude` is never discovered, read, parsed, or
+   followed as a project dependency.
 
 The configuration applies at the shared discovery layer, so wiki export,
 cache/worker navigation, index, view, and language-server discovery agree on
@@ -71,6 +85,7 @@ Tests cover:
 - explicit project override;
 - missing matches without all-source fallback;
 - malformed TOML and unsafe patterns;
+- complete directory pruning before `.dproj`, source, unit, or include reads;
+- dependency and include resolution refusing excluded directories;
 - automatic application to workspace/cache discovery;
 - unchanged behavior when no configuration exists.
-

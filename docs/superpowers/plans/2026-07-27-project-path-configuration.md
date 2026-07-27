@@ -70,3 +70,27 @@
 - [ ] Run Python 3.10 syntax compilation, `compileall`, `git diff --check`, package build, and `twine check`.
 - [ ] Review the final diff for scope, memory regressions, unsafe path handling, and documentation consistency.
 - [ ] Commit with the required author policy, rebase on origin, push, and verify clean synchronized status and green GitHub CI.
+
+### Task 6: Complete workspace directory exclusions
+
+**Files:**
+- Modify: `delphi_lsp/project_config.py`
+- Modify: `delphi_lsp/project_discovery.py`
+- Modify: `delphi_lsp/project_indexer.py`
+- Modify: `delphi_lsp/agent_layers.py`
+- Modify: `delphi_lsp/agent_workspace.py`
+- Modify: `delphi_lsp/agent_relations.py`
+- Modify: `tests/test_project_config.py`
+- Modify: `tests/test_project_discovery.py`
+- Modify: `tests/test_project_indexer.py`
+- Modify: `tests/test_agent_wiki.py`
+- Modify: `README.md`
+
+- [ ] Add failing loader tests for `[workspace].exclude` validation and matching.
+- [ ] Add a failing traversal test proving an excluded directory's `.dproj`, `.dpr`, `.pas`, and `.inc` files are absent without being opened.
+- [ ] Add a failing project-indexer test proving explicit unit and include dependencies inside an excluded directory are not read.
+- [ ] Parse `workspace.exclude`, prune matching `os.walk` directories, and reject matching explicit project entries.
+- [ ] Pass the loaded path configuration through every production `ProjectIndexer` construction.
+- [ ] Add a wiki acceptance test proving excluded dependency files produce no pages.
+- [ ] Document the distinction between project exclusion and complete workspace exclusion.
+- [ ] Run focused tests, the complete suite, package build, and cross-platform CI before delivery.
