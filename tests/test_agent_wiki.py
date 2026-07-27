@@ -299,6 +299,22 @@ def test_duplicate_unit_names_keep_distinct_metric_pages_and_links(tmp_path: Pat
     _assert_internal_links_resolve(output)
 
 
+def test_include_unit_without_unit_metrics_has_no_broken_metric_link(tmp_path: Path) -> None:
+    repository = tmp_path / "repo"
+    output = tmp_path / "wiki"
+    _write(
+        repository / "Shared.inc",
+        """
+        const
+          SharedValue = 42;
+        """,
+    )
+
+    export_okf_wiki(repository, output, workers=1)
+
+    _assert_internal_links_resolve(output)
+
+
 def test_agent_cli_exports_okf_wiki_and_reports_json_summary(tmp_path: Path) -> None:
     repository = tmp_path / "repo"
     output = tmp_path / "wiki"

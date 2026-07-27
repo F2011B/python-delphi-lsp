@@ -229,6 +229,7 @@ class _WikiWriter:
             tuple[str, str, str, int, int, int, int], list[SymbolReference]
         ] = {}
         self._projects_by_source: dict[str, list[tuple[str, PurePosixPath]]] = {}
+        self._metric_page_by_source: dict[str, PurePosixPath] = {}
         self._unresolved_references: list[SymbolReference] = []
         self._collect_references()
 
@@ -241,11 +242,11 @@ class _WikiWriter:
         self._write_overview()
         self._write_manifest()
         self._write_projects()
+        self._write_metrics()
         self._write_units()
         self._write_symbols()
         self._write_references()
         self._write_problems()
-        self._write_metrics()
         self._write_reference_docs()
 
     def _symbol_records(self) -> list[_SymbolRecord]:
@@ -534,10 +535,18 @@ class _WikiWriter:
             body.extend(self._reference_lines(references))
             if not references:
                 body.append("- None")
-            metrics_page = PurePosixPath("metrics/units") / _document_name(
-                unit.name, _normalized_source(unit.source_path)
+            metrics_page = self._metric_page_by_source.get(
+                _normalized_source(unit.source_path)
             )
-            body.extend(["", "## Related knowledge", "", f"- {_link('Unit metrics', metrics_page)}"])
+            if metrics_page is not None:
+                body.extend(
+                    [
+                        "",
+                        "## Related knowledge",
+                        "",
+                        f"- {_link('Unit metrics', metrics_page)}",
+                    ]
+                )
             self._concept(
                 unit.page,
                 concept_type="Delphi Unit",
@@ -768,6 +777,10 @@ class _WikiWriter:
             page = PurePosixPath("metrics/units") / _document_name(
                 str(item["name"]), metric_identity
             )
+            if unit is not None:
+                self._metric_page_by_source[
+                    _normalized_source(unit.source_path)
+                ] = page
             unit_pages.append((str(item["name"]), page))
             body = [
                 f"# {_escape(str(item['name']))} metrics",
