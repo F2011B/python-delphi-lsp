@@ -21,10 +21,11 @@ Stable digest suffixes prevent filename collisions between overloads and equal
 names. All internal Markdown links are validated by the test suite.
 
 Generation is deterministic and uses the existing parallel outline path. Pages
-are streamed to disk and the decoded-source cache retains at most four files.
-The complete bundle is installed only after successful generation. Existing
-output requires `--force`; repository-root, ancestor, and symlink destinations
-are rejected.
+are streamed to disk, the decoded-source cache retains at most four files, and
+metrics process source paths without retaining the complete source corpus. The
+complete bundle is installed only after successful generation. Existing
+non-empty output requires `--force`; repository-root, ancestor, and symlink
+destinations are rejected.
 
 Lazy CPG results remain focused live queries. Eagerly expanding every
 overlapping graph target would multiply parsing and make output unbounded on a

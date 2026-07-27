@@ -146,6 +146,12 @@ def test_export_okf_wiki_contains_all_layered_knowledge_and_valid_links(tmp_path
         for path in symbol_pages
         if path.name != "index.md"
     )
+    unit_pages = [
+        path for path in (output / "units").glob("*.md") if path.name != "index.md"
+    ]
+    assert any(
+        "](/projects/" in path.read_text(encoding="utf-8") for path in unit_pages
+    )
     assert "total_loc" in (output / "metrics" / "workspace.md").read_text(encoding="utf-8")
     assert "open" in (output / "reference" / "protocol.md").read_text(encoding="utf-8")
     assert "full" in (output / "reference" / "cpg.md").read_text(encoding="utf-8")
@@ -183,6 +189,78 @@ def test_export_rejects_unsafe_destination(tmp_path: Path) -> None:
 
     with pytest.raises(WikiExportError, match="repository root"):
         export_okf_wiki(repository, repository, force=True)
+
+
+def test_export_rejects_leaf_symlink_without_touching_target(tmp_path: Path) -> None:
+    repository = tmp_path / "repo"
+    victim = tmp_path / "victim"
+    destination = tmp_path / "wiki-link"
+    _make_repository(repository)
+    victim.mkdir()
+    marker = victim / "KEEP.txt"
+    marker.write_text("keep", encoding="utf-8")
+    try:
+        destination.symlink_to(victim, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"directory symlinks are unavailable: {error}")
+
+    with pytest.raises(WikiExportError, match="symlink"):
+        export_okf_wiki(repository, destination, workers=1, force=True)
+
+    assert destination.is_symlink()
+    assert marker.read_text(encoding="utf-8") == "keep"
+
+
+def test_export_resolves_symlinked_parent_without_following_leaf(tmp_path: Path) -> None:
+    repository = tmp_path / "repo"
+    real_parent = tmp_path / "real-parent"
+    parent_link = tmp_path / "parent-link"
+    _make_repository(repository)
+    real_parent.mkdir()
+    try:
+        parent_link.symlink_to(real_parent, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"directory symlinks are unavailable: {error}")
+
+    result = export_okf_wiki(repository, parent_link / "wiki", workers=1)
+
+    assert result.output == str((real_parent / "wiki").resolve())
+    assert (real_parent / "wiki" / "index.md").is_file()
+
+
+def test_export_accepts_existing_empty_destination_without_force(tmp_path: Path) -> None:
+    repository = tmp_path / "repo"
+    destination = tmp_path / "wiki"
+    _make_repository(repository)
+    destination.mkdir()
+
+    export_okf_wiki(repository, destination, workers=1)
+
+    assert (destination / "index.md").is_file()
+
+
+def test_shared_unit_links_back_to_every_owning_project(tmp_path: Path) -> None:
+    repository = tmp_path / "repo"
+    output = tmp_path / "wiki"
+    _make_repository(repository)
+    _write(
+        repository / "Second.dpr",
+        """
+        program Second;
+        uses Worker in 'src/Worker.pas';
+        begin
+        end.
+        """,
+    )
+
+    export_okf_wiki(repository, output, workers=1)
+
+    worker_unit = next(
+        path
+        for path in (output / "units").glob("*.md")
+        if "\n# Worker\n" in path.read_text(encoding="utf-8")
+    )
+    assert worker_unit.read_text(encoding="utf-8").count("](/projects/") == 2
 
 
 def test_agent_cli_exports_okf_wiki_and_reports_json_summary(tmp_path: Path) -> None:

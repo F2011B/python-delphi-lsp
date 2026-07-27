@@ -210,10 +210,11 @@ Every non-index concept is UTF-8 Markdown with YAML frontmatter and a non-empty
 `type`. Readable filenames include a stable digest, so overloads and equal names
 from different units remain distinct even on case-insensitive filesystems.
 Output order and content are deterministic. The finished bundle replaces the
-destination only after generation succeeds; an existing destination requires
-`--force`, and unsafe root/ancestor/symlink targets are rejected.
+destination only after generation succeeds; an existing non-empty destination
+requires `--force`, and unsafe root/ancestor/symlink targets are rejected.
 
-Pages are streamed to disk and decoded source retention is bounded. Lazy CPG
+Pages are streamed to disk, decoded source retention is bounded, and metrics
+process source paths without materializing the entire source corpus. Lazy CPG
 subgraphs are documented rather than eagerly multiplied across all possible
 targets; a focused live `cpg` query remains the bounded way to obtain one graph.
 The bundle structure follows the

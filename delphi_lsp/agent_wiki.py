@@ -20,6 +20,7 @@ from .agent_layers import (
     build_codebase_index,
     layer_payload,
 )
+from .agent_metrics import build_path_metrics
 from .agent_protocol import (
     SCHEMA_VERSION,
     SUPPORTED_ACTIONS,
@@ -98,7 +99,7 @@ def export_okf_wiki(
     """Export all unique layered codebase knowledge as an OKF 0.2 bundle."""
 
     root_path = Path(root).expanduser().resolve()
-    output_path = Path(output).expanduser().resolve()
+    requested_output, output_path = _resolve_output_destination(output)
     _validate_paths(root_path, output_path, force=force)
 
     index = build_codebase_index(
@@ -112,10 +113,15 @@ def export_okf_wiki(
         tempfile.mkdtemp(prefix=f".{output_path.name}.tmp-", dir=output_path.parent)
     )
     try:
-        writer = _WikiWriter(index, temporary)
+        writer = _WikiWriter(index, temporary, workers=workers)
         writer.write()
         documents = writer.documents
-        _install_completed_bundle(temporary, output_path, force=force)
+        _install_completed_bundle(
+            temporary,
+            output_path,
+            requested_output=requested_output,
+            force=force,
+        )
     except Exception:
         if temporary.exists():
             shutil.rmtree(temporary, ignore_errors=True)
@@ -130,6 +136,14 @@ def export_okf_wiki(
     )
 
 
+def _resolve_output_destination(output: str | Path) -> tuple[Path, Path]:
+    requested = Path(os.path.abspath(Path(output).expanduser()))
+    if requested.is_symlink():
+        raise WikiExportError(f"Wiki destination must not be a symlink: {requested}")
+    canonical = requested.parent.resolve() / requested.name
+    return requested, canonical
+
+
 def _validate_paths(root: Path, output: Path, *, force: bool) -> None:
     if not root.is_dir():
         raise WikiExportError(f"Repository root is not a directory: {root}")
@@ -141,17 +155,32 @@ def _validate_paths(root: Path, output: Path, *, force: bool) -> None:
         raise WikiExportError(f"Wiki destination must not be a symlink: {output}")
     if output.exists() and not output.is_dir():
         raise WikiExportError(f"Wiki destination already exists and is not a directory: {output}")
-    if output.exists() and not force:
+    if output.exists() and not force and _directory_has_entries(output):
         raise WikiExportError(
             f"Wiki destination already exists: {output}. Pass --force to replace it."
         )
 
 
-def _install_completed_bundle(temporary: Path, output: Path, *, force: bool) -> None:
+def _directory_has_entries(path: Path) -> bool:
+    try:
+        next(path.iterdir())
+    except StopIteration:
+        return False
+    return True
+
+
+def _install_completed_bundle(
+    temporary: Path,
+    output: Path,
+    *,
+    requested_output: Path,
+    force: bool,
+) -> None:
+    _revalidate_output_destination(requested_output, output)
     if not output.exists():
         os.replace(temporary, output)
         return
-    if not force:
+    if not force and _directory_has_entries(output):
         raise WikiExportError(f"Wiki destination already exists: {output}")
 
     backup = output.parent / f".{output.name}.backup-{os.getpid()}"
@@ -168,10 +197,23 @@ def _install_completed_bundle(temporary: Path, output: Path, *, force: bool) -> 
     shutil.rmtree(backup)
 
 
+def _revalidate_output_destination(requested: Path, canonical: Path) -> None:
+    if requested.is_symlink():
+        raise WikiExportError(f"Wiki destination became a symlink: {requested}")
+    current = requested.parent.resolve() / requested.name
+    if current != canonical:
+        raise WikiExportError(
+            "Wiki destination parent changed while the bundle was generated."
+        )
+    if canonical.is_symlink():
+        raise WikiExportError(f"Wiki destination must not be a symlink: {canonical}")
+
+
 class _WikiWriter:
-    def __init__(self, index: CodebaseIndex, destination: Path) -> None:
+    def __init__(self, index: CodebaseIndex, destination: Path, *, workers: int = 0) -> None:
         self.index = index
         self.destination = destination
+        self.workers = workers
         self.documents = 0
         self._source_cache: dict[str, list[str]] = _BoundedSourceCache()
         self.symbols = self._symbol_records()
@@ -186,6 +228,7 @@ class _WikiWriter:
         self._references_by_target: dict[
             tuple[str, str, str, int, int, int, int], list[SymbolReference]
         ] = {}
+        self._projects_by_source: dict[str, list[tuple[str, PurePosixPath]]] = {}
         self._unresolved_references: list[SymbolReference] = []
         self._collect_references()
 
@@ -366,6 +409,17 @@ class _WikiWriter:
             title = Path(project_path).name
             page = PurePosixPath("projects") / _document_name(title, _normalized_source(project_path))
             pages.append((title, page))
+            project_membership = (
+                project_path,
+                *(str(unit["path"]) for unit in item["parsed_units"]),
+            )
+            for source_path in project_membership:
+                memberships = self._projects_by_source.setdefault(
+                    _normalized_source(source_path), []
+                )
+                membership = (title, page)
+                if membership not in memberships:
+                    memberships.append(membership)
             body = [
                 f"# {_escape(title)}",
                 "",
@@ -446,6 +500,9 @@ class _WikiWriter:
             symbols = symbol_records_by_source.get(_normalized_source(unit.source_path), [])
             model = self.index.models[unit.source_path]
             references = sorted(model.references, key=_reference_sort_key)
+            projects = self._projects_by_source.get(
+                _normalized_source(unit.source_path), []
+            )
             body = [
                 f"# {_escape(unit.name)}",
                 "",
@@ -453,9 +510,19 @@ class _WikiWriter:
                 f"- Symbols: {len(symbols)}",
                 f"- Semantic references: {len(references)}",
                 "",
-                "## Symbols",
+                "## Projects",
                 "",
             ]
+            body.extend(f"- {_link(title, page)}" for title, page in projects)
+            if not projects:
+                body.append("- No concrete project membership was resolved")
+            body.extend(
+                [
+                    "",
+                    "## Symbols",
+                    "",
+                ]
+            )
             body.extend(
                 f"- {_link(record.symbol.name, record.page)} "
                 f"— `{record.symbol.kind.value}` at line {record.symbol.decl_range.start_line}"
@@ -652,7 +719,21 @@ class _WikiWriter:
         )
 
     def _write_metrics(self) -> None:
-        payload = layer_payload(self.index, "metrics")
+        project_name = "Workspace"
+        if len(self.index.discovery.project_files) == 1:
+            project_name = Path(self.index.discovery.project_files[0]).stem
+        metrics = build_path_metrics(
+            self.index.root,
+            self.index.discovery.source_files,
+            defines=self.index.discovery.defines,
+            include_paths=self.index.discovery.include_paths,
+            project_name=project_name,
+            workers=self.workers,
+        )
+        payload = {
+            "project": metrics.to_mapping(),
+            "items": [unit.to_mapping(detail=True) for unit in metrics.units],
+        }
         workspace_page = PurePosixPath("metrics/workspace.md")
         project = payload["project"]
         workspace_body = [
@@ -678,11 +759,16 @@ class _WikiWriter:
 
         unit_pages: list[tuple[str, PurePosixPath]] = []
         for item in payload["items"]:
+            unit = self._find_unit(str(item["path"]), str(item["name"]))
+            metric_identity = (
+                _normalized_source(unit.source_path)
+                if unit is not None
+                else _normalized_source(str(item["path"]))
+            )
             page = PurePosixPath("metrics/units") / _document_name(
-                str(item["name"]), _normalized_source(str(item["path"]))
+                str(item["name"]), metric_identity
             )
             unit_pages.append((str(item["name"]), page))
-            unit = self._find_unit(str(item["path"]), str(item["name"]))
             body = [
                 f"# {_escape(str(item['name']))} metrics",
                 "",

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from dataclasses import replace
 from pathlib import Path
+from typing import Iterable
 
 from .agent_workspace import (
     AgentWorkspace,
@@ -161,6 +162,102 @@ def build_workspace_metrics(
     return metrics
 
 
+def build_path_metrics(
+    root: str | Path,
+    source_files: Iterable[str | Path],
+    *,
+    defines: Iterable[str] = (),
+    include_paths: Iterable[str | Path] = (),
+    project_name: str = "",
+    workers: int = 0,
+) -> ProjectMetrics:
+    """Analyze file paths without retaining the complete source corpus in RAM."""
+
+    root_path = Path(root).expanduser().resolve()
+    unique_paths: dict[str, Path] = {}
+    for value in source_files:
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = root_path / path
+        path = path.resolve()
+        unique_paths.setdefault(str(path).replace("\\", "/").casefold(), path)
+    unit_paths = [
+        path for path in unique_paths.values() if path.suffix.casefold() in {".pas", ".dpr", ".dpk"}
+    ]
+    include_files = [
+        path for path in unique_paths.values() if path.suffix.casefold() == ".inc"
+    ]
+    source_bytes = 0
+    for path in unit_paths:
+        try:
+            source_bytes += path.stat().st_size
+        except OSError:
+            continue
+    parser_mode = (
+        ParserMode.TOLERANT
+        if len(unit_paths) >= _LARGE_PROJECT_UNIT_THRESHOLD
+        or source_bytes >= _LARGE_PROJECT_BYTE_THRESHOLD
+        else ParserMode.STRICT
+    )
+    define_values = tuple(defines)
+    include_path_values = tuple(str(Path(value)) for value in include_paths)
+    analyzed_units: list[UnitMetrics] = []
+    problems: list[MetricProblem] = []
+
+    def consume_result(result: _MetricResult) -> None:
+        if result.metrics is not None:
+            analyzed_units.append(result.metrics)
+        if result.problem is not None:
+            problems.append(result.problem)
+
+    run_outline_tasks(
+        (
+            _MetricTask(
+                ordinal,
+                str(path),
+                _display_path(path, root_path),
+                "",
+                define_values,
+                include_path_values,
+                parser_mode,
+            )
+            for ordinal, path in enumerate(unit_paths)
+        ),
+        configured_workers=workers,
+        on_complete=consume_result,
+        retain_results=False,
+        task_runner=_analyze_metric_task,
+    )
+
+    include_loc = 0
+    for path in include_files:
+        try:
+            source = read_source_text(path)
+            include_loc += len(source.splitlines()) if source else 0
+        except (OSError, UnicodeError):
+            problems.append(
+                MetricProblem(
+                    kind="include_unavailable",
+                    path=_display_path(path, root_path),
+                    message="Could not read include file.",
+                )
+            )
+    metrics = aggregate_project_metrics(
+        analyzed_units,
+        include_loc=include_loc,
+        project_name=project_name,
+    )
+    if problems:
+        metrics = replace(
+            metrics,
+            problems=(
+                *metrics.problems,
+                *sorted(problems, key=lambda item: (item.path.casefold(), item.kind)),
+            ),
+        )
+    return metrics
+
+
 def project_metric_item(metrics: ProjectMetrics) -> dict[str, object]:
     return {"item_type": "project_metrics", **metrics.to_mapping()}
 
@@ -176,4 +273,16 @@ def _workspace_path(root: Path, value: str) -> Path:
     return path.resolve()
 
 
-__all__ = ["build_workspace_metrics", "project_metric_item", "unit_metric_item"]
+def _display_path(path: Path, root: Path) -> str:
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+__all__ = [
+    "build_path_metrics",
+    "build_workspace_metrics",
+    "project_metric_item",
+    "unit_metric_item",
+]
