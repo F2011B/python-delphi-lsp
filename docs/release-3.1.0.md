@@ -32,6 +32,29 @@ overlapping graph target would multiply parsing and make output unbounded on a
 four-million-line codebase, so the wiki exports the graph/query contract plus
 the indexed knowledge needed to select a target.
 
+## Large multi-project export gate
+
+The final exporter was exercised on the messy mORMot2 corpus with Python 3.14
+and eight workers:
+
+| Measurement | Result |
+| --- | ---: |
+| Physical lines | 660,569 |
+| Source files | 541 |
+| Projects | 106 |
+| Indexed symbols | 78,324 |
+| Markdown documents | 79,516 |
+| Wall time | 48.58 s |
+| Maximum RSS | 403,046,400 bytes |
+| Bundle size | 329 MiB |
+
+This path includes deep multi-project indexing, semantic/source concepts,
+streamed metrics, complete link generation, and final atomic installation.
+Decoded-source and metric working sets stay bounded independently of the
+on-disk Markdown bundle; the semantic index scales with indexed symbols, and
+the bundle itself necessarily scales with the number and size of exported
+concepts.
+
 ## Complete symbols layer
 
 `view --layer symbols` now returns all symbols that match the query. The former
