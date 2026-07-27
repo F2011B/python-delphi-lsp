@@ -263,6 +263,42 @@ def test_shared_unit_links_back_to_every_owning_project(tmp_path: Path) -> None:
     assert worker_unit.read_text(encoding="utf-8").count("](/projects/") == 2
 
 
+def test_duplicate_unit_names_keep_distinct_metric_pages_and_links(tmp_path: Path) -> None:
+    repository = tmp_path / "repo"
+    output = tmp_path / "wiki"
+    _write(
+        repository / "one" / "Duplicate.pas",
+        """
+        unit Duplicate;
+        interface
+        type TFirst = Integer;
+        implementation
+        end.
+        """,
+    )
+    _write(
+        repository / "two" / "Duplicate.pas",
+        """
+        unit Duplicate;
+        interface
+        type TSecond = Integer;
+        implementation
+        end.
+        """,
+    )
+
+    export_okf_wiki(repository, output, workers=1)
+
+    metric_pages = [
+        path
+        for path in (output / "metrics" / "units").glob("*.md")
+        if path.name != "index.md"
+    ]
+    assert len(metric_pages) == 2
+    assert len({path.name.casefold() for path in metric_pages}) == 2
+    _assert_internal_links_resolve(output)
+
+
 def test_agent_cli_exports_okf_wiki_and_reports_json_summary(tmp_path: Path) -> None:
     repository = tmp_path / "repo"
     output = tmp_path / "wiki"

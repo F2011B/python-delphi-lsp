@@ -928,9 +928,12 @@ class _WikiWriter:
         return lines
 
     def _find_unit(self, source: str, name: str) -> _UnitRecord | None:
-        return self._unit_by_source.get(_normalized_source(source)) or self._unit_by_name.get(
-            name.casefold()
-        )
+        source_path = Path(source).expanduser()
+        if not source_path.is_absolute():
+            source_path = Path(self.index.root) / source_path
+        return self._unit_by_source.get(
+            _normalized_source(str(source_path))
+        ) or self._unit_by_name.get(name.casefold())
 
     def _find_symbol_owner(self, symbol: Symbol) -> _SymbolRecord | None:
         if symbol.scope.owner is None:
