@@ -21,4 +21,5 @@ include scripts/start_ornith_vllm.sh
 include scripts/summarize_opencode_request_payloads.py
 include scripts/ollama/ornith-lspctx.Modelfile
 include tests/corpora.performance.lock.json
+recursive-include docs *.md
 recursive-include tests *.py *.pas *.inc *.dpr *.dpk

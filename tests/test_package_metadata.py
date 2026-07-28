@@ -144,6 +144,7 @@ def test_ci_covers_cross_platform_test_matrix_and_release_build() -> None:
     assert 'pytest' in workflow
     assert 'python -m build' in workflow
     assert 'python -m twine check dist/*' in workflow
+    assert 'python -m pytest sdist-smoke/tests' in workflow
     assert 'pip install dist/*.whl' in workflow
 
 
@@ -166,6 +167,7 @@ def test_sdist_includes_files_required_by_packaged_tests() -> None:
     assert 'include scripts/benchmark_parallel_cache.py' in manifest
     assert 'include scripts/ollama/ornith-lspctx.Modelfile' in manifest
     assert 'include tests/corpora.performance.lock.json' in manifest
+    assert 'recursive-include docs *.md' in manifest
 
 
 def test_release_3_0_0_notes_document_protocol_cpg_and_performance_gate() -> None:

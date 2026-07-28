@@ -313,3 +313,13 @@
   Worker NDJSON reads use the same bounded queue pattern, including watcher,
   focus, recovery, and EOF checks.
 - Added deterministic blocked-reader regressions for both helpers.
+
+### F28 — Complete source distributions
+
+- Added the missing recursive Markdown docs rule to `MANIFEST.in` and its
+  packaged-test guard.
+- The package CI job now extracts the freshly built sdist, installs its test
+  extra, and runs the shipped tests from that extracted tree.
+- A local clean-room Python 3.14 run passed with 850 tests, 2 platform skips,
+  84 warnings, and 60 subtests; both release-note tests found their packaged
+  docs.

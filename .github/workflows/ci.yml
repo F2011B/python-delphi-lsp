@@ -40,6 +40,12 @@ jobs:
       - run: python -m pip install --upgrade pip build twine
       - run: python -m build
       - run: python -m twine check dist/*
+      - name: Run tests from unpacked sdist
+        run: |
+          mkdir sdist-smoke
+          tar -xzf dist/*.tar.gz -C sdist-smoke --strip-components=1
+          python -m pip install "./sdist-smoke[test]"
+          python -m pytest sdist-smoke/tests
       - run: python -m venv smoke-venv
       - run: smoke-venv/bin/python -m pip install dist/*.whl
       - run: smoke-venv/bin/python -c "import delphi_lsp; print(delphi_lsp.__name__)"
