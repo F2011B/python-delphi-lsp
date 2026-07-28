@@ -367,3 +367,11 @@
 - `excludes_workspace_path` now returns immediately when its pattern tuple is
   empty, avoiding lexical normalization and filesystem-backed resolution in
   every discovery walk entry.
+
+### F35 — Unified discovery decoding
+
+- Added a discovery regression combining a UTF-16 `.dpr` unit hint with a
+  UTF-8-BOM-prefixed `.cfg` search path.
+- DPR, CFG, and DOF discovery now uses `read_source_text`, matching parser,
+  include-loader, indexer, and LSP handling for BOMs, UTF-16, normalized line
+  endings, and decoding failures.

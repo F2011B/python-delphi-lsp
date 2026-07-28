@@ -14,6 +14,7 @@ from .project_config import (
     ProjectPathConfig,
     load_project_path_config,
 )
+from .source_reader import read_source_text
 
 
 SOURCE_EXTENSIONS = (".pas", ".dpr", ".dpk", ".inc")
@@ -530,10 +531,8 @@ def _read_dpr_paths(
     search_path_origins: dict[str, list[str]],
 ) -> None:
     try:
-        text = project.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        text = project.read_text(encoding="latin-1")
-    except OSError as exc:
+        text = read_source_text(project)
+    except (OSError, UnicodeError) as exc:
         discovery.problems.append(DiscoveryProblem("cant_read_project", str(exc), str(project)))
         return
     for clause in _DPR_CLAUSE_RE.finditer(text):
@@ -629,10 +628,8 @@ def _read_cfg(
     add_define,
 ) -> None:
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except UnicodeDecodeError:
-        lines = path.read_text(encoding="latin-1").splitlines()
-    except OSError as exc:
+        lines = read_source_text(path).splitlines()
+    except (OSError, UnicodeError) as exc:
         discovery.problems.append(DiscoveryProblem("cant_read_config", str(exc), str(path)))
         return
     for line in lines:

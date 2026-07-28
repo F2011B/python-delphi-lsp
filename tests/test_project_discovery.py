@@ -668,6 +668,40 @@ def test_scan_free_discovery_resolves_project_config_paths_and_supported_macros(
     assert not discovery.problems
 
 
+def test_discovery_decodes_utf16_projects_and_bom_configs(
+    tmp_path: Path,
+) -> None:
+    source_dir = tmp_path / "utf16_src"
+    source_dir.mkdir()
+    write_text(
+        source_dir / "UnitA.pas",
+        "unit UnitA; interface implementation end.",
+    )
+    (tmp_path / "Main.dpr").write_bytes(
+        (
+            "program Main;\n"
+            "uses UnitA in 'utf16_src/UnitA.pas';\n"
+            "begin end.\n"
+        ).encode("utf-16")
+    )
+    (tmp_path / "Main.cfg").write_bytes(
+        b"\xef\xbb\xbf-Ubom_lib\n"
+    )
+
+    discovery = discover_delphi_project(
+        tmp_path,
+        project_file=tmp_path / "Main.dpr",
+        scan_workspace_sources=False,
+    )
+
+    assert (tmp_path / "utf16_src").resolve() in {
+        Path(path) for path in discovery.search_paths
+    }
+    assert (tmp_path / "bom_lib").resolve() in {
+        Path(path) for path in discovery.search_paths
+    }
+
+
 def test_default_source_scan_records_workspace_origins(tmp_path: Path) -> None:
     write_text(tmp_path / "Main.dpr", "program Main; begin end.")
     write_text(tmp_path / "src" / "UnitA.pas", "unit UnitA; interface implementation end.")
