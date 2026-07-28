@@ -207,3 +207,11 @@
   even an honest unresolved reference in an allowed source; the corrected
   assertion still proves that no page is generated for the excluded unit,
   while the existing read-spy assertions prove excluded files are not read.
+
+### F10 — Project maintainability aggregation
+
+- Added a multi-unit regression with deliberately different unit sizes and
+  maintainability scores.
+- Project maintainability is now the source-line-weighted mean of the unit
+  indices, with the existing full-maintainability value of `100.0` retained
+  when a project has no source lines.

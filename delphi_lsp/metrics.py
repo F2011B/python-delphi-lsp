@@ -473,10 +473,14 @@ def aggregate_project_metrics(
         total_operators=total_operators,
         total_operands=total_operands,
     )
-    maintainability = _maintainability_index(
-        volume=halstead.volume,
-        complexity=cyclomatic.total,
-        source_lines=line_metrics.source_lines,
+    maintainability = (
+        sum(
+            unit.maintainability_index * unit.lines.source_lines
+            for unit in enriched
+        )
+        / line_metrics.source_lines
+        if line_metrics.source_lines
+        else 100.0
     )
     problems = tuple(problem for unit in enriched for problem in unit.problems)
     return ProjectMetrics(

@@ -186,3 +186,39 @@ def test_project_halstead_is_recomputed_from_combined_token_vocabulary() -> None
         unit.halstead.distinct_operands for unit in project.units
     )
     assert 0.0 <= project.maintainability_index <= 100.0
+
+
+def test_project_maintainability_is_source_line_weighted_unit_mean() -> None:
+    project = analyze_project(
+        {
+            "Small.pas": (
+                "unit Small;\n"
+                "interface\n"
+                "const Value = 1;\n"
+                "implementation\n"
+                "end.\n"
+            ),
+            "Large.pas": (
+                "unit Large;\n"
+                "interface\n"
+                "procedure Work(Value: Integer);\n"
+                "implementation\n"
+                "procedure Work(Value: Integer);\n"
+                "begin\n"
+                + "".join(
+                    "  if Value > 0 then Value := Value - 1;\n"
+                    for _ in range(80)
+                )
+                + "end;\n"
+                "end.\n"
+            ),
+        }
+    )
+
+    weighted_mean = sum(
+        unit.maintainability_index * unit.lines.source_lines
+        for unit in project.units
+    ) / sum(unit.lines.source_lines for unit in project.units)
+
+    assert project.maintainability_index == pytest.approx(weighted_mean)
+    assert project.maintainability_index > 0.0
