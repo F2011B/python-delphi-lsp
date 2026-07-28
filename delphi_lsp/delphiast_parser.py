@@ -912,7 +912,14 @@ class DelphiAstParser:
         if not parse_body:
             return node
 
-        while self._normalized() in {"label", "const", "type", "var", "threadvar"}:
+        while (
+            self._normalized() in {"label", "const", "type", "var", "threadvar"}
+            or self._normalized() in _ROUTINES
+            or (
+                self._normalized() == "class"
+                and self._normalized(1) in _ROUTINES
+            )
+        ):
             word = self._normalized()
             if word in {"var", "threadvar"}:
                 node.add_child(self._parse_variables(word))
@@ -920,6 +927,11 @@ class DelphiAstParser:
                 node.add_child(self._parse_constants(word))
             elif word == "type":
                 node.add_child(self._parse_type_section())
+            elif word in _ROUTINES or (
+                word == "class"
+                and self._normalized(1) in _ROUTINES
+            ):
+                node.add_child(self._parse_routine(parse_body=True))
             else:
                 self._consume_through(";")
         if self._at("begin"):

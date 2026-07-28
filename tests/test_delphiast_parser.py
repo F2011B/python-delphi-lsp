@@ -225,3 +225,40 @@ end.
         "Expected enum value after '='" in problem.message
         for problem in result.problems
     )
+
+
+def test_nested_routine_and_outer_body_stay_attached_to_outer_routine() -> None:
+    source = """
+unit NestedRoutine;
+interface
+implementation
+
+procedure Outer;
+var
+  Value: Integer;
+  procedure Inner;
+  begin
+    Value := 1;
+  end;
+begin
+  Inner;
+end;
+
+end.
+"""
+
+    result = DelphiAstParser(source, "NestedRoutine.pas").parse()
+    methods = {
+        node.get_attribute(AttributeName.anName): node
+        for node in walk(result.root)
+        if node.typ == SyntaxNodeType.ntMethod
+    }
+    outer = methods["Outer"]
+    inner = methods["Inner"]
+
+    assert inner.parent_node is outer
+    assert sum(
+        child.typ == SyntaxNodeType.ntStatements
+        for child in outer.child_nodes
+    ) == 1
+    assert inner.find_node(SyntaxNodeType.ntStatements) is not None

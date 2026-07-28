@@ -107,3 +107,11 @@
 - Empty enum-value token lists now add a precise parser problem while
   preserving both enum items, instead of indexing an empty list and raising
   `IndexError`.
+
+### F13 — Nested routines
+
+- Added a structural regression for an outer routine with a local variable,
+  nested routine, and its own body.
+- Local routine declarations are now parsed recursively during the enclosing
+  routine's declaration phase. The nested routine and both statement blocks
+  remain attached to their correct owners.
