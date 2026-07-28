@@ -232,3 +232,14 @@
 - Matches are deduplicated, deterministically sorted, and truncated before
   source extraction. A per-request routine lookup now replaces repeated
   whole-index scans for type and member implementation fragments.
+
+### F16 — Paged response preparation
+
+- Added regressions proving cursor pages reuse one prepared sequence, the
+  response cache is capped at eight entries and cleared by auxiliary
+  eviction, and a 256-character find budget materializes only the selected
+  symbol card.
+- Prepared responses are cached by revision and cursor-independent request
+  fingerprint. Symbol entries retain their card JSON size and conservative
+  upper bound, allowing the lazy card sequence to calculate pagination
+  without serializing the full result set and to chunk only accessed cards.

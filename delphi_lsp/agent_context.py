@@ -111,6 +111,7 @@ _CALLING_CONVENTIONS = frozenset(
 _SOURCE_CHUNK_CHARS = 6000
 _RANKED_QUERY_CACHE_SIZE = 16
 _RANKED_QUERY_CACHE_MAX_ENTRIES = 50_000
+_PREPARED_RESPONSE_CACHE_SIZE = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -503,6 +504,8 @@ class _SymbolEntry:
     signature: str
     ordinal: int
     target_id: str
+    card_json_chars: int
+    card_json_upper_bound: int
     parent_target_id: str = ""
 
     def card(self) -> dict[str, object]:
@@ -522,19 +525,80 @@ class _SymbolEntry:
 
 
 class _SymbolCardSequence(Sequence[dict[str, object]]):
-    def __init__(self, entries: Sequence[_SymbolEntry]) -> None:
+    def __init__(
+        self,
+        entries: Sequence[_SymbolEntry],
+        max_chars: int,
+    ) -> None:
         self._entries = entries
+        self._max_chars = max_chars
+        self._chunk_payload_chars = _card_chunk_payload_chars(max_chars)
+        self._ends: list[int] = []
+        total = 0
+        for entry in entries:
+            if (
+                entry.card_json_upper_bound + 2 <= max_chars
+                or entry.card_json_chars + 2 <= max_chars
+            ):
+                count = 1
+            else:
+                count = (
+                    entry.card_json_chars + self._chunk_payload_chars - 1
+                ) // self._chunk_payload_chars
+            total += count
+            self._ends.append(total)
 
     def __len__(self) -> int:
-        return len(self._entries)
+        return self._ends[-1] if self._ends else 0
 
     def __getitem__(
         self,
         index: int | slice,
     ) -> dict[str, object] | list[dict[str, object]]:
         if isinstance(index, slice):
-            return [entry.card() for entry in self._entries[index]]
-        return self._entries[index].card()
+            return [self[item_index] for item_index in range(*index.indices(len(self)))]
+        if index < 0:
+            index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError(index)
+        entry_index = bisect_right(self._ends, index)
+        entry = self._entries[entry_index]
+        previous_end = self._ends[entry_index - 1] if entry_index else 0
+        chunk_index = index - previous_end
+        if (
+            entry.card_json_upper_bound + 2 <= self._max_chars
+            or entry.card_json_chars + 2 <= self._max_chars
+        ):
+            return entry.card()
+        serialized = _compact_json(entry.card())
+        chunk_count = self._ends[entry_index] - previous_end
+        start = chunk_index * self._chunk_payload_chars
+        return {
+            "item_type": "card_chunk",
+            "chunk_index": chunk_index,
+            "chunk_count": chunk_count,
+            "json": serialized[start:start + self._chunk_payload_chars],
+        }
+
+
+def _card_chunk_payload_chars(max_chars: int) -> int:
+    wrapper_chars = len(
+        _compact_json(
+            {
+                "item_type": "card_chunk",
+                "chunk_index": 999999,
+                "chunk_count": 999999,
+                "json": "",
+            }
+        )
+    ) + 2
+    payload_chars = (max_chars - wrapper_chars) // 2
+    if payload_chars < 1:
+        raise AgentProtocolError(
+            "item_too_large",
+            "max_chars is too small for a structured response chunk.",
+        )
+    return payload_chars
 
 
 @dataclass(frozen=True, slots=True)
@@ -546,7 +610,6 @@ class _Registry:
     sources: _SourceStore
     ranked_queries: OrderedDict[str, tuple[_SymbolEntry, ...]]
     static_retained_bytes: int
-    max_card_chars: int
 
 
 class _CpgCandidates(Mapping[str, tuple[CpgTarget, ...]]):
@@ -682,6 +745,10 @@ class AgentContext:
         ] = OrderedDict()
         self._cpg_cache_bytes = 0
         self._cpg_sources_parsed = 0
+        self._prepared_response_cache: OrderedDict[
+            tuple[str, str],
+            Sequence[dict[str, object]],
+        ] = OrderedDict()
 
     @classmethod
     def open(
@@ -741,6 +808,7 @@ class AgentContext:
             self._relation_index,
             self._metrics,
             tuple(self._cpg_cache.values()),
+            tuple(self._prepared_response_cache.values()),
         )
 
     @property
@@ -762,6 +830,12 @@ class AgentContext:
         if self._metrics is not None:
             retained += 4096 + len(self._metrics.units) * 1024
         retained += self._cpg_cache_bytes
+        retained += sum(
+            sys.getsizeof(key)
+            + sys.getsizeof(items)
+            + len(items) * 8
+            for key, items in self._prepared_response_cache.items()
+        )
         return retained
 
     def evict_auxiliary_caches(self) -> None:
@@ -769,6 +843,7 @@ class AgentContext:
         self._metrics = None
         self._metrics_revision = ""
         self._clear_cpg_cache()
+        self._prepared_response_cache.clear()
         if self._registry is not None:
             self._registry.sources.clear_loaded()
 
@@ -832,15 +907,12 @@ class AgentContext:
                 registry.ranked_queries[parsed.query] = ranked
                 while len(registry.ranked_queries) > _RANKED_QUERY_CACHE_SIZE:
                     registry.ranked_queries.popitem(last=False)
-            if parsed.max_chars >= registry.max_card_chars:
-                return self._response(
-                    parsed,
-                    revision,
-                    _SymbolCardSequence(ranked),
-                    items_prepared=True,
-                )
-            items = [entry.card() for entry in ranked]
-            return self._response(parsed, revision, items)
+            return self._response(
+                parsed,
+                revision,
+                _SymbolCardSequence(ranked, parsed.max_chars),
+                items_prepared=True,
+            )
         if parsed.action == "inspect":
             registry = self._require_registry(revision)
             entry = self._resolve_target(registry, parsed.target_id)
@@ -879,6 +951,7 @@ class AgentContext:
             self._metrics = None
             self._metrics_revision = ""
             self._clear_cpg_cache()
+            self._prepared_response_cache.clear()
             self._focus = Focus(project_id=current_project_id) if current_project_id else Focus()
         elif revision != self._last_revision:
             self._registry = None
@@ -886,6 +959,7 @@ class AgentContext:
             self._metrics = None
             self._metrics_revision = ""
             self._clear_cpg_cache()
+            self._prepared_response_cache.clear()
         elif self._focus.project_id != current_project_id:
             self._focus = Focus(project_id=current_project_id) if current_project_id else Focus()
         self._last_revision = revision
@@ -1326,7 +1400,17 @@ class AgentContext:
             project_id=self._workspace.active_project_id,
             target_id=target_id or request.target_id,
         )
-        prepared = items if items_prepared else _prepare_items(items, request.max_chars)
+        cache_key = (revision, fingerprint)
+        prepared = self._prepared_response_cache.pop(cache_key, None)
+        if prepared is None:
+            prepared = (
+                items
+                if items_prepared
+                else _prepare_items(items, request.max_chars)
+            )
+        self._prepared_response_cache[cache_key] = prepared
+        while len(self._prepared_response_cache) > _PREPARED_RESPONSE_CACHE_SIZE:
+            self._prepared_response_cache.popitem(last=False)
         page, selected = paginate_items(
             prepared,
             revision,
@@ -1508,30 +1592,37 @@ def _build_registry(
             raw.qualified_name,
             raw.unit_name,
         )
+        entry = _SymbolEntry(
+            name=shared(raw.name),
+            kind=raw.kind,
+            line=raw.line,
+            column=raw.column,
+            visibility=raw.visibility,
+            type_name=shared(raw.type_name),
+            source_path=raw.source_path,
+            path=shared(raw.path),
+            unit_id=shared(raw.unit_id),
+            unit_name=shared(raw.unit_name),
+            qualified_name=shared(raw.qualified_name),
+            normalized_name=shared(normalized_name),
+            normalized_qualified_name=shared(normalized_qualified_name),
+            relative_name_offset=relative_name_offset,
+            owner=shared(raw.owner),
+            signature=shared(raw.signature),
+            ordinal=ordinal,
+            target_id=target_ids[id(raw)],
+            card_json_chars=0,
+            card_json_upper_bound=0,
+            parent_target_id=parent_ids.get(
+                _normalized(raw.parent_qualified_name),
+                "",
+            ),
+        )
         entries.append(
-            _SymbolEntry(
-                name=shared(raw.name),
-                kind=raw.kind,
-                line=raw.line,
-                column=raw.column,
-                visibility=raw.visibility,
-                type_name=shared(raw.type_name),
-                source_path=raw.source_path,
-                path=shared(raw.path),
-                unit_id=shared(raw.unit_id),
-                unit_name=shared(raw.unit_name),
-                qualified_name=shared(raw.qualified_name),
-                normalized_name=shared(normalized_name),
-                normalized_qualified_name=shared(normalized_qualified_name),
-                relative_name_offset=relative_name_offset,
-                owner=shared(raw.owner),
-                signature=shared(raw.signature),
-                ordinal=ordinal,
-                target_id=target_ids[id(raw)],
-                parent_target_id=parent_ids.get(
-                    _normalized(raw.parent_qualified_name),
-                    "",
-                ),
+            replace(
+                entry,
+                card_json_chars=len(_compact_json(entry.card())),
+                card_json_upper_bound=_symbol_card_json_upper_bound(entry),
             )
         )
 
@@ -1548,10 +1639,6 @@ def _build_registry(
             sources=sources,
             ranked_queries=OrderedDict(),
             static_retained_bytes=static_retained_bytes,
-            max_card_chars=max(
-                (_symbol_card_json_upper_bound(entry) for entry in entries_tuple),
-                default=2,
-            ),
         ),
         parallel_stats,
         disk_hits,

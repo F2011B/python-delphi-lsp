@@ -463,6 +463,90 @@ def test_find_materializes_only_the_selected_symbol_cards(
     assert calls == response.page.returned
 
 
+def test_cursor_pages_reuse_prepared_response_and_eviction_clears_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_source(tmp_path / "First.dpr", "program First; begin end.")
+    write_source(tmp_path / "Second.dpr", "program Second; begin end.")
+    context = AgentContext.open(tmp_path)
+    real_prepare_items = agent_context_module._prepare_items
+    calls = 0
+
+    def counted_prepare_items(
+        items: object, max_chars: int
+    ) -> list[dict[str, object]]:
+        nonlocal calls
+        calls += 1
+        return real_prepare_items(items, max_chars)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        agent_context_module, "_prepare_items", counted_prepare_items
+    )
+    request: dict[str, object] = {
+        "action": "open",
+        "max_items": 1,
+        "max_chars": 40_000,
+    }
+    first = context.handle(request)
+    assert first.page.next_cursor
+
+    context.handle({**request, "cursor": first.page.next_cursor})
+
+    assert calls == 1
+    assert len(context._prepared_response_cache) == 1
+
+    context.evict_auxiliary_caches()
+
+    assert len(context._prepared_response_cache) == 0
+    context.handle(request)
+    assert calls == 2
+
+    for max_items in range(2, 11):
+        context.handle({**request, "max_items": max_items})
+
+    assert len(context._prepared_response_cache) == 8
+
+
+def test_small_find_budget_materializes_only_selected_card(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    declarations = "\n".join(
+        f"  TVeryLongGeneratedSymbol{index:04d} = class end;"
+        for index in range(200)
+    )
+    write_source(
+        tmp_path / "LazySmallCards.pas",
+        f"""
+        unit LazySmallCards;
+        interface
+        type
+        {declarations}
+        implementation
+        end.
+        """,
+    )
+    context = AgentContext.open(tmp_path)
+    context.handle({"action": "find", "query": "__build_registry__"})
+    real_card = agent_context_module._SymbolEntry.card
+    calls = 0
+
+    def counted_card(entry: object) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return real_card(entry)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(agent_context_module._SymbolEntry, "card", counted_card)
+
+    response = context.handle(
+        {"action": "find", "query": "", "max_items": 1, "max_chars": 256}
+    )
+
+    assert response.page.truncated
+    assert calls == 1
+
+
 def test_navigation_registry_retains_flat_symbol_records(tmp_path: Path) -> None:
     write_source(
         tmp_path / "FlatRegistry.pas",
