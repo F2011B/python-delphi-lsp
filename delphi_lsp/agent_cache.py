@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Collection, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, fields, is_dataclass, replace
 import argparse
 import contextlib
@@ -37,6 +38,8 @@ DEFAULT_IDLE_TIMEOUT = 1800
 DEFAULT_STARTUP_TIMEOUT = 120.0
 _MAX_MESSAGE_BYTES = 1024 * 1024
 _CONNECTION_TIMEOUT = 2.0
+_PREAUTH_CONNECTION_TIMEOUT = 0.25
+_CONNECTION_WORKERS = 8
 _CLIENT_RESPONSE_TIMEOUT = 120.0
 _MEMORY_SIZE = re.compile(r"^(?P<count>[1-9][0-9]*)(?P<suffix>[KMG]?)$", re.IGNORECASE)
 _STARTUP_DIAGNOSTIC_BYTES = 16 * 1024
@@ -989,7 +992,9 @@ def _watch_workspace(service: _CacheService) -> None:
 
 def _serve_connection(connection: socket.socket, service: _CacheService) -> None:
     try:
+        connection.settimeout(_PREAUTH_CONNECTION_TIMEOUT)
         line = _read_line(connection)
+        connection.settimeout(_CONNECTION_TIMEOUT)
         request = json.loads(line.decode("utf-8"))
         if not isinstance(request, dict) or not hmac.compare_digest(str(request.pop("token", "")), service.metadata.token):
             response: dict[str, object] = {"error": {"code": "authentication_failed", "message": "authentication failed"}}
@@ -1003,6 +1008,18 @@ def _serve_connection(connection: socket.socket, service: _CacheService) -> None
         response = {"error": {"code": "invalid_request", "message": "Invalid cache request."}}
     with contextlib.suppress(OSError):
         connection.sendall(json.dumps(response, separators=(",", ":")).encode("utf-8") + b"\n")
+
+
+def _serve_owned_connection(
+    connection: socket.socket,
+    service: _CacheService,
+    slots: threading.BoundedSemaphore,
+) -> None:
+    try:
+        with connection:
+            _serve_connection(connection, service)
+    finally:
+        slots.release()
 
 
 def run_cache_daemon(
@@ -1035,6 +1052,11 @@ def run_cache_daemon(
         max_disk_cache_bytes,
     )
     watcher: threading.Thread | None = None
+    connection_slots = threading.BoundedSemaphore(_CONNECTION_WORKERS)
+    connection_pool = ThreadPoolExecutor(
+        max_workers=_CONNECTION_WORKERS,
+        thread_name_prefix="delphi-cache-client",
+    )
     try:
         service = _CacheService(metadata, defer_context=True)
         _write_metadata(metadata)
@@ -1054,13 +1076,24 @@ def run_cache_daemon(
                 connection, _ = listener.accept()
             except socket.timeout:
                 continue
-            with connection:
-                connection.settimeout(_CONNECTION_TIMEOUT)
-                _serve_connection(connection, service)
+            if not connection_slots.acquire(blocking=False):
+                connection.close()
+                continue
+            try:
+                connection_pool.submit(
+                    _serve_owned_connection,
+                    connection,
+                    service,
+                    connection_slots,
+                )
+            except RuntimeError:
+                connection_slots.release()
+                connection.close()
     finally:
         if "service" in locals():
             service.shutdown.set()
         listener.close()
+        connection_pool.shutdown(wait=True, cancel_futures=True)
         _remove_metadata_if_owned(metadata)
         if watcher is not None:
             watcher.join(timeout=2.0)

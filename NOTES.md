@@ -383,3 +383,14 @@
 - Consecutive `**/` segments are collapsed at configuration load time, so the
   regex compiler emits one optional recursive group instead of an unbounded
   sequence with combinatorial non-match backtracking.
+
+### F38 — Concurrent authenticated daemon intake
+
+- Added a live-daemon regression that holds one unauthenticated connection
+  silent and requires a concurrent status request to complete within one
+  second.
+- Accepted sockets are dispatched through an eight-worker pool guarded by an
+  eight-slot semaphore, so neither active work nor queued sockets can grow
+  without bound. Excess connections are closed immediately.
+- The first newline-terminated authentication record has a 250 ms deadline;
+  authenticated response I/O retains the existing two-second socket timeout.

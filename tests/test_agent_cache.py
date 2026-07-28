@@ -258,6 +258,61 @@ def test_cache_daemon_reports_ready_before_slow_prewarm_finishes(
         daemon.join(timeout=3)
 
 
+def test_silent_unauthenticated_client_does_not_block_daemon(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from delphi_lsp import agent_cache
+
+    write_source(tmp_path / "Demo.dpr", "program Demo; begin end.")
+    connection_entered = threading.Event()
+    real_serve_connection = agent_cache._serve_connection
+
+    def observed_serve_connection(connection, service) -> None:
+        connection_entered.set()
+        real_serve_connection(connection, service)
+
+    monkeypatch.setattr(
+        agent_cache,
+        "_serve_connection",
+        observed_serve_connection,
+    )
+    daemon = threading.Thread(
+        target=agent_cache.run_cache_daemon,
+        args=(tmp_path,),
+        kwargs={"idle_timeout": 10},
+        daemon=True,
+    )
+    daemon.start()
+    silent: socket.socket | None = None
+    try:
+        deadline = time.monotonic() + 2
+        metadata = agent_cache._read_metadata(tmp_path)
+        while metadata is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+            metadata = agent_cache._read_metadata(tmp_path)
+        assert metadata is not None
+
+        silent = socket.create_connection(("127.0.0.1", metadata.port))
+        assert connection_entered.wait(timeout=1)
+        started = time.monotonic()
+        status = agent_cache._client_exchange(
+            metadata,
+            {"action": "status", "_startup_probe": True},
+        )
+
+        assert status.payload["cache_state"] in {"warming", "warm", "ready"}
+        assert time.monotonic() - started < 1.0
+    finally:
+        if silent is not None:
+            silent.close()
+        metadata = agent_cache._read_metadata(tmp_path)
+        if metadata is not None:
+            with contextlib.suppress(agent_cache.CacheClientError):
+                agent_cache._client_exchange(metadata, {"action": "stop"})
+        daemon.join(timeout=3)
+
+
 def test_cache_daemon_reports_ready_before_slow_workspace_discovery_finishes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
