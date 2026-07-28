@@ -330,3 +330,14 @@
   included it explicitly in source archives.
 - Package metadata tests and the wheel smoke step now require the marker.
   A locally built wheel was inspected and contains `delphi_lsp/py.typed`.
+
+### F30 — UTF-16 LSP positions
+
+- Added an astral-character regression covering inbound identifier and symbol
+  lookup, member-completion parsing, and outbound semantic ranges.
+- LSP request characters are converted from UTF-16 code units before indexing
+  Python strings. All emitted diagnostics, document/workspace symbols,
+  definitions, references, and rename edits convert code-point columns back
+  to UTF-16.
+- Outbound conversion uses an eight-file source-line cache with an ASCII fast
+  path, preserving the 100,000-line document-symbol latency regression.

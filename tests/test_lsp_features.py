@@ -9,9 +9,11 @@ from delphi_lsp.lsp_server import (
     extract_completion_base,
     find_symbol_at_position,
     hover_text,
+    identifier_at_position,
     iter_member_symbols,
     iter_symbols,
     resolve_base_for_member_completion,
+    source_range_to_lsp,
 )
 from delphi_lsp.parser import parse
 
@@ -24,6 +26,49 @@ class LspFeatureTests(unittest.TestCase):
         text = 'Foo.Bar.Baz.'
         base = extract_completion_base(text, 0, len(text))
         self.assertEqual(base, 'Foo.Bar.Baz')
+
+    def test_lsp_positions_use_utf16_code_units(self) -> None:
+        text = (
+            'unit Utf16Positions;\n'
+            'interface\n'
+            'type\n'
+            '  { 🚀 } TThing = class\n'
+            '  end;\n'
+            'implementation\n'
+            'end.\n'
+        )
+        line_text = text.splitlines()[3]
+        codepoint_column = line_text.index('TThing')
+        utf16_column = len(
+            line_text[:codepoint_column].encode('utf-16-le')
+        ) // 2
+        model = build_outline_semantic_model(text, 'Utf16Positions.pas')
+
+        self.assertEqual(
+            identifier_at_position(text, 3, utf16_column),
+            'TThing',
+        )
+        symbol = find_symbol_at_position(
+            model,
+            line=3,
+            character=utf16_column,
+            text=text,
+        )
+        self.assertIsNotNone(symbol)
+        self.assertEqual(symbol.name, 'TThing')
+        self.assertEqual(
+            source_range_to_lsp(symbol.name_range, text),
+            (3, utf16_column, 3, utf16_column + len('TThing')),
+        )
+        completion_text = '🚀 TThing.'
+        self.assertEqual(
+            extract_completion_base(
+                completion_text,
+                0,
+                len(completion_text.encode('utf-16-le')) // 2,
+            ),
+            'TThing',
+        )
 
     def test_member_completion_symbols(self) -> None:
         text = (FIXTURE_DIR / 'unit_inheritance.pas').read_text(encoding='utf-8')

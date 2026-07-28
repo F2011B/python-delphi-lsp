@@ -439,7 +439,7 @@ class LspWorkspaceState:
 
     def diagnostics_for_uri(self, uri: str):
         model = self.semantic_for_uri(uri)
-        return diagnostics_for_model(model) if model else []
+        return diagnostics_for_model(model, self.text_for_uri(uri)) if model else []
 
 
 BUILTIN_TYPES = {
@@ -1357,7 +1357,10 @@ def find_reference_at_position(
     *,
     line: int,
     character: int,
+    text: str | None = None,
 ) -> Optional[SymbolReference]:
+    if text is not None:
+        character = _utf16_position_to_codepoint(text, line, character)
     line_1 = line + 1
     col_1 = character + 1
     candidates = [
@@ -1381,7 +1384,10 @@ def find_symbol_at_position(
     *,
     line: int,
     character: int,
+    text: str | None = None,
 ) -> Optional[Symbol]:
+    if text is not None:
+        character = _utf16_position_to_codepoint(text, line, character)
     line_1 = line + 1
     col_1 = character + 1
     candidates: list[Symbol] = []
@@ -1420,6 +1426,7 @@ def identifier_at_position(text: str, line: int, character: int) -> Optional[str
     line_text = lines[line]
     if not line_text:
         return None
+    character = utf16_to_codepoint(line_text, character)
     idx = min(max(character, 0), len(line_text) - 1)
     if not _is_identifier_char(line_text[idx]) and idx > 0 and _is_identifier_char(line_text[idx - 1]):
         idx -= 1
@@ -1454,6 +1461,35 @@ def _is_identifier_char(ch: str) -> bool:
     return ch.isalnum() or ch == '_'
 
 
+def utf16_to_codepoint(line_text: str, character: int) -> int:
+    """Convert an LSP UTF-16 character offset to a Python string index."""
+    character = max(character, 0)
+    if line_text.isascii():
+        return min(character, len(line_text))
+    units = 0
+    for index, char in enumerate(line_text):
+        width = 2 if ord(char) > 0xFFFF else 1
+        if units + width > character:
+            return index
+        units += width
+    return len(line_text)
+
+
+def codepoint_to_utf16(line_text: str, column: int) -> int:
+    """Convert a Python string index to an LSP UTF-16 character offset."""
+    column = min(max(column, 0), len(line_text))
+    if line_text.isascii():
+        return column
+    return len(line_text[:column].encode('utf-16-le')) // 2
+
+
+def _utf16_position_to_codepoint(text: str, line: int, character: int) -> int:
+    lines = text.splitlines()
+    if line < 0 or line >= len(lines):
+        return max(character, 0)
+    return utf16_to_codepoint(lines[line], character)
+
+
 def _range_span(range_value: SourceRange) -> tuple[int, int]:
     return (
         range_value.end_line - range_value.start_line,
@@ -1478,12 +1514,27 @@ def hover_text(symbol: Symbol) -> str:
     return f'{symbol.kind.value} {symbol.name}: {type_desc}'
 
 
-def source_range_to_lsp(range_value: SourceRange) -> tuple[int, int, int, int]:
+def source_range_to_lsp(
+    range_value: SourceRange,
+    text: str | None = None,
+    *,
+    line_texts: list[str] | None = None,
+) -> tuple[int, int, int, int]:
+    start_col = range_value.start_col - 1
+    end_col = range_value.end_col - 1
+    if text is not None and not text.isascii():
+        lines = line_texts if line_texts is not None else text.splitlines()
+        start_line = range_value.start_line - 1
+        end_line = range_value.end_line - 1
+        if 0 <= start_line < len(lines):
+            start_col = codepoint_to_utf16(lines[start_line], start_col)
+        if 0 <= end_line < len(lines):
+            end_col = codepoint_to_utf16(lines[end_line], end_col)
     return (
         range_value.start_line - 1,
-        range_value.start_col - 1,
+        start_col,
         range_value.end_line - 1,
-        range_value.end_col - 1,
+        end_col,
     )
 
 
@@ -1613,14 +1664,23 @@ def _same_range(left: SourceRange, right: SourceRange) -> bool:
     )
 
 
-def diagnostics_for_model(model: SemanticModel):
+def diagnostics_for_model(model: SemanticModel, text: str | None = None):
     try:
         from lsprotocol.types import Diagnostic, DiagnosticSeverity, Range, Position
     except ImportError:
         return []
     diagnostics = []
+    line_texts = (
+        text.splitlines()
+        if text is not None and not text.isascii()
+        else None
+    )
     for problem in model.problems:
-        start_line, start_col, end_line, end_col = source_range_to_lsp(problem.range)
+        start_line, start_col, end_line, end_col = source_range_to_lsp(
+            problem.range,
+            text,
+            line_texts=line_texts,
+        )
         diagnostics.append(
             Diagnostic(
                 range=Range(
@@ -1640,6 +1700,7 @@ def extract_completion_base(text: str, line: int, character: int) -> Optional[st
     if line < 0 or line >= len(lines):
         return None
     line_text = lines[line]
+    character = utf16_to_codepoint(line_text, character)
     if character <= 0 or character > len(line_text):
         return None
     if line_text[character - 1] != '.':
@@ -1712,6 +1773,46 @@ def create_server():
         text_document_sync_kind=TextDocumentSyncKind.Full,
     )
     state = LspWorkspaceState()
+    source_line_cache: OrderedDict[
+        str,
+        tuple[str, list[str] | None],
+    ] = OrderedDict()
+
+    def _source_range_to_lsp(
+        range_value: SourceRange,
+    ) -> tuple[int, int, int, int]:
+        cache_key = _normalize_path(range_value.file_name)
+        cached = source_line_cache.get(cache_key)
+        if cached is not None:
+            line_texts = cached[1]
+            if line_texts is None:
+                return source_range_to_lsp(range_value)
+            return source_range_to_lsp(
+                range_value,
+                cached[0],
+                line_texts=line_texts,
+            )
+        uri = (
+            state.uri_for_file_name(range_value.file_name)
+            or path_to_uri(range_value.file_name)
+        )
+        text = state.text_for_uri(uri)
+        if text is None:
+            return source_range_to_lsp(range_value)
+        line_texts = None if text.isascii() else text.splitlines()
+        cached = (text, line_texts)
+        source_line_cache[cache_key] = cached
+        source_line_cache.move_to_end(cache_key)
+        while len(source_line_cache) > 8:
+            source_line_cache.popitem(last=False)
+        line_texts = cached[1]
+        if line_texts is None:
+            return source_range_to_lsp(range_value)
+        return source_range_to_lsp(
+            range_value,
+            text,
+            line_texts=line_texts,
+        )
 
     def _symbol_kind(symbol: Symbol) -> LspSymbolKind:
         mapping = {
@@ -1761,8 +1862,12 @@ def create_server():
             for symbol in symbols:
                 if symbol.kind == SymbolKind.UNIT:
                     continue
-                start_line, start_col, end_line, end_col = source_range_to_lsp(symbol.decl_range)
-                sel_start, sel_col, sel_end, sel_end_col = source_range_to_lsp(symbol.name_range)
+                start_line, start_col, end_line, end_col = _source_range_to_lsp(
+                    symbol.decl_range,
+                )
+                sel_start, sel_col, sel_end, sel_end_col = _source_range_to_lsp(
+                    symbol.name_range,
+                )
                 children = []
                 if symbol.member_scope is not None:
                     children = _document_symbols_for_scope(symbol.member_scope)
@@ -1822,11 +1927,13 @@ def create_server():
             model,
             line=position.line,
             character=position.character,
+            text=text,
         )
         symbol = ref.resolved if ref and ref.resolved else find_symbol_at_position(
             model,
             line=position.line,
             character=position.character,
+            text=text,
         )
         if symbol is None and text is not None:
             symbol = find_identifier_symbol_at_position(
@@ -1862,7 +1969,7 @@ def create_server():
         if key in seen:
             return
         seen.add(key)
-        start_line, start_col, end_line, end_col = source_range_to_lsp(ref_range)
+        start_line, start_col, end_line, end_col = _source_range_to_lsp(ref_range)
         edits.setdefault(uri, []).append(
             TextEdit(
                 range=Range(
@@ -1877,6 +1984,7 @@ def create_server():
     @server.thread()
     def did_open(ls: LanguageServer, params) -> None:
         state.update_document(params.text_document.uri, params.text_document.text)
+        source_line_cache.clear()
         _publish_diagnostics(ls, params.text_document.uri)
 
     @server.feature(TEXT_DOCUMENT_DID_CHANGE)
@@ -1886,12 +1994,14 @@ def create_server():
             return
         text = ls.workspace.get_text_document(params.text_document.uri).source
         state.update_document(params.text_document.uri, text)
+        source_line_cache.clear()
         _publish_diagnostics(ls, params.text_document.uri)
 
     @server.feature(TEXT_DOCUMENT_DID_CLOSE)
     @server.thread()
     def did_close(ls: LanguageServer, params) -> None:
         state.remove_document(params.text_document.uri)
+        source_line_cache.clear()
         ls.publish_diagnostics(params.text_document.uri, [])
 
     @server.feature(TEXT_DOCUMENT_DEFINITION)
@@ -1901,7 +2011,9 @@ def create_server():
             return None
         file_name = symbol.decl_range.file_name
         uri = state.uri_for_file_name(file_name) or path_to_uri(file_name)
-        start_line, start_col, end_line, end_col = source_range_to_lsp(symbol.decl_range)
+        start_line, start_col, end_line, end_col = _source_range_to_lsp(
+            symbol.decl_range,
+        )
         return Location(
             uri=uri,
             range=Range(
@@ -1927,7 +2039,9 @@ def create_server():
             for ref in references_for_symbol(state.workspace, symbol):
                 file_name = ref.ref_range.file_name
                 uri = state.uri_for_file_name(file_name) or path_to_uri(file_name)
-                start_line, start_col, end_line, end_col = source_range_to_lsp(ref.ref_range)
+                start_line, start_col, end_line, end_col = _source_range_to_lsp(
+                    ref.ref_range,
+                )
                 locations.append(
                     Location(
                         uri=uri,
@@ -1950,7 +2064,9 @@ def create_server():
             include_declaration=include_declaration,
         ):
             uri = state.uri_for_file_name(ref_range.file_name) or path_to_uri(ref_range.file_name)
-            start_line, start_col, end_line, end_col = source_range_to_lsp(ref_range)
+            start_line, start_col, end_line, end_col = _source_range_to_lsp(
+                ref_range,
+            )
             locations.append(
                 Location(
                     uri=uri,
@@ -2026,7 +2142,9 @@ def create_server():
                     continue
                 file_name = symbol.decl_range.file_name
                 uri = state.uri_for_file_name(file_name) or path_to_uri(file_name)
-                start_line, start_col, end_line, end_col = source_range_to_lsp(symbol.decl_range)
+                start_line, start_col, end_line, end_col = _source_range_to_lsp(
+                    symbol.decl_range,
+                )
                 items.append(
                     SymbolInformation(
                         name=symbol.name,
@@ -2095,6 +2213,10 @@ __all__ = [
     'DocumentSnapshot',
     'find_reference_at_position',
     'find_symbol_at_position',
+    'identifier_at_position',
+    'utf16_to_codepoint',
+    'codepoint_to_utf16',
+    'source_range_to_lsp',
     'resolve_reference',
     'extract_completion_base',
     'outline_source',
