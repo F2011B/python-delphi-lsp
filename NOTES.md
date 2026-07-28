@@ -304,3 +304,12 @@
   unit scopes before checking both global lookups. Its former single
   registration encoded the duplicate-producing transitive indexing behavior;
   it still verifies cyclic imports terminate and each symbol appears once.
+
+### F27 — Layered test timeouts
+
+- Added 20-minute limits to both CI jobs and the `pytest-timeout` test-only
+  dependency with a 120-second thread-based per-test limit.
+- LSP response reads now run through a five-second reader-thread deadline.
+  Worker NDJSON reads use the same bounded queue pattern, including watcher,
+  focus, recovery, and EOF checks.
+- Added deterministic blocked-reader regressions for both helpers.

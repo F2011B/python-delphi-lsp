@@ -22,6 +22,34 @@ def _write_source(path: Path, source: str) -> None:
     path.write_text(source, encoding="utf-8")
 
 
+def _readline_with_timeout(stream: object, timeout: float = 5.0) -> bytes:
+    result: queue.Queue[bytes] = queue.Queue(maxsize=1)
+    reader = threading.Thread(
+        target=lambda: result.put(stream.readline()),  # type: ignore[attr-defined]
+        daemon=True,
+    )
+    reader.start()
+    try:
+        return result.get(timeout=timeout)
+    except queue.Empty:
+        raise AssertionError(
+            f"worker did not produce a line within {timeout:.1f}s"
+        ) from None
+
+
+def test_worker_readline_helper_has_a_bounded_wait() -> None:
+    blocked = threading.Event()
+
+    class NeverReader:
+        def readline(self) -> bytes:
+            blocked.wait()
+            return b""
+
+    with pytest.raises(AssertionError, match="did not produce"):
+        _readline_with_timeout(NeverReader(), timeout=0.01)
+    blocked.set()
+
+
 def _worker(
     root: Path,
     payload: bytes,
@@ -250,7 +278,7 @@ end.
             b'{"action":"find","query":"TOriginalWorker"}\n'
         )
         process.stdin.flush()
-        original = json.loads(process.stdout.readline())
+        original = json.loads(_readline_with_timeout(process.stdout))
         assert any(item["name"] == "TOriginalWorker" for item in original["result"])
 
         time.sleep(1.0)
@@ -272,7 +300,12 @@ end.
                 b'{"action":"find","query":"TChangedWorker"}\n'
             )
             process.stdin.flush()
-            changed = json.loads(process.stdout.readline())
+            changed = json.loads(
+                _readline_with_timeout(
+                    process.stdout,
+                    timeout=max(0.1, deadline - time.monotonic()),
+                )
+            )
             if any(
                 item["name"] == "TChangedWorker"
                 for item in changed["result"]
@@ -598,14 +631,14 @@ end.
     assert process.stdout is not None
     process.stdin.write(b'{"action":"find","query":"TWorker"}\n')
     process.stdin.flush()
-    found = json.loads(process.stdout.readline())
+    found = json.loads(_readline_with_timeout(process.stdout))
     target_id = found["result"][0]["target_id"]
     process.stdin.write(json.dumps({"action": "focus", "target_id": target_id}).encode("utf-8") + b"\n")
     process.stdin.flush()
-    focused = json.loads(process.stdout.readline())
+    focused = json.loads(_readline_with_timeout(process.stdout))
     process.stdin.write(b'{"action":"inspect"}\n')
     process.stdin.close()
-    inspected = json.loads(process.stdout.readline())
+    inspected = json.loads(_readline_with_timeout(process.stdout))
     stderr = process.stderr.read()
     assert process.wait(timeout=5) == 0
 
@@ -804,13 +837,13 @@ def test_worker_reports_unterminated_oversize_record_before_newline(tmp_path: Pa
 
         process.stdin.write(b"discarded tail\n{\"action\":\"open\"}\n")
         process.stdin.flush()
-        recovered = json.loads(process.stdout.readline())
+        recovered = json.loads(_readline_with_timeout(process.stdout))
         process.stdin.close()
 
         assert recovered["schema"] == 3
         assert process.wait(timeout=5) == 0
         assert process.stderr.read() == b""
-        assert process.stdout.readline() == b""
+        assert _readline_with_timeout(process.stdout) == b""
     finally:
         if not process.stdin.closed:
             process.stdin.close()

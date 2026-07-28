@@ -1,9 +1,11 @@
 import pathlib
 import json
 import os
+import queue
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -51,7 +53,7 @@ def _send_lsp_message(proc: subprocess.Popen, message: dict) -> None:
     proc.stdin.flush()
 
 
-def _receive_lsp_message(proc: subprocess.Popen) -> dict:
+def _read_lsp_message(proc: subprocess.Popen) -> dict:
     assert proc.stdout is not None
     headers = b''
     while b'\r\n\r\n' not in headers:
@@ -66,6 +68,51 @@ def _receive_lsp_message(proc: subprocess.Popen) -> dict:
     if length is None:
         raise AssertionError('language server response did not include Content-Length')
     return json.loads(proc.stdout.read(length))
+
+
+def _receive_lsp_message(
+    proc: subprocess.Popen,
+    *,
+    timeout: float = 5.0,
+) -> dict:
+    result: queue.Queue[tuple[dict | None, BaseException | None]] = queue.Queue(
+        maxsize=1
+    )
+
+    def read() -> None:
+        try:
+            result.put((_read_lsp_message(proc), None))
+        except BaseException as error:
+            result.put((None, error))
+
+    threading.Thread(target=read, daemon=True).start()
+    try:
+        message, error = result.get(timeout=timeout)
+    except queue.Empty:
+        raise AssertionError(
+            f"language server did not respond within {timeout:.1f}s"
+        ) from None
+    if error is not None:
+        raise error
+    assert message is not None
+    return message
+
+
+def test_receive_lsp_message_has_a_bounded_read() -> None:
+    blocked = threading.Event()
+
+    class NeverReader:
+        def read(self, _size: int) -> bytes:
+            blocked.wait()
+            return b""
+
+    proc = type("BlockedProcess", (), {"stdout": NeverReader()})()
+    with unittest.TestCase().assertRaisesRegex(
+        AssertionError,
+        "did not respond",
+    ):
+        _receive_lsp_message(proc, timeout=0.01)  # type: ignore[arg-type]
+    blocked.set()
 
 
 def _request_lsp(proc: subprocess.Popen, message: dict) -> dict:
