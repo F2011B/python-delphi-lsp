@@ -236,6 +236,31 @@ def test_export_okf_wiki_contains_all_layered_knowledge_and_valid_links(tmp_path
     _assert_internal_links_resolve(output)
 
 
+def test_export_okf_wiki_contains_resolved_semantic_references(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repo"
+    output = tmp_path / "knowledge"
+    _write(
+        repository / "Main.dpr",
+        """
+        program Main;
+        var
+          Value: Integer;
+        begin
+          Value := 1;
+        end.
+        """,
+    )
+
+    export_okf_wiki(repository, output, workers=1)
+
+    reference_index = (output / "references" / "index.md").read_text(
+        encoding="utf-8",
+    )
+    assert "- No resolved references" not in reference_index
+
+
 def test_export_indexes_only_main_project_dependency_closure(tmp_path: Path) -> None:
     repository = tmp_path / "repo"
     output = tmp_path / "knowledge"
@@ -375,7 +400,7 @@ def test_export_never_reads_workspace_excluded_dependency_directory(
         path.read_text(encoding="utf-8")
         for path in (output / "units").glob("*.md")
     )
-    assert "BlockedUnit" not in unit_text
+    assert "\n# BlockedUnit\n" not in unit_text
 
 
 def test_explicit_project_file_overrides_main_project_selection(tmp_path: Path) -> None:

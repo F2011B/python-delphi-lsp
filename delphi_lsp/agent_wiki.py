@@ -31,7 +31,11 @@ from .agent_protocol import (
     SUPPORTED_GRAPHS,
     SUPPORTED_RELATIONS,
 )
-from .semantic import Symbol, SymbolReference
+from .parser import DelphiParser
+from .parser_backend import ParserMode
+from .project_config import workspace_include_loader
+from .semantic import Symbol, SymbolIndex, SymbolReference
+from .source_reader import read_source_text
 
 
 OKF_VERSION = "0.2"
@@ -149,6 +153,7 @@ def export_okf_wiki(
         on_progress=forward_index_progress,
         workers=workers,
     )
+    _populate_wiki_references(index)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(
         tempfile.mkdtemp(prefix=f".{output_path.name}.tmp-", dir=output_path.parent)
@@ -198,6 +203,99 @@ def export_okf_wiki(
         "wiki export complete",
     )
     return result
+
+
+def _populate_wiki_references(index: CodebaseIndex) -> None:
+    reference_index = SymbolIndex()
+    outline_by_exact: dict[tuple[str, str, str, int, int], Symbol] = {}
+    outline_by_source: dict[tuple[str, str, str], Symbol] = {}
+    outline_ids: set[int] = set()
+    for model in index.models.values():
+        reference_index.register_unit(model.unit_scope.name, model.unit_scope)
+        for symbol in _iter_symbols(model.unit_scope):
+            outline_ids.add(id(symbol))
+            source_key = (
+                symbol.name.casefold(),
+                symbol.kind.value,
+                symbol.decl_range.file_name.casefold(),
+            )
+            outline_by_source.setdefault(source_key, symbol)
+            outline_by_exact[
+                (
+                    *source_key,
+                    symbol.name_range.start_line,
+                    symbol.name_range.start_col,
+                )
+            ] = symbol
+    outline_units = dict(reference_index.units)
+    outline_name_counts = {
+        name: len(symbols)
+        for name, symbols in reference_index.name_index.items()
+    }
+
+    parser = DelphiParser(
+        include_paths=index.discovery.include_paths,
+        defines=index.discovery.defines,
+        include_loader=workspace_include_loader(
+            index.discovery.project_config,
+            index.discovery.include_paths,
+        ),
+        mode=ParserMode.TOLERANT,
+    )
+    for source_path, outline_model in index.models.items():
+        try:
+            source = read_source_text(Path(source_path))
+            parsed = parser.parse(
+                source,
+                source_path,
+                build_semantic=True,
+                index=reference_index,
+            )
+        except (OSError, UnicodeError):
+            continue
+        try:
+            if parsed.semantic is None:
+                continue
+            references: list[SymbolReference] = []
+            for reference in parsed.semantic.references:
+                resolved = reference.resolved
+                mapped = (
+                    resolved
+                    if resolved is not None and id(resolved) in outline_ids
+                    else None
+                )
+                if resolved is not None and mapped is None:
+                    source_key = (
+                        resolved.name.casefold(),
+                        resolved.kind.value,
+                        resolved.decl_range.file_name.casefold(),
+                    )
+                    mapped = outline_by_exact.get(
+                        (
+                            *source_key,
+                            resolved.name_range.start_line,
+                            resolved.name_range.start_col,
+                        )
+                    ) or outline_by_source.get(source_key)
+                references.append(
+                    SymbolReference(
+                        name=reference.name,
+                        kind=reference.kind,
+                        ref_range=reference.ref_range,
+                        scope=outline_model.unit_scope,
+                        resolved=mapped,
+                    )
+                )
+            outline_model.references = references
+        finally:
+            reference_index.units.clear()
+            reference_index.units.update(outline_units)
+            for name in tuple(reference_index.name_index):
+                count = outline_name_counts.get(name)
+                if count is None:
+                    reference_index.name_index.pop(name, None)
+                else:
+                    del reference_index.name_index[name][count:]
 
 
 def _emit_wiki_progress(

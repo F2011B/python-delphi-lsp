@@ -193,3 +193,17 @@
 - Batch 6 full result: 836 passed, 1 skipped, 84 warnings, and 60 subtests
   passed.
 - Batch 6 golden snapshot classification: identical to Batch 5.
+
+### F9 — Wiki semantic references
+
+- Added an export regression with a resolved global-variable reference.
+- Wiki export now performs a streaming tolerant semantic pass, maps resolved
+  targets back to retained outline symbols, and stores only lightweight
+  reference records. Temporary full semantic scopes are removed from the
+  shared reference index after each file to preserve bounded residency.
+- Existing assertion updated:
+  `assert "BlockedUnit" not in unit_text` became
+  `assert "\n# BlockedUnit\n" not in unit_text`. The old assertion rejected
+  even an honest unresolved reference in an allowed source; the corrected
+  assertion still proves that no page is generated for the excluded unit,
+  while the existing read-spy assertions prove excluded files are not read.
