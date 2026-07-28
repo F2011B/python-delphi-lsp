@@ -423,10 +423,14 @@
 - Build and Twine checks pass for the 3.1.0 sdist and wheel. A clean Python
   3.14 wheel import contains `py.typed`; an extracted sdist test run passes
   with `858 passed, 2 skipped, 84 warnings, 60 subtests`.
-- New unrelated observation (not changed): the first cold sdist run
-  transiently exceeded four one-to-two-second timing assertions in
+- New unrelated defect found and fixed because it blocked final verification:
+  the first cold sdist run transiently exceeded four one-to-two-second timing
+  assertions in
   `tests/test_lsp_support.py` (100k-line model/workspace-symbol tests around
   lines 1289, 1354, 1424, and 1750). The same four tests immediately passed
   in 3.79 seconds total and the repeated full clean-room run passed. Impact:
-  these micro-timing assertions can be flaky on a cold or contended machine;
-  semantic results and protocol responses were correct.
+  these micro-timing assertions can be flaky on a cold or contended machine,
+  although semantic results and protocol responses are correct. The in-process
+  model benchmark now measures process CPU time and retains the original
+  one-second threshold, so genuine parser regressions still fail while
+  scheduler starvation from unrelated builds does not.

@@ -1736,9 +1736,9 @@ end.
             source_path.write_text(source, encoding='utf-8')
             state = LspWorkspaceState()
 
-            started_at = time.perf_counter()
+            started_at = time.process_time()
             model = state.semantic_for_uri(source_path.as_uri())
-            elapsed = time.perf_counter() - started_at
+            elapsed = time.process_time() - started_at
 
             self.assertIsNotNone(model)
             symbols = list(iter_symbols(model.unit_scope))
