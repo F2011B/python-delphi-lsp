@@ -323,6 +323,7 @@ def _view(args: argparse.Namespace) -> None:
 
 def _index(args: argparse.Namespace) -> None:
     args.root = _workspace_root(args.root)
+    output = _resolve_output_path(args.root, args.out)
     index = build_codebase_index(
         args.root,
         project_file=args.project_file,
@@ -334,16 +335,14 @@ def _index(args: argparse.Namespace) -> None:
         "projects": layer_payload(index, "projects"),
         "problems": layer_payload(index, "problems"),
     }
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(args.out)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(output)
 
 
 def _wiki_export(args: argparse.Namespace) -> None:
     args.root = _workspace_root(args.root)
-    output = args.out
-    if not output.is_absolute():
-        output = args.root / output
+    output = _resolve_output_path(args.root, args.out)
     renderer = None if args.quiet else _WikiProgressRenderer(sys.stderr)
     try:
         result = export_okf_wiki(
@@ -657,6 +656,10 @@ def _workspace_root(value: str | Path) -> Path:
             f"Workspace root is not a directory: {root}",
         )
     return root.resolve()
+
+
+def _resolve_output_path(root: Path, output: Path) -> Path:
+    return output if output.is_absolute() else root / output
 
 
 def _serve_worker(context: AgentContext, input_stream: BinaryIO, output_stream: BinaryIO, error_stream: TextIO) -> None:

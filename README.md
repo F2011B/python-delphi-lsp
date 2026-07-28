@@ -189,6 +189,8 @@ delphi-lsp-agent cache clear --root PATH
 `cache stop` outputs stop status JSON and may include warnings on stderr.
 `cache clear` stops the daemon and removes persistent navigation shards.
 `query` outputs Protocol v3 JSON responses and writes warnings to stderr.
+For `index`, a relative `--out` is resolved below `--root`; the default is
+`.delphi-lsp/agent-index/index.json`.
 
 ### Open Knowledge Format wiki export
 

@@ -144,6 +144,45 @@ def test_cache_cli_exposes_disk_budget_and_clear(
     assert json.loads(capsys.readouterr().out) == {"cleared": True}
 
 
+def test_index_relative_output_is_resolved_below_workspace_root(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "UnitA.pas").write_text(
+        "unit UnitA; interface implementation end.\n",
+        encoding="utf-8",
+    )
+    foreign_cwd = tmp_path / "elsewhere"
+    foreign_cwd.mkdir()
+    relative_output = Path(".delphi-lsp") / "custom" / "index.json"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "delphi_lsp.agent_cli",
+            "index",
+            "--root",
+            str(workspace),
+            "--out",
+            str(relative_output),
+            "--workers",
+            "1",
+        ],
+        cwd=foreign_cwd,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    expected = workspace / relative_output
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == f"{expected}\n"
+    assert expected.is_file()
+    assert not (foreign_cwd / relative_output).exists()
+
+
 @pytest.mark.parametrize("value", [0, -1, True])
 def test_start_cache_rejects_non_positive_idle_timeout(
     tmp_path: Path,

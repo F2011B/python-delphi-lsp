@@ -350,3 +350,12 @@
   of being treated as name/path queries that return an empty page.
 - Supplying both a positional value and `--target-id` is rejected with the
   existing structured `cache_error:invalid_request` contract.
+
+### F32 — Workspace-relative index output
+
+- Added a subprocess regression that runs the index command from outside the
+  selected repository and verifies the output is created only below the
+  workspace.
+- `index` and `wiki export` now share one output-path resolver. Relative
+  destinations are anchored to the canonical `--root`, and `index` prints the
+  resolved path.
