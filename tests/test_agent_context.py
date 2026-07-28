@@ -663,6 +663,40 @@ def test_cached_context_coalesces_revision_scans_until_explicit_invalidation(
     assert calls == 2
 
 
+def test_revision_invalidation_during_refresh_survives_for_next_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_source(tmp_path / "Main.dpr", "program Main; begin end.")
+    monkeypatch.setattr(agent_context_module.time, "monotonic", lambda: 100.0)
+    context = AgentContext.open(
+        tmp_path,
+        revision_check_interval_seconds=3600.0,
+    )
+    real_select = context.workspace._select_project_with_revision
+    calls = 0
+
+    def select_with_racing_invalidation(project_id: str) -> str:
+        nonlocal calls
+        calls += 1
+        revision = real_select(project_id)
+        if calls == 1:
+            context.invalidate_revision_cache()
+        return revision
+
+    monkeypatch.setattr(
+        context.workspace,
+        "_select_project_with_revision",
+        select_with_racing_invalidation,
+    )
+    context.invalidate_revision_cache()
+
+    context.handle({"action": "open"})
+    context.handle({"action": "open"})
+
+    assert calls == 2
+
+
 def test_context_reuses_selected_workspace_revision(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

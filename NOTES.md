@@ -169,3 +169,10 @@
   passed.
 - Batch 5 golden snapshot classification: identical to the classified Batch 4
   snapshot.
+
+### F8 — Revision invalidation race
+
+- Added a deterministic race regression that invalidates during a revision
+  scan and verifies the immediately following request rescans.
+- A monotonic revision epoch now guards timestamp write-back, so an in-flight
+  refresh cannot erase a newer watcher invalidation.

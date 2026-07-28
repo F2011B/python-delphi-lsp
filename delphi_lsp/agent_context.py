@@ -651,6 +651,7 @@ class AgentContext:
         self._last_revision_check_at = (
             time.monotonic() if self._revision_check_interval_seconds > 0.0 else 0.0
         )
+        self._revision_epoch = 0
         self._parallel_stats = ParallelBuildStats(0, 0, 0, 0.0, 0)
         self._navigation_store = (
             NavigationShardStore(navigation_cache_dir)
@@ -782,6 +783,7 @@ class AgentContext:
         return revision
 
     def invalidate_revision_cache(self) -> None:
+        self._revision_epoch += 1
         self._last_revision_check_at = float("-inf")
 
     def handle(self, request: AgentRequest | Mapping[str, object]) -> AgentResponse:
@@ -850,6 +852,7 @@ class AgentContext:
         previous_project_id = self._workspace.active_project_id
         selected_project_id = requested_project_id or previous_project_id
         now = time.monotonic()
+        revision_epoch = self._revision_epoch
         selection_changed = bool(
             requested_project_id
             and requested_project_id != previous_project_id
@@ -866,7 +869,7 @@ class AgentContext:
             revision = self._workspace._select_project_with_revision(selected_project_id)
         else:
             revision = self._workspace.workspace_revision
-        if not revision_is_fresh:
+        if not revision_is_fresh and self._revision_epoch == revision_epoch:
             self._last_revision_check_at = now
         current_project_id = self._workspace.active_project_id
 
