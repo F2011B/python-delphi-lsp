@@ -249,8 +249,13 @@ delphi-lsp-agent query --root PATH trace TARGET_ID --relation callers
 delphi-lsp-agent query --root PATH cpg TARGET_ID --graph full --direction out --depth 4
 delphi-lsp-agent query --root PATH metrics
 delphi-lsp-agent query --root PATH metrics UNIT_QUERY
+delphi-lsp-agent query --root PATH metrics --target-id UNIT_TARGET_ID
 delphi-lsp-agent cache status --root PATH --format json
 ```
+
+A `target_v2_...` positional value for `metrics` is also recognized as a unit
+target ID; other positional values remain case-insensitive unit-name or path
+queries.
 
 The repository root is sufficient even when it contains many projects:
 

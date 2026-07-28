@@ -341,3 +341,12 @@
   to UTF-16.
 - Outbound conversion uses an eight-file source-line cache with an ASCII fast
   path, preserving the 100,000-line document-symbol latency regression.
+
+### F31 — Metrics target IDs
+
+- Added CLI regressions for both positional `target_v2_...` values and the new
+  explicit `query metrics --target-id` form.
+- Metrics unit target IDs now populate the protocol `target_id` field instead
+  of being treated as name/path queries that return an empty page.
+- Supplying both a positional value and `--target-id` is rejected with the
+  existing structured `cache_error:invalid_request` contract.

@@ -400,6 +400,7 @@ def test_parser_adds_cache_lifecycle_and_ergonomic_query_commands() -> None:
     assert cpg.depth == 8
     assert defaults.value == ""
     assert defaults.project_id == ""
+    assert defaults.target_id == ""
     assert defaults.detail == "summary"
     assert defaults.relation is None
     assert defaults.cursor == ""
@@ -499,6 +500,65 @@ def test_query_maps_cpg_target_and_graph_fields(
         "depth": 12,
     }
     assert capsys.readouterr().out == '{"schema":3}\n'
+
+
+def test_query_metrics_routes_unit_target_ids(
+    monkeypatch,
+    capsys,
+    tmp_path: Path,
+) -> None:
+    captured: list[dict[str, object]] = []
+
+    def query(_root: Path, request: dict[str, object]) -> SimpleNamespace:
+        captured.append(request)
+        return SimpleNamespace(payload={"schema": 3}, warning="")
+
+    monkeypatch.setattr(agent_cli, "query_cache", query)
+    positional = agent_cli.build_parser().parse_args(
+        [
+            "query",
+            "--root",
+            str(tmp_path),
+            "metrics",
+            "target_v2_unit",
+        ]
+    )
+    explicit = agent_cli.build_parser().parse_args(
+        [
+            "query",
+            "--root",
+            str(tmp_path),
+            "metrics",
+            "--target-id",
+            "target_v2_explicit",
+        ]
+    )
+    conflicting = agent_cli.build_parser().parse_args(
+        [
+            "query",
+            "--root",
+            str(tmp_path),
+            "metrics",
+            "Customer",
+            "--target-id",
+            "target_v2_explicit",
+        ]
+    )
+
+    assert agent_cli._query(positional) == 0
+    assert agent_cli._query(explicit) == 0
+    assert agent_cli._query(conflicting) == 1
+    assert [request.get("target_id") for request in captured] == [
+        "target_v2_unit",
+        "target_v2_explicit",
+    ]
+    assert all("query" not in request for request in captured)
+    streams = capsys.readouterr()
+    assert streams.out == '{"schema":3}\n{"schema":3}\n'
+    assert streams.err == (
+        "cache_error:invalid_request: metrics accepts either a value or "
+        "--target-id, not both.\n"
+    )
 
 
 def test_cache_cli_lifecycle_query_and_warning_streams(tmp_path: Path) -> None:

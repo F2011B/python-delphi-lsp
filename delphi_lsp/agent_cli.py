@@ -180,6 +180,7 @@ def build_parser() -> argparse.ArgumentParser:
     query.add_argument("action", choices=SUPPORTED_ACTIONS)
     query.add_argument("value", nargs="?", default="")
     query.add_argument("--project-id", default="")
+    query.add_argument("--target-id", default="")
     query.add_argument("--detail", choices=SUPPORTED_DETAILS, default="summary")
     query.add_argument("--relation", choices=SUPPORTED_RELATIONS)
     query.add_argument("--graph", choices=SUPPORTED_GRAPHS, default="full")
@@ -597,15 +598,29 @@ def _cache_serve(args: argparse.Namespace) -> int:
 def _query(args: argparse.Namespace) -> int:
     args.root = _workspace_root(args.root)
     request: dict[str, object] = {"action": args.action}
+    if args.value and args.target_id:
+        sys.stderr.write(
+            f"cache_error:invalid_request: {args.action} accepts either a "
+            "value or --target-id, not both.\n"
+        )
+        sys.stderr.flush()
+        return 1
     if args.value:
-        if args.action in {"find", "metrics"}:
+        if args.action == "find":
             request["query"] = args.value
+        elif args.action == "metrics":
+            if args.value.startswith("target_v2_"):
+                request["target_id"] = args.value
+            else:
+                request["query"] = args.value
         elif args.action in {"focus", "inspect", "trace", "cpg"}:
             request["target_id"] = args.value
         else:
             sys.stderr.write(f"cache_error:invalid_request: {args.action} does not accept a value.\n")
             sys.stderr.flush()
             return 1
+    elif args.target_id:
+        request["target_id"] = args.target_id
     for argument, field in (
         ("project_id", "project_id"),
         ("detail", "detail"),
