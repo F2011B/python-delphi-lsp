@@ -106,6 +106,28 @@ def test_dead_cache_watcher_is_reported_and_forces_revalidation(
     assert invalidations == [None]
 
 
+def test_workspace_watcher_filter_honors_config_and_skip_dirs(
+    tmp_path: Path,
+) -> None:
+    from delphi_lsp import agent_cache
+    from delphi_lsp.project_config import load_project_path_config
+
+    (tmp_path / ".delphi-lsp.toml").write_text(
+        '[workspace]\nexclude = ["vendor"]\n',
+        encoding="utf-8",
+    )
+    project_config = load_project_path_config(tmp_path)
+    watch_filter = agent_cache._workspace_watch_filter(
+        tmp_path,
+        project_config,
+    )
+
+    assert watch_filter(None, str(tmp_path / "src" / "Unit.pas"))
+    assert not watch_filter(None, str(tmp_path / "vendor" / "Unit.pas"))
+    assert not watch_filter(None, str(tmp_path / ".git" / "Copy.pas"))
+    assert not watch_filter(None, str(tmp_path / "src" / "notes.txt"))
+
+
 def test_current_process_rss_dispatches_platform_measurements(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -25,7 +25,8 @@ from watchfiles import watch
 from ._version import __version__
 from .agent_context import AgentContext
 from .agent_protocol import AgentProtocolError
-from .project_config import load_project_path_config
+from .project_config import ProjectPathConfig, load_project_path_config
+from .project_discovery import SKIP_DIRS
 
 
 DEFAULT_MAX_MEMORY_BYTES = 512 * 1024**2
@@ -896,18 +897,43 @@ def _watch_filter(_change: object, path: str) -> bool:
     return Path(path).suffix.casefold() in _WATCHED_SUFFIXES
 
 
+def _workspace_watch_filter(
+    root: str | Path,
+    project_config: ProjectPathConfig | None,
+) -> Callable[[object, str], bool]:
+    root_path = Path(root).expanduser().resolve()
+
+    def include(change: object, path: str) -> bool:
+        candidate = Path(path)
+        try:
+            relative = candidate.relative_to(root_path)
+        except ValueError:
+            return False
+        if any(part in SKIP_DIRS for part in relative.parts):
+            return False
+        if (
+            project_config is not None
+            and project_config.excludes_workspace_path(candidate)
+        ):
+            return False
+        return _watch_filter(change, path)
+
+    return include
+
+
 def watch_workspace_changes(
     root: str | Path,
     *,
     stop_event: threading.Event,
     on_change: Callable[[], None],
     on_ready: Callable[[], None] | None = None,
+    watch_filter: Callable[[object, str], bool] | None = None,
 ) -> None:
     ready = False
     try:
         for changes in watch(
             root,
-            watch_filter=_watch_filter,
+            watch_filter=watch_filter or _watch_filter,
             stop_event=stop_event,
             debounce=50,
             step=20,
@@ -939,6 +965,10 @@ def _watch_workspace(service: _CacheService) -> None:
             stop_event=service.shutdown,
             on_change=service._context.invalidate_revision_cache,
             on_ready=service.watcher_ready.set,
+            watch_filter=_workspace_watch_filter(
+                service.metadata.root,
+                service._context.workspace.project_config,
+            ),
         )
     finally:
         if not service.shutdown.is_set():

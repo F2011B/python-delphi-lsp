@@ -183,3 +183,13 @@
 - The service records watcher failure, exposes `watcher_active: false` in
   status, and invalidates the revision cache before every subsequent request
   so results degrade to per-request validation rather than silent staleness.
+
+### F33 — Watcher exclusions
+
+- Added a watcher-filter regression covering a normal Delphi unit, a TOML
+  `workspace.exclude`, a shared skip directory, and an unrelated suffix.
+- The daemon watcher now uses a workspace-specific filter combining watched
+  suffixes, `SKIP_DIRS`, and the active project configuration.
+- Batch 6 full result: 836 passed, 1 skipped, 84 warnings, and 60 subtests
+  passed.
+- Batch 6 golden snapshot classification: identical to Batch 5.
