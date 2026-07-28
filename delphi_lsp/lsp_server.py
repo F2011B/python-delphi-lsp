@@ -1511,6 +1511,7 @@ def text_references_for_symbol(
     text: str,
     symbol: Symbol,
     *,
+    file_name: str,
     include_declaration: bool,
 ) -> list[SourceRange]:
     search_range = _text_reference_search_range(symbol)
@@ -1524,7 +1525,7 @@ def text_references_for_symbol(
         line_text = lines[line_number - 1]
         for match in pattern.finditer(line_text):
             ref_range = SourceRange(
-                symbol.decl_range.file_name,
+                file_name,
                 line_number,
                 match.start() + 1,
                 line_number,
@@ -1537,6 +1538,14 @@ def text_references_for_symbol(
 
 
 def _text_reference_search_range(symbol: Symbol) -> SourceRange:
+    if symbol.scope.kind == ScopeKind.UNIT:
+        return SourceRange(
+            symbol.decl_range.file_name,
+            1,
+            1,
+            1_000_000_000,
+            1,
+        )
     owner = symbol.scope.owner
     if owner is not None and owner is not symbol:
         return owner.decl_range
@@ -1886,6 +1895,7 @@ def create_server():
         for ref_range in text_references_for_symbol(
             text,
             symbol,
+            file_name=uri_to_path(params.text_document.uri),
             include_declaration=include_declaration,
         ):
             uri = state.uri_for_file_name(ref_range.file_name) or path_to_uri(ref_range.file_name)
@@ -1906,7 +1916,6 @@ def create_server():
         symbol = _symbol_at_position(params.text_document.uri, params.position)
         if symbol is None:
             return None
-
         text = state.text_for_uri(params.text_document.uri)
         semantic_symbol: Symbol | None = None
         semantic_model = state.semantic_for_uri(params.text_document.uri)
@@ -1931,6 +1940,7 @@ def create_server():
             for ref_range in text_references_for_symbol(
                 text,
                 symbol,
+                file_name=uri_to_path(params.text_document.uri),
                 include_declaration=True,
             ):
                 _add_rename_edit(edits, seen, ref_range, params.new_name)

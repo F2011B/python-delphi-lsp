@@ -3,9 +3,18 @@ from functools import partial
 from types import SimpleNamespace
 from unittest import mock
 
-from lsprotocol.types import TEXT_DOCUMENT_DID_CHANGE, TextDocumentSyncKind
+from lsprotocol.types import (
+    TEXT_DOCUMENT_DID_CHANGE,
+    TextDocumentSyncKind,
+)
 
-from delphi_lsp.lsp_server import create_server
+from delphi_lsp.lsp_server import (
+    build_outline_semantic_model,
+    create_server,
+    iter_symbols,
+    text_references_for_symbol,
+)
+from delphi_lsp.semantic import SymbolKind
 
 
 def test_server_advertises_full_document_synchronization() -> None:
@@ -47,3 +56,64 @@ def test_did_change_indexes_the_document_synchronized_by_pygls() -> None:
         handler(params)
 
     assert state.documents[uri].text == full_source
+
+
+def test_text_references_scan_the_whole_unit_for_a_global_symbol(tmp_path) -> None:
+    source = (
+        'unit GlobalUnit;\n'
+        'interface\n'
+        'procedure UseFoo;\n'
+        'implementation\n'
+        'procedure UseFoo;\n'
+        'begin\n'
+        '  UseFoo;\n'
+        'end;\n'
+        'end.\n'
+    )
+    file_name = str(tmp_path / 'GlobalUnit.pas')
+    model = build_outline_semantic_model(source, file_name)
+    symbol = next(
+        item
+        for item in iter_symbols(model.unit_scope)
+        if item.kind == SymbolKind.PROCEDURE
+    )
+
+    references = text_references_for_symbol(
+        source,
+        symbol,
+        file_name=file_name,
+        include_declaration=True,
+    )
+
+    assert [item.start_line for item in references] == [3, 5, 7]
+
+
+def test_text_references_are_attributed_to_the_file_being_scanned(tmp_path) -> None:
+    declaring_file = str(tmp_path / 'Worker.pas')
+    current_file = str(tmp_path / 'Main.pas')
+    model = build_outline_semantic_model(
+        'unit Worker;\ninterface\nimplementation\nend.\n',
+        declaring_file,
+    )
+    unit_symbol = next(
+        item
+        for item in iter_symbols(model.unit_scope)
+        if item.kind == SymbolKind.UNIT
+    )
+    current_source = (
+        'program Main;\n'
+        'uses Worker;\n'
+        'begin\n'
+        '  Worker.Run;\n'
+        'end.\n'
+    )
+
+    references = text_references_for_symbol(
+        current_source,
+        unit_symbol,
+        file_name=current_file,
+        include_declaration=True,
+    )
+
+    assert len(references) == 2
+    assert {item.file_name for item in references} == {current_file}

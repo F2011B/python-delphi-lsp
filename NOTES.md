@@ -29,3 +29,13 @@
 - Full result: 814 passed, 1 skipped, 33 warnings, 60 subtests passed.
 - Golden snapshot classification: identical (no semantic or agent-layer
   change).
+
+### F6 — Rename and reference search ranges
+
+- Added regressions for unit-level symbols and for cross-file reference
+  attribution.
+- Unit-scope symbols now use a whole-file fallback search instead of the
+  synthetic one-line unit declaration range.
+- Text fallback references receive the file being scanned explicitly, so
+  ranges can never combine coordinates from one document with another
+  document's name.
