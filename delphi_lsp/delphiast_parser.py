@@ -362,11 +362,22 @@ class DelphiAstParser:
             self._advance()
             type_node = self._node(SyntaxNodeType.ntType, token)
             type_node.set_attribute(AttributeName.anType, "record" if kind == "object" else kind)
-            if self._accept("abstract"):
-                type_node.set_attribute(AttributeName.anAbstract, "true")
-            self._parse_base_types(type_node)
-            if not self._at(";"):
-                self._parse_type_body(type_node)
+            if kind == "class" and self._accept("of"):
+                type_node.set_attribute(AttributeName.anType, "classref")
+                type_node.add_child(self._parse_type_reference({";"}))
+            else:
+                if kind == "class" and self._accept("helper"):
+                    self._accept("for")
+                    target_token = self._peek()
+                    target_name = self._read_qualified_name(allow_keywords=True)
+                    target = self._node(SyntaxNodeType.ntType, target_token)
+                    target.set_attribute(AttributeName.anName, target_name)
+                    type_node.add_child(target)
+                if self._accept("abstract"):
+                    type_node.set_attribute(AttributeName.anAbstract, "true")
+                self._parse_base_types(type_node)
+                if not self._at(";"):
+                    self._parse_type_body(type_node)
         elif self._at("("):
             type_node = self._parse_enum()
         elif kind == "set":
@@ -407,6 +418,8 @@ class DelphiAstParser:
         while not self._eof() and not self._at("end"):
             before = self.index
             word = self._normalized()
+            if word in {"of", "helper"}:
+                break
             if word == "strict" and self._normalized(1) in {"private", "protected"}:
                 first = self._advance()
                 visibility = self._advance().normalized

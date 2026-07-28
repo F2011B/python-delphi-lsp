@@ -91,3 +91,12 @@
 - Statement and condition collectors no longer track angle brackets.
   Declaration collectors retain generic-aware tracking, narrowed to an
   identifier immediately adjacent to `<`, with statement-boundary recovery.
+
+### F3 — Metaclass and class-helper parsing
+
+- Added one regression covering `class of`, `class helper for`, helper
+  members, and a following class field.
+- Metaclasses now produce a `classref` type and stop at their semicolon.
+  Helpers consume their target type before entering the normal class body.
+- A defensive type-body guard prevents stray `of` or `helper` tokens from
+  consuming subsequent declarations during tolerant recovery.

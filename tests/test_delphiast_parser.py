@@ -149,3 +149,53 @@ end.
     ]
 
     assert routine_names == ["First", "AfterComparison"]
+
+
+def test_metaclass_and_helper_types_preserve_following_declarations() -> None:
+    source = """
+unit TypeForms;
+interface
+type
+  TBase = class
+  end;
+  TBaseClass = class of TBase;
+  TBaseHelper = class helper for TBase
+    procedure Help;
+  end;
+  TAfter = class
+  private
+    FValue: Integer;
+  end;
+implementation
+end.
+"""
+
+    result = DelphiAstParser(source, "TypeForms.pas").parse()
+    declarations = {
+        node.get_attribute(AttributeName.anName): node
+        for node in walk(result.root)
+        if node.typ == SyntaxNodeType.ntTypeDecl
+    }
+
+    assert list(declarations) == [
+        "TBase",
+        "TBaseClass",
+        "TBaseHelper",
+        "TAfter",
+    ]
+    class_reference = declarations["TBaseClass"].find_node(SyntaxNodeType.ntType)
+    assert class_reference is not None
+    assert class_reference.get_attribute(AttributeName.anType) == "classref"
+    assert any(
+        node.typ == SyntaxNodeType.ntMethod
+        and node.get_attribute(AttributeName.anName) == "Help"
+        for node in walk(declarations["TBaseHelper"])
+    )
+    assert any(
+        node.typ == SyntaxNodeType.ntField
+        and any(
+            isinstance(child, ValuedSyntaxNode) and child.value == "FValue"
+            for child in walk(node)
+        )
+        for node in walk(declarations["TAfter"])
+    )
