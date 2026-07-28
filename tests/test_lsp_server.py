@@ -129,7 +129,7 @@ def test_text_references_are_attributed_to_the_file_being_scanned(tmp_path) -> N
     assert {item.file_name for item in references} == {current_file}
 
 
-def test_rename_aborts_when_an_include_makes_ranges_unsafe(tmp_path) -> None:
+def test_rename_maps_ranges_after_an_include(tmp_path) -> None:
     include_path = tmp_path / 'Shared.inc'
     include_path.write_text('const Included = 1;\n', encoding='utf-8')
     source_path = tmp_path / 'IncludeRename.pas'
@@ -159,7 +159,22 @@ def test_rename_aborts_when_an_include_makes_ranges_unsafe(tmp_path) -> None:
 
     result = handler(params)
 
-    assert result is None
+    assert result is not None
+    assert result.changes is not None
+    edits = result.changes[uri]
+    assert {
+        (
+            edit.range.start.line,
+            edit.range.start.character,
+            edit.range.end.line,
+            edit.range.end.character,
+        )
+        for edit in edits
+    } == {
+        (4, 2, 4, 8),
+        (6, 9, 6, 15),
+    }
+    assert {edit.new_text for edit in edits} == {'TRenamed'}
 
 
 def test_document_updates_reparse_only_the_changed_file(tmp_path) -> None:

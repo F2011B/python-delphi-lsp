@@ -243,3 +243,24 @@
   fingerprint. Symbol entries retain their card JSON size and conservative
   upper bound, allowing the lazy card sequence to calculate pagination
   without serializing the full result set and to chunk only accessed cards.
+- Batch 7 golden snapshot classification:
+  - F10 changes the project maintainability index from the saturated `0.0`
+    to the source-line-weighted `51.91223967859085`.
+  - F26 changes metrics unit paths from fixture-root absolute paths to stable
+    repository-relative paths.
+  - No symbols, references, parser problems, or implementation payloads
+    regress.
+
+### F4 — Include source-map plumbing
+
+- Added semantic regressions for declarations inside an include and after an
+  include, plus a rename regression that verifies both edits target the
+  original unit lines.
+- Preprocessed source maps now flow through direct parser semantics, workspace
+  semantics, project index results, and relation-graph semantics.
+  `SemanticBuilder` maps every node range back to the originating file and
+  line before constructing symbols or references.
+- Existing assertion updated:
+  `assert result is None` for include-bearing rename became exact assertions
+  for the two safe mapped edits. The temporary Batch 2 stop-gap is no longer
+  needed because ranges are now mapped instead of discarded.

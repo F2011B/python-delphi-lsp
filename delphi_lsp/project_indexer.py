@@ -9,7 +9,7 @@ from .consts import AttributeName, SyntaxNodeType
 from .nodes import SyntaxNode
 from .parser import DelphiParser
 from .parser_backend import ParserBackend, ParserMode, normalize_backend, normalize_mode
-from .preprocessor import IncludeLoader
+from .preprocessor import IncludeLoader, PreprocessedSource
 from .progress import ProgressCallback, ProgressEvent
 from .project_config import ProjectPathConfig
 from .source_reader import read_source_text
@@ -40,6 +40,7 @@ class UnitInfo:
     name: str
     path: str
     syntax_tree: Optional[SyntaxNode]
+    preprocessed: PreprocessedSource | None = None
     has_error: bool = False
     error_info: UnitErrorInfo = field(default_factory=UnitErrorInfo)
 
@@ -158,6 +159,7 @@ class ProjectIndexer:
                 return
 
         syntax_tree: Optional[SyntaxNode] = hook_tree
+        preprocessed: PreprocessedSource | None = None
         from_parser = False
         parser_error = UnitErrorInfo()
 
@@ -182,6 +184,7 @@ class ProjectIndexer:
                     source = self.source_transform(source)
                 result = parser.parse(source, str(file_path), build_semantic=False)
                 syntax_tree = result.root
+                preprocessed = result.preprocessed
                 from_parser = True
                 if result.problems:
                     first = result.problems[0]
@@ -230,6 +233,7 @@ class ProjectIndexer:
             name=actual_name,
             path=str(file_path),
             syntax_tree=syntax_tree,
+            preprocessed=preprocessed,
             has_error=bool(parser_error.error),
             error_info=parser_error,
         )

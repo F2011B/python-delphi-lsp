@@ -13,6 +13,7 @@ from .consts import AttributeName, SyntaxNodeType
 from .nodes import SyntaxNode
 from .parser import DelphiParser
 from .parser_backend import ParserMode
+from .preprocessor import PreprocessedSource
 from .project_config import workspace_include_loader
 from .project_indexer import ProjectIndexer, ProjectProblem
 from .semantic import (
@@ -383,11 +384,16 @@ class ProjectRelationIndex:
     def _ensure_deep_graph(self) -> None:
         if self._deep_graph_ready:
             return
-        roots, load_problems = _load_project_roots(self._workspace)
+        roots, preprocessed_sources, load_problems = _load_project_roots(
+            self._workspace
+        )
         self._roots = roots
         self._problems = list(load_problems)
         self._semantics = (
-            build_workspace_semantics_from_roots(roots)
+            build_workspace_semantics_from_roots(
+                roots,
+                preprocessed_sources=preprocessed_sources,
+            )
             if roots
             else None
         )
@@ -726,7 +732,11 @@ class ProjectRelationIndex:
 
 def _load_project_roots(
     workspace: AgentWorkspace,
-) -> tuple[dict[str, SyntaxNode], list[dict[str, object]]]:
+) -> tuple[
+    dict[str, SyntaxNode],
+    dict[str, PreprocessedSource],
+    list[dict[str, object]],
+]:
     active_project = workspace.active_project
     if active_project is None:
         raise AgentProtocolError("project_required", "Select a project before tracing relations.")
@@ -752,8 +762,13 @@ def _load_project_roots(
             for unit in result.parsed_units
             if unit.syntax_tree is not None
         }
+        preprocessed_sources = {
+            str(Path(unit.path).expanduser().resolve()): unit.preprocessed
+            for unit in result.parsed_units
+            if unit.syntax_tree is not None and unit.preprocessed is not None
+        }
         problems = [_project_problem_item(problem, workspace.root) for problem in result.problems]
-        return roots, problems
+        return roots, preprocessed_sources, problems
 
     parser = DelphiParser(
         include_paths=workspace.include_paths,
@@ -765,6 +780,7 @@ def _load_project_roots(
         mode=parser_mode,
     )
     roots: dict[str, SyntaxNode] = {}
+    preprocessed_sources: dict[str, PreprocessedSource] = {}
     problems: list[dict[str, object]] = []
     for unit in workspace.units:
         source_path = Path(unit.path)
@@ -779,6 +795,7 @@ def _load_project_roots(
                 build_semantic=False,
             )
             roots[str(source_path)] = parsed.root
+            preprocessed_sources[str(source_path)] = parsed.preprocessed
             if parsed.problems:
                 first = parsed.problems[0]
                 problems.append(
@@ -809,7 +826,7 @@ def _load_project_roots(
                     "path": _display_project_path(source_path, workspace.root),
                 }
             )
-    return roots, problems
+    return roots, preprocessed_sources, problems
 
 
 def _project_problem_item(problem: ProjectProblem, root: Path) -> dict[str, object]:

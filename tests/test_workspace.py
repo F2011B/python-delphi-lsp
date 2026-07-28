@@ -80,6 +80,39 @@ class WorkspaceTests(unittest.TestCase):
 
         self.assertCountEqual(calls, sources)
 
+    def test_include_source_map_restores_symbol_files_and_lines(self) -> None:
+        source = (
+            "unit IncludeMap;\n"
+            "interface\n"
+            "{$I Shared.inc}\n"
+            "type\n"
+            "  TLocal = Integer;\n"
+            "implementation\n"
+            "end.\n"
+        )
+
+        def include_loader(_current_file: str, name: str):
+            if name.casefold() == "shared.inc":
+                return ("const\n  Included = 1;\n  Other = 2;\n", "Shared.inc")
+            return None
+
+        result = build_workspace_semantics(
+            {"IncludeMap.pas": source},
+            include_loader=include_loader,
+        )
+
+        [local] = result.index.lookup("TLocal")
+        [included] = result.index.lookup("Included")
+        self.assertEqual(
+            (local.decl_range.file_name, local.decl_range.start_line),
+            ("IncludeMap.pas", 5),
+        )
+        self.assertEqual(
+            (included.decl_range.file_name, included.decl_range.start_line),
+            ("Shared.inc", 2),
+        )
+        self.assertIn("IncludeMap.pas", result.preprocessed)
+
 
 if __name__ == '__main__':
     unittest.main()

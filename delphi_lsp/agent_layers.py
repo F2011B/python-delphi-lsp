@@ -181,7 +181,7 @@ def _build_project_results(
             result = replace(
                 raw_result,
                 parsed_units=[
-                    replace(unit, syntax_tree=None)
+                    replace(unit, syntax_tree=None, preprocessed=None)
                     for unit in raw_result.parsed_units
                 ],
             )

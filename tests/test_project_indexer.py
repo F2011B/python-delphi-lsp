@@ -486,6 +486,15 @@ class ProjectIndexerTests(unittest.TestCase):
             self.assertTrue(result.include_files)
             include_names = {item.name for item in result.include_files}
             self.assertIn('extra.inc', include_names)
+            [unit] = result.parsed_units
+            self.assertIsNotNone(unit.preprocessed)
+            assert unit.preprocessed is not None
+            self.assertTrue(
+                any(
+                    Path(entry.file_name).name == 'extra.inc'
+                    for entry in unit.preprocessed.source_map
+                )
+            )
 
     def test_indexes_utf16_encoded_unit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

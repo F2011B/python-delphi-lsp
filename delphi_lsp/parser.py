@@ -111,7 +111,14 @@ class DelphiParser:
                 if name:
                     root.set_attribute(AttributeName.anName, effective_string_hook(name))
         comments = build_comment_nodes(preprocessed.comments)
-        semantic = SemanticBuilder().build(root, index=index) if build_semantic else None
+        semantic = (
+            SemanticBuilder(source_maps={file_name: preprocessed}).build(
+                root,
+                index=index,
+            )
+            if build_semantic
+            else None
+        )
         return ParseResult(
             root=root,
             comments=comments,

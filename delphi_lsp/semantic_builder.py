@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from collections.abc import Mapping
 from typing import Iterable, Optional
 
 from .consts import ATTRIBUTE_NAME_STRINGS, AttributeName, SyntaxNodeType
 from .nodes import CompoundSyntaxNode, SyntaxNode, ValuedSyntaxNode
+from .preprocessor import PreprocessedSource
 from .semantic import (
     ArrayTypeRef,
     ClassOfTypeRef,
@@ -51,8 +53,14 @@ class SemanticModel:
 
 
 class SemanticBuilder:
-    def __init__(self, *, collect_references: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        collect_references: bool = True,
+        source_maps: Mapping[str, PreprocessedSource] | None = None,
+    ) -> None:
         self._collect_references_enabled = collect_references
+        self._source_maps = source_maps or {}
         self._problems: list[SemanticProblem] = []
         self._references: list[SymbolReference] = []
         self._index: SymbolIndex = SymbolIndex()
@@ -1344,26 +1352,55 @@ class SemanticBuilder:
 
     def _node_range(self, node: SyntaxNode) -> SourceRange:
         if isinstance(node, CompoundSyntaxNode):
-            return SourceRange(
-                file_name=node.file_name,
-                start_line=node.line,
-                start_col=node.col,
-                end_line=node.end_line,
-                end_col=node.end_col,
-            )
-        return SourceRange(
-            file_name=node.file_name,
-            start_line=node.line,
-            start_col=node.col,
-            end_line=node.line,
-            end_col=node.col,
+            end_line, end_col = node.end_line, node.end_col
+        else:
+            end_line, end_col = node.line, node.col
+        start_file, start_line, start_col = self._map_position(
+            node.file_name,
+            node.line,
+            node.col,
         )
+        end_file, mapped_end_line, mapped_end_col = self._map_position(
+            node.file_name,
+            end_line,
+            end_col,
+        )
+        if end_file != start_file or (
+            mapped_end_line,
+            mapped_end_col,
+        ) < (start_line, start_col):
+            mapped_end_line, mapped_end_col = start_line, start_col
+        return SourceRange(
+            file_name=start_file,
+            start_line=start_line,
+            start_col=start_col,
+            end_line=mapped_end_line,
+            end_col=mapped_end_col,
+        )
+
+    def _map_position(
+        self,
+        file_name: str,
+        line: int,
+        col: int,
+    ) -> tuple[str, int, int]:
+        preprocessed = self._source_maps.get(file_name)
+        if preprocessed is None:
+            return file_name, line, col
+        mapped_file, mapped_line, mapped_col = preprocessed.map_position(line, col)
+        if not mapped_file or mapped_line < 1 or mapped_col < 1:
+            return file_name, line, col
+        return mapped_file, mapped_line, mapped_col
 
     def _node_tree_range(self, node: SyntaxNode) -> SourceRange:
         result = self._node_range(node)
         for child in node.child_nodes:
             child_range = self._node_tree_range(child)
-            if (child_range.end_line, child_range.end_col) > (result.end_line, result.end_col):
+            if (
+                child_range.file_name == result.file_name
+                and (child_range.end_line, child_range.end_col)
+                > (result.end_line, result.end_col)
+            ):
                 result = SourceRange(
                     file_name=result.file_name,
                     start_line=result.start_line,
