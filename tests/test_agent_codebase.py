@@ -10,7 +10,9 @@ from pathlib import Path
 
 import pytest
 
+import delphi_lsp.agent_layers as agent_layers_module
 from delphi_lsp.agent_layers import build_codebase_index, layer_payload, render_layer
+from delphi_lsp.metrics import analyze_project
 from delphi_lsp.project_indexer import ProjectIndexer
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -414,6 +416,45 @@ def test_agent_cli_outputs_project_and_unit_metrics_as_json(tmp_path: Path) -> N
     assert payload["project"]["total_loc"] == 25
     assert [item["name"] for item in payload["items"]] == ["Worker"]
     assert payload["items"][0]["cyclomatic"]["routine_count"] == 1
+
+
+def test_metrics_layer_delegates_to_streaming_path_metrics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    make_project(tmp_path)
+    index = build_codebase_index(tmp_path)
+    expected = analyze_project(
+        {"Only.pas": "unit Only; interface implementation end.\n"}
+    )
+    captured: dict[str, object] = {}
+
+    def fake_build_path_metrics(
+        root: str | Path,
+        source_files: object,
+        **kwargs: object,
+    ) -> object:
+        captured["root"] = root
+        captured["source_files"] = tuple(source_files)  # type: ignore[arg-type]
+        captured.update(kwargs)
+        return expected
+
+    monkeypatch.setattr(
+        agent_layers_module, "build_path_metrics", fake_build_path_metrics
+    )
+    monkeypatch.setattr(
+        agent_layers_module,
+        "read_source_text",
+        lambda _path: pytest.fail("metrics layer must not read sources directly"),
+    )
+
+    payload = layer_payload(index, "metrics")
+
+    assert captured["root"] == index.root
+    assert captured["source_files"] == tuple(index.discovery.source_files)
+    assert captured["defines"] == index.discovery.defines
+    assert captured["include_paths"] == index.discovery.include_paths
+    assert captured["project_config"] is index.discovery.project_config
+    assert payload["project"]["unit_count"] == 1
 
 
 def test_opencode_install_writes_protocol_v2_skill_plugin_and_agent(tmp_path: Path) -> None:

@@ -215,3 +215,11 @@
 - Project maintainability is now the source-line-weighted mean of the unit
   indices, with the existing full-maintainability value of `100.0` retained
   when a project has no source lines.
+
+### F26 — Streaming layer metrics
+
+- Added a delegation regression that fails if the metrics layer reads source
+  files itself.
+- The layer now passes the discovered file inventory and active project
+  filters to `build_path_metrics`, avoiding a complete in-memory source map
+  before analysis.

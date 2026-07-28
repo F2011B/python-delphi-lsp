@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Iterable
 import json
 
-from .metrics import analyze_project
+from .agent_metrics import build_path_metrics
 from .parallel_outline import OutlineResult, OutlineTask, ParallelBuildStats, run_outline_tasks
 from .project_discovery import (
     DelphiProjectDiscovery,
@@ -581,27 +581,15 @@ def _problems_payload(index: CodebaseIndex) -> dict[str, Any]:
 
 
 def _metrics_payload(index: CodebaseIndex, *, query: str) -> dict[str, Any]:
-    sources: dict[str, str] = {}
-    include_sources: dict[str, str] = {}
-    for value in index.discovery.source_files:
-        path = Path(value)
-        try:
-            text = read_source_text(path)
-        except (OSError, UnicodeError):
-            continue
-        if path.suffix.casefold() == ".inc":
-            include_sources[str(path)] = text
-        elif path.suffix.casefold() in {".pas", ".dpr", ".dpk"}:
-            sources[str(path)] = text
-
     project_name = "Workspace"
     if len(index.discovery.project_files) == 1:
         project_name = Path(index.discovery.project_files[0]).stem
-    metrics = analyze_project(
-        sources,
-        include_sources=include_sources,
+    metrics = build_path_metrics(
+        index.root,
+        index.discovery.source_files,
         defines=index.discovery.defines,
         include_paths=index.discovery.include_paths,
+        project_config=index.discovery.project_config,
         project_name=project_name,
     )
     needle = query.casefold().strip()
