@@ -272,3 +272,15 @@
 - URI-derived paths, workspace scan results, cache keys, source aggregation,
   model lookup, and open-document URI lookup now share native `Path`
   spelling. File URI hosts are retained as UNC paths.
+
+### F19 — Persistent navigation-cache bounds
+
+- Added shard-store regressions for stale-key pruning and oldest-first byte
+  budget eviction, plus an integration assertion that a changed unit leaves
+  only its current content-addressed shard.
+- Completed navigation builds prune against the live content hashes and a
+  configurable 512 MiB default disk budget. `cache start
+  --max-disk-cache SIZE` propagates that budget to the daemon and status.
+- Added `cache clear --root PATH`, which stops the daemon before safely
+  removing the validated navigation-cache directory, and documented both CLI
+  controls.

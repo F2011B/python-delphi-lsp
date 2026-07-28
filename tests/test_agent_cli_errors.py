@@ -122,6 +122,28 @@ def test_cache_start_help_documents_optional_dproj(
     assert ".dproj" in capsys.readouterr().out
 
 
+def test_cache_cli_exposes_disk_budget_and_clear(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    parser = agent_cli.build_parser()
+    start = parser.parse_args(
+        ["cache", "start", "--max-disk-cache", "64M"]
+    )
+    assert start.max_disk_cache == 64 * 1024**2
+
+    navigation = (
+        tmp_path / ".delphi-lsp" / "agent-cache" / "navigation-v1" / "aa"
+    )
+    navigation.mkdir(parents=True)
+    (navigation / "stale.json").write_text("{}", encoding="utf-8")
+    clear = parser.parse_args(["cache", "clear", "--root", str(tmp_path)])
+
+    assert clear.func(clear) == 0
+    assert not navigation.parent.exists()
+    assert json.loads(capsys.readouterr().out) == {"cleared": True}
+
+
 @pytest.mark.parametrize("value", [0, -1, True])
 def test_start_cache_rejects_non_positive_idle_timeout(
     tmp_path: Path,

@@ -150,10 +150,12 @@ not guessed.
 
 ```text
 delphi-lsp-agent cache start --root PATH [--project-file FILE] [--max-memory 512M]
+                                  [--max-disk-cache 512M]
                                   [--workers auto|N] [--startup-timeout 120]
                                   [--idle-timeout 1800]
 delphi-lsp-agent cache status --root PATH [--format text|json]
 delphi-lsp-agent cache stop --root PATH
+delphi-lsp-agent cache clear --root PATH
 delphi-lsp-agent view --root PATH [--project-file FILE] --layer LAYER
                       [--query TEXT] [--format markdown|json] [--deep-projects]
                       [--workers auto|N]
@@ -179,11 +181,13 @@ The `cache` commands manage one daemon per canonical root. Use these:
 delphi-lsp-agent cache start --root PATH
 delphi-lsp-agent cache status --root PATH
 delphi-lsp-agent cache stop --root PATH
+delphi-lsp-agent cache clear --root PATH
 ```
 
 `cache start` outputs cache lifecycle JSON; runtime warnings are still on stderr.
 `cache status --format json` outputs status JSON to stdout and the same warning stream on stderr.
 `cache stop` outputs stop status JSON and may include warnings on stderr.
+`cache clear` stops the daemon and removes persistent navigation shards.
 `query` outputs Protocol v3 JSON responses and writes warnings to stderr.
 
 ### Open Knowledge Format wiki export
@@ -364,7 +368,9 @@ under `.delphi-lsp/agent-cache/navigation-v1`. A restarted CLI or OpenCode cache
 daemon reuses unchanged units without parsing them again. Source content,
 conditional defines, or a shard-schema change produces a cache miss; malformed
 or incompatible JSON is ignored and rebuilt. The disk cache contains no pickle
-payloads and does not count against the retained-RAM budget.
+payloads and does not count against the retained-RAM budget. Each completed
+navigation build removes superseded shards and enforces the
+`--max-disk-cache` byte budget, which defaults to 512 MiB.
 
 Cache prewarming builds the navigation registry directly without constructing
 an empty-query result, symbol cards, pagination, or JSON payloads. Up to sixteen

@@ -112,6 +112,7 @@ _SOURCE_CHUNK_CHARS = 6000
 _RANKED_QUERY_CACHE_SIZE = 16
 _RANKED_QUERY_CACHE_MAX_ENTRIES = 50_000
 _PREPARED_RESPONSE_CACHE_SIZE = 8
+_DEFAULT_NAVIGATION_CACHE_MAX_BYTES = 512 * 1024**2
 
 
 @dataclass(frozen=True, slots=True)
@@ -703,6 +704,7 @@ class AgentContext:
         worker_memory_budget_bytes: int | None = None,
         revision_check_interval_seconds: float = 0.0,
         navigation_cache_dir: str | Path | None = None,
+        navigation_cache_max_bytes: int = _DEFAULT_NAVIGATION_CACHE_MAX_BYTES,
     ) -> None:
         self._workspace = workspace
         self._workers = workers
@@ -721,6 +723,7 @@ class AgentContext:
             if navigation_cache_dir is not None
             else None
         )
+        self._navigation_cache_max_bytes = max(0, navigation_cache_max_bytes)
         self._navigation_disk_hits = 0
         self._navigation_disk_misses = 0
         project_id = workspace.active_project_id
@@ -760,6 +763,7 @@ class AgentContext:
         worker_memory_budget_bytes: int | None = None,
         revision_check_interval_seconds: float = 0.0,
         navigation_cache_dir: str | Path | None = None,
+        navigation_cache_max_bytes: int = _DEFAULT_NAVIGATION_CACHE_MAX_BYTES,
     ) -> AgentContext:
         return cls(
             AgentWorkspace.open(root, project_file=project_file),
@@ -767,6 +771,7 @@ class AgentContext:
             worker_memory_budget_bytes=worker_memory_budget_bytes,
             revision_check_interval_seconds=revision_check_interval_seconds,
             navigation_cache_dir=navigation_cache_dir,
+            navigation_cache_max_bytes=navigation_cache_max_bytes,
         )
 
     @property
@@ -1220,6 +1225,7 @@ class AgentContext:
             workers=self._workers,
             worker_memory_budget_bytes=self._worker_memory_budget_bytes,
             navigation_store=self._navigation_store,
+            navigation_cache_max_bytes=self._navigation_cache_max_bytes,
         )
         if self._focus.target_id:
             focused_entry = self._registry.by_target.get(self._focus.target_id)
@@ -1443,6 +1449,7 @@ def _build_registry(
     workers: int = 0,
     worker_memory_budget_bytes: int | None = None,
     navigation_store: NavigationShardStore | None = None,
+    navigation_cache_max_bytes: int = _DEFAULT_NAVIGATION_CACHE_MAX_BYTES,
 ) -> tuple[_Registry, ParallelBuildStats, int, int]:
     build_started = time.perf_counter()
     raw_symbols: list[_RawSymbol] = []
@@ -1492,6 +1499,7 @@ def _build_registry(
 
     disk_hits = 0
     disk_misses = 0
+    live_navigation_keys: set[str] = set()
     pending_tasks: list[_NavigationTask] = []
     if navigation_store is None:
         pending_tasks.extend(tasks)
@@ -1500,6 +1508,7 @@ def _build_registry(
             try:
                 text = read_source_text(Path(task.source_path))
                 cache_key = navigation_cache_key(text, task.defines)
+                live_navigation_keys.add(cache_key)
                 payload = navigation_store.load(cache_key)
             except (OSError, UnicodeError, ValueError):
                 cache_key = ""
@@ -1524,6 +1533,14 @@ def _build_registry(
         retain_results=False,
         task_runner=_parse_navigation_task,
     )
+    if navigation_store is not None:
+        try:
+            navigation_store.prune(
+                live_navigation_keys,
+                navigation_cache_max_bytes,
+            )
+        except (OSError, ValueError):
+            pass
     parallel_stats = replace(
         outline_batch.stats,
         files_completed=len(tasks),

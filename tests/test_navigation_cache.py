@@ -41,3 +41,35 @@ def test_navigation_cache_rejects_non_digest_keys(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="malformed"):
         store.load("../outside")
+
+
+def test_navigation_cache_prunes_stale_and_over_budget_shards(
+    tmp_path: Path,
+) -> None:
+    store = NavigationShardStore(tmp_path / "cache")
+    keys = [
+        navigation_cache_key(f"unit Unit{index}; end.", ())
+        for index in range(3)
+    ]
+    for index, cache_key in enumerate(keys):
+        store.store(
+            cache_key,
+            {
+                "symbols": [],
+                "lines_processed": index + 1,
+                "unit_name": f"Unit{index}",
+            },
+        )
+        os.utime(store._path(cache_key), (index + 1, index + 1))
+
+    store.prune({keys[1], keys[2]}, max_bytes=10**6)
+
+    assert not store._path(keys[0]).exists()
+    assert store._path(keys[1]).exists()
+    assert store._path(keys[2]).exists()
+
+    newest_size = store._path(keys[2]).stat().st_size
+    store.prune({keys[1], keys[2]}, max_bytes=newest_size)
+
+    assert not store._path(keys[1]).exists()
+    assert store._path(keys[2]).exists()

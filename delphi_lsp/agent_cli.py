@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import os
+import shutil
 import sys
 import threading
 from pathlib import Path
@@ -13,6 +14,7 @@ from .agent_context import AgentContext
 from .agent_cache import (
     CacheClientError,
     DEFAULT_IDLE_TIMEOUT,
+    DEFAULT_MAX_DISK_CACHE_BYTES,
     DEFAULT_MAX_MEMORY_BYTES,
     DEFAULT_STARTUP_TIMEOUT,
     parse_memory_size,
@@ -154,12 +156,23 @@ def build_parser() -> argparse.ArgumentParser:
     cache_stop = cache_commands.add_parser("stop", help="Stop the cache daemon if it is running.")
     cache_stop.add_argument("--root", type=Path, default=Path("."))
     cache_stop.set_defaults(func=_cache_stop)
+    cache_clear = cache_commands.add_parser(
+        "clear",
+        help="Stop the daemon and remove persistent navigation shards.",
+    )
+    cache_clear.add_argument("--root", type=Path, default=Path("."))
+    cache_clear.set_defaults(func=_cache_clear)
     cache_serve = cache_commands.add_parser("serve", help=argparse.SUPPRESS)
     cache_serve.add_argument("--root", type=Path, required=True)
     cache_serve.add_argument("--project-file", type=Path)
     cache_serve.add_argument("--max-memory", type=parse_memory_size, required=True)
     cache_serve.add_argument("--workers", type=parse_worker_setting, required=True)
     cache_serve.add_argument("--idle-timeout", type=_positive_integer, required=True)
+    cache_serve.add_argument(
+        "--max-disk-cache",
+        type=parse_memory_size,
+        default=DEFAULT_MAX_DISK_CACHE_BYTES,
+    )
     cache_serve.set_defaults(func=_cache_serve)
 
     query = subcommands.add_parser("query", help="Send an ergonomic request to a running cache daemon.")
@@ -191,6 +204,11 @@ def _add_cache_start_arguments(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument("--max-memory", type=parse_memory_size, default=DEFAULT_MAX_MEMORY_BYTES)
+    parser.add_argument(
+        "--max-disk-cache",
+        type=parse_memory_size,
+        default=DEFAULT_MAX_DISK_CACHE_BYTES,
+    )
     parser.add_argument("--workers", type=parse_worker_setting, default=0)
     parser.add_argument("--idle-timeout", type=_positive_integer, default=DEFAULT_IDLE_TIMEOUT)
     parser.add_argument("--startup-timeout", type=_positive_float, default=DEFAULT_STARTUP_TIMEOUT)
@@ -499,6 +517,7 @@ def _cache_start(args: argparse.Namespace) -> int:
             workers=args.workers,
             idle_timeout=args.idle_timeout,
             startup_timeout=args.startup_timeout,
+            max_disk_cache_bytes=args.max_disk_cache,
         )
         response = query_cache(args.root, {"action": "status"})
     except CacheClientError as error:
@@ -548,6 +567,20 @@ def _cache_stop(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cache_clear(args: argparse.Namespace) -> int:
+    args.root = _workspace_root(args.root)
+    try:
+        stop_cache(args.root)
+        cache_dir = navigation_cache_path(args.root)
+        existed = cache_dir.exists()
+        if existed:
+            shutil.rmtree(cache_dir)
+    except CacheClientError as error:
+        return _cache_error(error)
+    _write_json({"cleared": existed})
+    return 0
+
+
 def _cache_serve(args: argparse.Namespace) -> int:
     args.root = _workspace_root(args.root)
     run_cache_daemon(
@@ -556,6 +589,7 @@ def _cache_serve(args: argparse.Namespace) -> int:
         max_memory_bytes=args.max_memory,
         workers=args.workers,
         idle_timeout=args.idle_timeout,
+        max_disk_cache_bytes=args.max_disk_cache,
     )
     return 0
 

@@ -30,6 +30,7 @@ from .project_discovery import SKIP_DIRS
 
 
 DEFAULT_MAX_MEMORY_BYTES = 512 * 1024**2
+DEFAULT_MAX_DISK_CACHE_BYTES = 512 * 1024**2
 WARNING_THRESHOLD_PERCENT = 80
 DAEMON_SCHEMA = 2
 DEFAULT_IDLE_TIMEOUT = 1800
@@ -334,6 +335,7 @@ class CacheMetadata:
     workers: int
     idle_timeout: int
     started_at: float
+    max_disk_cache_bytes: int = DEFAULT_MAX_DISK_CACHE_BYTES
 
 
 @dataclass(frozen=True)
@@ -432,8 +434,14 @@ def _read_metadata_record(root: str | Path) -> object | None:
 def _read_metadata(root: str | Path) -> CacheMetadata | None:
     raw = _read_metadata_record(root)
     required = {field.name for field in fields(CacheMetadata)}
-    if not isinstance(raw, dict) or set(raw) != required:
+    legacy_required = required - {"max_disk_cache_bytes"}
+    if not isinstance(raw, dict) or frozenset(raw) not in {
+        frozenset(required),
+        frozenset(legacy_required),
+    }:
         return None
+    if "max_disk_cache_bytes" not in raw:
+        raw = {**raw, "max_disk_cache_bytes": DEFAULT_MAX_DISK_CACHE_BYTES}
     values = tuple(
         raw[name]
         for name in (
@@ -448,6 +456,7 @@ def _read_metadata(root: str | Path) -> CacheMetadata | None:
             "workers",
             "idle_timeout",
             "started_at",
+            "max_disk_cache_bytes",
         )
     )
     if (type(values[0]) is not int or values[0] != DAEMON_SCHEMA or not isinstance(values[1], str)
@@ -455,7 +464,8 @@ def _read_metadata(root: str | Path) -> CacheMetadata | None:
             or not isinstance(values[4], str) or len(values[4]) < 32 or not isinstance(values[5], str)
             or not isinstance(values[6], str) or type(values[7]) is not int or values[7] <= 0
             or type(values[8]) is not int or not 0 <= values[8] <= 32
-            or type(values[9]) is not int or values[9] <= 0 or type(values[10]) not in (int, float)):
+            or type(values[9]) is not int or values[9] <= 0 or type(values[10]) not in (int, float)
+            or type(values[11]) is not int or values[11] < 0):
         return None
     canonical = str(Path(root).resolve())
     if values[1] != canonical:
@@ -730,6 +740,7 @@ class _CacheService:
                     self.metadata.root,
                     create=True,
                 ),
+                navigation_cache_max_bytes=self.metadata.max_disk_cache_bytes,
             )
             self._context = context
             self.last_revision = context.workspace.workspace_revision
@@ -884,6 +895,7 @@ class _CacheService:
             "parallel_fallbacks": self.stats.parallel_fallbacks,
             "navigation_disk_hits": context.navigation_disk_hits if context else 0,
             "navigation_disk_misses": context.navigation_disk_misses if context else 0,
+            "max_disk_cache_bytes": self.metadata.max_disk_cache_bytes,
             "cpg_cache_entries": context.cpg_cache_entries if context else 0,
             "cpg_cache_bytes": context.cpg_cache_bytes if context else 0,
             "idle_timeout": self.metadata.idle_timeout, "idle_remaining": max(0.0, self.metadata.idle_timeout - idle),
@@ -1000,6 +1012,7 @@ def run_cache_daemon(
     max_memory_bytes: int = DEFAULT_MAX_MEMORY_BYTES,
     workers: int = 0,
     idle_timeout: int = DEFAULT_IDLE_TIMEOUT,
+    max_disk_cache_bytes: int = DEFAULT_MAX_DISK_CACHE_BYTES,
 ) -> None:
     canonical = str(Path(root).resolve())
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1019,6 +1032,7 @@ def run_cache_daemon(
         workers,
         idle_timeout,
         time.time(),
+        max_disk_cache_bytes,
     )
     watcher: threading.Thread | None = None
     try:
@@ -1060,6 +1074,7 @@ def _start_cache_unlocked(
     workers: int = 0,
     idle_timeout: int = DEFAULT_IDLE_TIMEOUT,
     startup_timeout: float = DEFAULT_STARTUP_TIMEOUT,
+    max_disk_cache_bytes: int = DEFAULT_MAX_DISK_CACHE_BYTES,
 ) -> CacheMetadata:
     canonical = str(Path(root).resolve())
     project = str((Path(canonical) / project_file).resolve()) if project_file and not Path(project_file).is_absolute() else (str(Path(project_file).resolve()) if project_file else "")
@@ -1069,11 +1084,18 @@ def _start_cache_unlocked(
             _client_exchange(existing, {"action": "status", "_startup_probe": True})
         except CacheClientError as error:
             raise CacheClientError("unavailable", "Live cache daemon is unavailable.") from error
-        if (existing.project_file, existing.max_memory_bytes, existing.workers, existing.idle_timeout) != (
+        if (
+            existing.project_file,
+            existing.max_memory_bytes,
+            existing.workers,
+            existing.idle_timeout,
+            existing.max_disk_cache_bytes,
+        ) != (
             project,
             max_memory_bytes,
             workers,
             idle_timeout,
+            max_disk_cache_bytes,
         ):
             raise CacheClientError("configuration_conflict", "A live cache daemon has conflicting configuration.")
         return existing
@@ -1094,6 +1116,8 @@ def _start_cache_unlocked(
         str(workers),
         "--idle-timeout",
         str(idle_timeout),
+        "--max-disk-cache",
+        str(max_disk_cache_bytes),
     ]
     if project:
         command.extend(("--project-file", project))
@@ -1169,6 +1193,7 @@ def start_cache(
     workers: int = 0,
     idle_timeout: int = DEFAULT_IDLE_TIMEOUT,
     startup_timeout: float = DEFAULT_STARTUP_TIMEOUT,
+    max_disk_cache_bytes: int = DEFAULT_MAX_DISK_CACHE_BYTES,
 ) -> CacheMetadata:
     if type(workers) is not int or not 0 <= workers <= 32:
         raise ValueError("workers must be auto or an integer from 1 through 32.")
@@ -1176,6 +1201,12 @@ def start_cache(
         raise ValueError("idle_timeout must be greater than zero.")
     if not math.isfinite(startup_timeout) or startup_timeout <= 0:
         raise ValueError("startup_timeout must be greater than zero.")
+    if (
+        isinstance(max_disk_cache_bytes, bool)
+        or not isinstance(max_disk_cache_bytes, int)
+        or max_disk_cache_bytes < 0
+    ):
+        raise ValueError("max_disk_cache_bytes must be non-negative.")
     load_project_path_config(root)
     with _process_start_lock(root):
         with _start_lock(root, startup_timeout):
@@ -1186,6 +1217,7 @@ def start_cache(
                 workers=workers,
                 idle_timeout=idle_timeout,
                 startup_timeout=startup_timeout,
+                max_disk_cache_bytes=max_disk_cache_bytes,
             )
 
 
@@ -1246,6 +1278,11 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument("--max-memory", type=int, default=DEFAULT_MAX_MEMORY_BYTES)
     serve.add_argument("--workers", type=int, default=0)
     serve.add_argument("--idle-timeout", type=_positive_integer, default=DEFAULT_IDLE_TIMEOUT)
+    serve.add_argument(
+        "--max-disk-cache",
+        type=int,
+        default=DEFAULT_MAX_DISK_CACHE_BYTES,
+    )
     args = parser.parse_args(argv)
     if args.command == "serve":
         run_cache_daemon(
@@ -1254,6 +1291,7 @@ def main(argv: list[str] | None = None) -> int:
             max_memory_bytes=args.max_memory,
             workers=args.workers,
             idle_timeout=args.idle_timeout,
+            max_disk_cache_bytes=args.max_disk_cache,
         )
     return 0
 

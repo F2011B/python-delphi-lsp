@@ -677,6 +677,7 @@ def test_navigation_shards_miss_after_source_changes_or_corruption(
     assert changed.navigation_disk_hits == 0
     assert changed.navigation_disk_misses == 1
     assert calls == 1
+    assert len(list(cache_dir.rglob("*.json"))) == 1
 
     shard = max(cache_dir.rglob("*.json"), key=lambda path: path.stat().st_mtime_ns)
     shard.write_text("{broken", encoding="utf-8")

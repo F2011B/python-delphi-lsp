@@ -110,6 +110,62 @@ class NavigationShardStore:
             except FileNotFoundError:
                 pass
 
+    def prune(self, live_keys: set[str], max_bytes: int) -> None:
+        if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes < 0:
+            raise ValueError("navigation cache byte budget must be non-negative")
+        if not self.root.exists() or self.root.is_symlink():
+            return
+        retained: list[tuple[int, str, Path, int]] = []
+        bucket_paths: list[Path] = []
+        try:
+            buckets = tuple(self.root.iterdir())
+        except OSError:
+            return
+        for bucket in buckets:
+            if bucket.is_symlink() or not bucket.is_dir():
+                continue
+            bucket_paths.append(bucket)
+            try:
+                shards = tuple(bucket.iterdir())
+            except OSError:
+                continue
+            for shard in shards:
+                if (
+                    shard.is_symlink()
+                    or not shard.is_file()
+                    or shard.suffix != ".json"
+                ):
+                    continue
+                cache_key = shard.stem
+                try:
+                    info = shard.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if cache_key not in live_keys:
+                    try:
+                        shard.unlink()
+                    except OSError:
+                        pass
+                    continue
+                retained.append(
+                    (info.st_mtime_ns, str(shard), shard, info.st_size)
+                )
+
+        retained_bytes = sum(item[3] for item in retained)
+        for _mtime, _name, shard, size in sorted(retained):
+            if retained_bytes <= max_bytes:
+                break
+            try:
+                shard.unlink()
+            except OSError:
+                continue
+            retained_bytes -= size
+        for bucket in bucket_paths:
+            try:
+                bucket.rmdir()
+            except OSError:
+                pass
+
     def _path(self, cache_key: str) -> Path:
         if (
             len(cache_key) != 64
