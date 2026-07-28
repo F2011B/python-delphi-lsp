@@ -235,6 +235,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        for stream in (sys.stdout, sys.stderr):
+            reconfigure = getattr(stream, "reconfigure", None)
+            if reconfigure is not None:
+                reconfigure(encoding="utf-8")
         result = args.func(args)
         if not getattr(sys.stdout, "closed", False):
             sys.stdout.flush()
@@ -255,6 +259,10 @@ def main(argv: list[str] | None = None) -> int:
     except BrokenPipeError:
         _discard_broken_stdout()
         os._exit(1)
+    except UnicodeEncodeError as error:
+        sys.stderr.write(f"cli_error:encoding_error: {error}\n")
+        sys.stderr.flush()
+        return 1
     except OSError as error:
         sys.stderr.write(f"cli_error:io_error: {error}\n")
         sys.stderr.flush()

@@ -1,15 +1,26 @@
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
 from delphi_lsp import agent_cli
 from delphi_lsp.agent_cache import start_cache
 from delphi_lsp.parallel_outline import ParallelOutlineError
+
+
+class _ReconfigurableBuffer(io.StringIO):
+    def __init__(self) -> None:
+        super().__init__()
+        self.encoding_requests: list[str] = []
+
+    def reconfigure(self, *, encoding: str) -> None:
+        self.encoding_requests.append(encoding)
 
 
 def _run_cli(*arguments: str) -> subprocess.CompletedProcess[str]:
@@ -19,6 +30,41 @@ def _run_cli(*arguments: str) -> subprocess.CompletedProcess[str]:
         text=True,
         check=False,
     )
+
+
+def test_cli_reconfigures_text_streams_to_utf8(monkeypatch) -> None:
+    stdout = _ReconfigurableBuffer()
+    stderr = _ReconfigurableBuffer()
+    parser = SimpleNamespace(
+        parse_args=lambda _argv: SimpleNamespace(func=lambda _args: 0),
+    )
+    monkeypatch.setattr(agent_cli, "build_parser", lambda: parser)
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(sys, "stderr", stderr)
+
+    result = agent_cli.main([])
+
+    assert result == 0
+    assert stdout.encoding_requests == ["utf-8"]
+    assert stderr.encoding_requests == ["utf-8"]
+
+
+def test_cli_reports_unavoidable_encoding_errors(monkeypatch) -> None:
+    def fail(_args) -> None:
+        raise UnicodeEncodeError("ascii", "é", 0, 1, "not encodable")
+
+    stderr = io.StringIO()
+    parser = SimpleNamespace(
+        parse_args=lambda _argv: SimpleNamespace(func=fail),
+    )
+    monkeypatch.setattr(agent_cli, "build_parser", lambda: parser)
+    monkeypatch.setattr(sys, "stdout", io.StringIO())
+    monkeypatch.setattr(sys, "stderr", stderr)
+
+    result = agent_cli.main([])
+
+    assert result == 1
+    assert stderr.getvalue().startswith("cli_error:encoding_error: ")
 
 
 @pytest.mark.parametrize("value", ["0", "-1"])

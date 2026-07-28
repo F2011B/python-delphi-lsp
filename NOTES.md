@@ -143,3 +143,11 @@
 - Added an indexer regression using a UTF-8 BOM followed by invalid UTF-8.
 - `_read_file` now routes `UnicodeError` through the existing per-file
   `CANT_OPEN_FILE` problem path instead of aborting the entire index.
+
+### F17 — UTF-8 CLI streams
+
+- Added regressions for stream reconfiguration and the structured fallback
+  when an encoding error is still unavoidable.
+- CLI stdout and stderr are reconfigured to UTF-8 when the stream supports
+  it. Remaining `UnicodeEncodeError` failures now return
+  `cli_error:encoding_error` instead of a traceback.
