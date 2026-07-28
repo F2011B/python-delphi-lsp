@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from lsprotocol.types import (
+    INITIALIZE,
     TEXT_DOCUMENT_DID_CHANGE,
     TEXT_DOCUMENT_DID_CLOSE,
     TEXT_DOCUMENT_DID_OPEN,
@@ -246,3 +247,37 @@ def test_lsp_workspace_scan_prunes_shared_skip_directories(tmp_path) -> None:
     files = state._scan_workspace_files()
 
     assert files == [str(source_path)]
+
+
+def test_invalid_project_config_degrades_to_warning(tmp_path) -> None:
+    (tmp_path / '.delphi-lsp.toml').write_text(
+        '[projects]\nincludes = ["*.dpr"]\n',
+        encoding='utf-8',
+    )
+    state = LspWorkspaceState()
+
+    state.configure(WorkspaceConfig(roots=[str(tmp_path)]))
+
+    assert state.config.roots == [str(tmp_path)]
+    assert state.project_configs == ()
+    assert len(state.config_warnings) == 1
+
+
+def test_initialize_surfaces_project_config_warning(tmp_path) -> None:
+    (tmp_path / '.delphi-lsp.toml').write_text(
+        '[projects]\nincludes = ["*.dpr"]\n',
+        encoding='utf-8',
+    )
+    server = create_server()
+    handler = server.lsp.fm.features[INITIALIZE]
+    params = SimpleNamespace(
+        workspace_folders=None,
+        root_uri=tmp_path.as_uri(),
+        initialization_options={},
+    )
+
+    with mock.patch.object(server, 'show_message') as show_message:
+        handler(params)
+
+    assert show_message.call_count == 1
+    assert 'Unsupported key' in show_message.call_args.args[0]

@@ -27,6 +27,7 @@ from .source_reader import read_source_text
 from .workspace import WorkspaceSemanticResult, build_workspace_semantics
 from .project_discovery import SKIP_DIRS, discover_delphi_project
 from .project_config import (
+    ProjectConfigError,
     ProjectPathConfig,
     load_project_path_config,
     workspace_include_loader,
@@ -77,6 +78,7 @@ class LspWorkspaceState:
     )
     workspace_files: set[str] = field(default_factory=set)
     file_cache: dict[str, FileSnapshot] = field(default_factory=dict)
+    config_warnings: list[str] = field(default_factory=list)
     project_configs: tuple[ProjectPathConfig, ...] = field(
         default_factory=tuple,
         init=False,
@@ -84,12 +86,21 @@ class LspWorkspaceState:
     )
 
     def configure(self, config: WorkspaceConfig) -> None:
-        self.project_configs = tuple(
-            loaded
-            for root in config.roots
-            if (loaded := load_project_path_config(root)) is not None
-        )
-        self.config = self._with_discovered_config(config)
+        self.config_warnings = []
+        try:
+            project_configs = tuple(
+                loaded
+                for root in config.roots
+                if (loaded := load_project_path_config(root)) is not None
+            )
+            self.project_configs = project_configs
+            configured = self._with_discovered_config(config)
+        except ProjectConfigError as error:
+            project_configs = ()
+            configured = config
+            self.config_warnings.append(str(error))
+        self.project_configs = project_configs
+        self.config = configured
         self.workspace_files = set()
         self.file_cache = {}
         self.workspace = None
@@ -1674,6 +1685,7 @@ def create_server():
             HoverParams,
             InitializeParams,
             Location,
+            MessageType,
             Position,
             Range,
             ReferenceParams,
@@ -1798,6 +1810,8 @@ def create_server():
             auto_discover_paths=bool(auto_discover_paths),
         )
         state.configure(config)
+        for warning in state.config_warnings:
+            ls.show_message(warning, MessageType.Warning)
 
     def _publish_diagnostics(ls: LanguageServer, uri: str) -> None:
         diagnostics = state.diagnostics_for_uri(uri)

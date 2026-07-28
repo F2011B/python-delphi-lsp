@@ -151,3 +151,10 @@
 - CLI stdout and stderr are reconfigured to UTF-8 when the stream supports
   it. Remaining `UnicodeEncodeError` failures now return
   `cli_error:encoding_error` instead of a traceback.
+
+### F20 — Invalid LSP project configuration
+
+- Added regressions for state fallback and user-visible initialize warnings.
+- Project-config load or discovery errors now fall back to the unfiltered
+  workspace configuration, retain the warning, and surface it through
+  `window/showMessage` without aborting LSP initialization.
