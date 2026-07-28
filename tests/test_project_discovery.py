@@ -69,6 +69,39 @@ def test_toml_selects_all_included_monorepo_projects_and_excludes_last(
     assert str(service.with_suffix(".dproj").resolve()) in discovery.config_files
 
 
+def test_main_project_candidates_ignore_resolved_paths_outside_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "repository"
+    external_root = tmp_path / "external"
+    root.mkdir()
+    external_root.mkdir()
+    main = write_project(root, "Main.dpr").resolve()
+    external = write_project(external_root, "Linked.dpr").resolve()
+
+    def candidate_paths(
+        _root: Path,
+        pattern: str,
+        _project_config=None,
+    ) -> list[Path]:
+        return [main, external] if pattern == "*.dpr" else []
+
+    monkeypatch.setattr(
+        project_discovery_module,
+        "_walk_sources",
+        candidate_paths,
+    )
+
+    candidates = project_discovery_module._project_candidates(
+        root.resolve(),
+        None,
+        main_projects_only=True,
+    )
+
+    assert candidates == [main]
+
+
 def test_explicit_project_file_bypasses_toml_project_filters(tmp_path: Path) -> None:
     example = write_project(tmp_path, "examples/ExplicitDemo.dpr")
     write_text(

@@ -410,6 +410,7 @@ def _project_candidates(
             for candidate in candidates
             if candidate.exists()
             and candidate.is_file()
+            and candidate.is_relative_to(root)
             and (
                 project_config is None
                 or not project_config.excludes_workspace_path(candidate)

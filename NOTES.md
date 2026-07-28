@@ -158,3 +158,14 @@
 - Project-config load or discovery errors now fall back to the unfiltered
   workspace configuration, retain the warning, and surface it through
   `window/showMessage` without aborting LSP initialization.
+
+### F22 — Out-of-root project candidates
+
+- Added a cross-platform regression that simulates a walked project symlink
+  resolving outside the repository.
+- Resolved candidates must now be relative to the repository root before
+  auxiliary-project and minimum-depth calculations.
+- Batch 5 full result: 833 passed, 1 skipped, 84 warnings, and 60 subtests
+  passed.
+- Batch 5 golden snapshot classification: identical to the classified Batch 4
+  snapshot.
