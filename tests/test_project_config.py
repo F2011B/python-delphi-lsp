@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from delphi_lsp import project_config as project_config_module
 from delphi_lsp.project_config import (
     ProjectConfigError,
     load_project_path_config,
@@ -76,6 +77,28 @@ def test_globs_distinguish_single_and_recursive_segments(tmp_path: Path) -> None
 
 def test_missing_configuration_is_not_an_active_filter(tmp_path: Path) -> None:
     assert load_project_path_config(tmp_path) is None
+
+
+def test_empty_workspace_exclude_skips_path_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_config(
+        tmp_path,
+        """
+        [projects]
+        include = ["apps/**"]
+        """,
+    )
+    config = load_project_path_config(tmp_path)
+    assert config is not None
+    monkeypatch.setattr(
+        project_config_module,
+        "_repository_relative_path",
+        lambda *_args: pytest.fail("empty workspace excludes must not resolve"),
+    )
+
+    assert not config.excludes_workspace_path(tmp_path / "src" / "UnitA.pas")
 
 
 def test_workspace_exclude_matches_complete_directories_and_files(

@@ -359,3 +359,11 @@
 - `index` and `wiki export` now share one output-path resolver. Relative
   destinations are anchored to the canonical `--root`, and `index` prints the
   resolved path.
+
+### F34 — Empty workspace-exclude fast path
+
+- Added a regression that makes repository path resolution fail if it is
+  reached for a configuration without workspace exclusions.
+- `excludes_workspace_path` now returns immediately when its pattern tuple is
+  empty, avoiding lexical normalization and filesystem-backed resolution in
+  every discovery walk entry.

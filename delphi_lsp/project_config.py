@@ -51,6 +51,8 @@ class ProjectPathConfig:
         return not _matches_any(relative_paths, self.exclude)
 
     def excludes_workspace_path(self, path: str | Path) -> bool:
+        if not self.workspace_exclude:
+            return False
         lexical = _lexical_repository_relative_path(path, self.root)
         resolved = _repository_relative_path(path, self.root)
         if lexical is None or resolved is None:
