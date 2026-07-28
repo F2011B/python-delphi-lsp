@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import OrderedDict
+from collections.abc import MutableMapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable
@@ -17,6 +19,10 @@ from .progress import ProgressCallback, ProgressEvent
 from .semantic import Scope, SourceRange, Symbol, SymbolIndex, SymbolKind
 from .semantic_builder import SemanticModel
 from .source_reader import read_source_text
+
+
+_MAX_IMPLEMENTATION_ITEMS = 50
+_MAX_IMPLEMENTATION_SOURCE_FILES = 4
 
 
 @dataclass
@@ -430,19 +436,43 @@ def _implementation_payload(index: CodebaseIndex, *, query: str) -> dict[str, An
             "message": "Pass a class, routine, or member name in query to read focused source.",
         }
 
-    matches = [symbol for symbol in _all_symbols(index) if symbol.name.casefold() == needle]
+    all_symbols = tuple(_all_symbols(index))
+    matches = [symbol for symbol in all_symbols if symbol.name.casefold() == needle]
     if not matches:
         matches = [
             symbol
-            for symbol in _all_symbols(index)
+            for symbol in all_symbols
             if symbol.kind.value != "unit" and needle in symbol.name.casefold()
         ]
+    unique_matches: dict[tuple[str, str, int, int, str], Symbol] = {}
+    for symbol in matches:
+        unique_matches.setdefault(
+            (
+                symbol.decl_range.file_name,
+                symbol.name.casefold(),
+                symbol.decl_range.start_line,
+                symbol.decl_range.start_col,
+                symbol.kind.value,
+            ),
+            symbol,
+        )
+    matches = sorted(
+        unique_matches.values(),
+        key=lambda symbol: (
+            symbol.decl_range.file_name.casefold(),
+            symbol.decl_range.start_line,
+            symbol.decl_range.start_col,
+            symbol.name.casefold(),
+            symbol.kind.value,
+        ),
+    )[:_MAX_IMPLEMENTATION_ITEMS]
 
     items: list[dict[str, Any]] = []
-    source_cache: dict[str, list[str]] = {}
+    source_cache = _BoundedSourceCache(_MAX_IMPLEMENTATION_SOURCE_FILES)
+    routine_lookup = _build_routine_lookup(all_symbols)
     seen_keys: set[tuple[str, str, int, str]] = set()
     for symbol in matches:
-        item = _implementation_item(index, symbol, source_cache)
+        item = _implementation_item(symbol, source_cache, routine_lookup)
         if item is None:
             continue
         key = (item["name"].casefold(), item["path"], item["line"], item["kind"])
@@ -451,20 +481,66 @@ def _implementation_payload(index: CodebaseIndex, *, query: str) -> dict[str, An
         seen_keys.add(key)
         items.append(item)
     items.sort(key=lambda item: (item["path"].casefold(), item["line"], item["name"].casefold()))
-    return {"layer": "implementation", "root": index.root, "query": query, "items": items[:50]}
+    return {"layer": "implementation", "root": index.root, "query": query, "items": items}
+
+
+class _BoundedSourceCache(OrderedDict[str, list[str]]):
+    def __init__(self, max_entries: int) -> None:
+        super().__init__()
+        self.max_entries = max_entries
+
+    def get(self, key: str, default: list[str] | None = None) -> list[str] | None:
+        value = super().get(key, default)
+        if key in self:
+            self.move_to_end(key)
+        return value
+
+    def __setitem__(self, key: str, value: list[str]) -> None:
+        super().__setitem__(key, value)
+        self.move_to_end(key)
+        while len(self) > self.max_entries:
+            self.popitem(last=False)
+
+
+@dataclass(frozen=True)
+class _RoutineLookup:
+    by_name: dict[tuple[str, str], tuple[Symbol, ...]]
+    by_owner: dict[tuple[str, str], tuple[Symbol, ...]]
+
+
+def _build_routine_lookup(symbols: Iterable[Symbol]) -> _RoutineLookup:
+    by_name_lists: dict[tuple[str, str], list[Symbol]] = {}
+    by_owner_lists: dict[tuple[str, str], list[Symbol]] = {}
+    for symbol in symbols:
+        if symbol.kind not in _ROUTINE_KINDS:
+            continue
+        normalized_name = symbol.name.casefold()
+        path = symbol.decl_range.file_name
+        by_name_lists.setdefault((path, normalized_name), []).append(symbol)
+        owner, separator, _member = normalized_name.rpartition(".")
+        if separator:
+            by_owner_lists.setdefault((path, owner), []).append(symbol)
+    return _RoutineLookup(
+        by_name={key: tuple(value) for key, value in by_name_lists.items()},
+        by_owner={key: tuple(value) for key, value in by_owner_lists.items()},
+    )
 
 
 def _implementation_item(
-    index: CodebaseIndex,
     symbol: Symbol,
-    source_cache: dict[str, list[str]],
+    source_cache: MutableMapping[str, list[str]],
+    routine_lookup: _RoutineLookup,
 ) -> dict[str, Any] | None:
     fragments: list[dict[str, Any]] = []
     if symbol.kind in {SymbolKind.CLASS, SymbolKind.RECORD, SymbolKind.INTERFACE}:
         declaration = _source_fragment(symbol.decl_range, "declaration", source_cache)
         if declaration is not None:
             fragments.append(declaration)
-        fragments.extend(_implementation_fragments_for_type(index, symbol, source_cache))
+        fragments.extend(
+            _implementation_fragments_for_type(
+                symbol, source_cache, routine_lookup
+            )
+        )
     elif symbol.kind in _ROUTINE_KINDS:
         fragment = _source_fragment(symbol.decl_range, "implementation", source_cache)
         if fragment is not None:
@@ -473,7 +549,11 @@ def _implementation_item(
         fragment = _source_fragment(symbol.decl_range, "declaration", source_cache)
         if fragment is not None:
             fragments.append(fragment)
-        fragments.extend(_implementation_fragments_for_member(index, symbol, source_cache))
+        fragments.extend(
+            _implementation_fragments_for_member(
+                symbol, source_cache, routine_lookup
+            )
+        )
     if not fragments:
         return None
     item = _symbol_item(symbol)
@@ -482,20 +562,16 @@ def _implementation_item(
 
 
 def _implementation_fragments_for_type(
-    index: CodebaseIndex,
     symbol: Symbol,
-    source_cache: dict[str, list[str]],
+    source_cache: MutableMapping[str, list[str]],
+    routine_lookup: _RoutineLookup,
 ) -> list[dict[str, Any]]:
-    prefix = f"{symbol.name.casefold()}."
     fragments: list[dict[str, Any]] = []
     seen_ranges: set[SourceRange] = set()
-    for candidate in _all_symbols(index):
-        if candidate.kind not in _ROUTINE_KINDS:
-            continue
-        if candidate.decl_range.file_name != symbol.decl_range.file_name:
-            continue
-        if not candidate.name.casefold().startswith(prefix):
-            continue
+    candidates = routine_lookup.by_owner.get(
+        (symbol.decl_range.file_name, symbol.name.casefold()), ()
+    )
+    for candidate in candidates:
         fragment = _source_fragment(candidate.decl_range, "implementation", source_cache)
         if fragment is None or candidate.decl_range in seen_ranges:
             continue
@@ -507,22 +583,19 @@ def _implementation_fragments_for_type(
 
 
 def _implementation_fragments_for_member(
-    index: CodebaseIndex,
     symbol: Symbol,
-    source_cache: dict[str, list[str]],
+    source_cache: MutableMapping[str, list[str]],
+    routine_lookup: _RoutineLookup,
 ) -> list[dict[str, Any]]:
     owner = symbol.scope.owner
     if owner is None or owner.kind not in {SymbolKind.CLASS, SymbolKind.RECORD, SymbolKind.INTERFACE}:
         return []
     qualified_name = f"{owner.name.casefold()}.{symbol.name.casefold()}"
     fragments: list[dict[str, Any]] = []
-    for candidate in _all_symbols(index):
-        if candidate.kind not in _ROUTINE_KINDS:
-            continue
-        if candidate.decl_range.file_name != symbol.decl_range.file_name:
-            continue
-        if candidate.name.casefold() != qualified_name:
-            continue
+    candidates = routine_lookup.by_name.get(
+        (symbol.decl_range.file_name, qualified_name), ()
+    )
+    for candidate in candidates:
         fragment = _source_fragment(candidate.decl_range, "implementation", source_cache)
         if fragment is not None:
             fragment["symbol"] = candidate.name
@@ -533,7 +606,7 @@ def _implementation_fragments_for_member(
 def _source_fragment(
     source_range: SourceRange,
     fragment_kind: str,
-    source_cache: dict[str, list[str]],
+    source_cache: MutableMapping[str, list[str]],
 ) -> dict[str, Any] | None:
     lines = source_cache.get(source_range.file_name)
     if lines is None:

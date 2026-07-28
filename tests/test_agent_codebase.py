@@ -217,6 +217,74 @@ def test_implementation_layer_slices_single_method_from_100k_line_file(tmp_path:
     assert item["fragments"][0]["range"]["start_line"] > 100_000
 
 
+def test_implementation_layer_bounds_matches_scans_and_source_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    declarations = "\n".join(
+        f"procedure WideRoutine{ordinal:03d};" for ordinal in range(70)
+    )
+    implementations = "\n".join(
+        (
+            f"procedure WideRoutine{ordinal:03d};\n"
+            "begin\n"
+            "end;"
+        )
+        for ordinal in range(70)
+    )
+    write_text(
+        tmp_path / "Wide.pas",
+        (
+            "unit Wide;\n"
+            "interface\n"
+            f"{declarations}\n"
+            "implementation\n"
+            f"{implementations}\n"
+            "end."
+        ),
+    )
+    index = build_codebase_index(tmp_path)
+    real_all_symbols = agent_layers_module._all_symbols
+    real_implementation_item = agent_layers_module._implementation_item
+    traversals = 0
+    item_calls = 0
+    cache_limits: set[int] = set()
+
+    def counted_all_symbols(index_value: object) -> object:
+        nonlocal traversals
+        traversals += 1
+        return real_all_symbols(index_value)  # type: ignore[arg-type]
+
+    def counted_implementation_item(*args: object, **kwargs: object) -> object:
+        nonlocal item_calls
+        item_calls += 1
+        source_cache = args[1]
+        cache_limits.add(source_cache.max_entries)  # type: ignore[attr-defined]
+        return real_implementation_item(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(agent_layers_module, "_all_symbols", counted_all_symbols)
+    monkeypatch.setattr(
+        agent_layers_module, "_implementation_item", counted_implementation_item
+    )
+
+    payload = layer_payload(index, "implementation", query="WideRoutine")
+
+    assert len(payload["items"]) == agent_layers_module._MAX_IMPLEMENTATION_ITEMS
+    assert item_calls == agent_layers_module._MAX_IMPLEMENTATION_ITEMS
+    assert traversals == 1
+    assert cache_limits == {4}
+
+
+def test_implementation_source_cache_evicts_least_recent_file() -> None:
+    cache = agent_layers_module._BoundedSourceCache(2)
+    cache["first.pas"] = ["first"]
+    cache["second.pas"] = ["second"]
+
+    assert cache.get("first.pas") == ["first"]
+    cache["third.pas"] = ["third"]
+
+    assert tuple(cache) == ("first.pas", "third.pas")
+
+
 def test_symbol_range_ends_at_outer_end_after_conditional_statement_blocks(
     tmp_path: Path,
 ) -> None:

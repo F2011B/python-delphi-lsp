@@ -223,3 +223,12 @@
 - The layer now passes the discovered file inventory and active project
   filters to `build_path_metrics`, avoiding a complete in-memory source map
   before analysis.
+
+### F25 — Bounded implementation queries
+
+- Added regressions proving broad implementation queries prepare at most 50
+  matches, traverse the semantic symbol inventory once, and use a four-file
+  LRU source cache with real least-recently-used eviction.
+- Matches are deduplicated, deterministically sorted, and truncated before
+  source extraction. A per-request routine lookup now replaces repeated
+  whole-index scans for type and member implementation fragments.
