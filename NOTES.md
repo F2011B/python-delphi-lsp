@@ -284,3 +284,11 @@
 - Added `cache clear --root PATH`, which stops the daemon before safely
   removing the validated navigation-cache directory, and documented both CLI
   controls.
+
+### F23 — Fail-closed workspace exclusions
+
+- Added an escaping-directory-symlink regression covering direct config
+  checks, the project indexer boundary, and the include loader.
+- Workspace exclusion checks now require both lexical and resolved
+  containment. A path outside the configured root, including an in-root
+  symlink that escapes it, is excluded instead of silently re-admitted.

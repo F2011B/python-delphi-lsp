@@ -4,7 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from delphi_lsp.project_config import ProjectConfigError, load_project_path_config
+from delphi_lsp.project_config import (
+    ProjectConfigError,
+    load_project_path_config,
+    workspace_include_loader,
+)
+from delphi_lsp.project_indexer import ProjectIndexer
 
 
 def _write_config(root: Path, text: str) -> Path:
@@ -95,6 +100,41 @@ def test_workspace_exclude_matches_complete_directories_and_files(
     assert config.excludes_workspace_path(tmp_path / "apps" / "temp")
     assert config.excludes_workspace_path(tmp_path / "apps" / "temp" / "Cache.pas")
     assert not config.excludes_workspace_path(tmp_path / "src" / "UnitA.pas")
+
+
+def test_workspace_exclude_fails_closed_for_escaping_symlink(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    _write_config(
+        root,
+        """
+        [workspace]
+        exclude = ["vendor"]
+        """,
+    )
+    (outside / "Lib.pas").write_text(
+        "unit Lib; interface implementation end.\n",
+        encoding="utf-8",
+    )
+    (outside / "Shared.inc").write_text("const Shared = 1;\n", encoding="utf-8")
+    try:
+        (root / "vendor").symlink_to(outside, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"symlinks unavailable: {error}")
+
+    config = load_project_path_config(root)
+    assert config is not None
+    assert config.excludes_workspace_path(root / "vendor" / "Lib.pas")
+    assert not ProjectIndexer(project_config=config)._source_is_allowed(
+        outside / "Lib.pas"
+    )
+    include_loader = workspace_include_loader(config, [root / "vendor"])
+    assert include_loader is not None
+    assert include_loader(str(root / "Main.pas"), "Shared.inc") is None
 
 
 @pytest.mark.parametrize(

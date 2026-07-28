@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable, Mapping
+import os
 import re
 
 from .preprocessor import IncludeLoader
@@ -50,10 +51,14 @@ class ProjectPathConfig:
         return not _matches_any(relative_paths, self.exclude)
 
     def excludes_workspace_path(self, path: str | Path) -> bool:
-        relative = _repository_relative_path(path, self.root)
-        if relative is None:
-            return False
-        return _matches_any((relative,), self.workspace_exclude)
+        lexical = _lexical_repository_relative_path(path, self.root)
+        resolved = _repository_relative_path(path, self.root)
+        if lexical is None or resolved is None:
+            return True
+        return _matches_any(
+            (lexical, resolved),
+            self.workspace_exclude,
+        )
 
 
 def load_project_path_config(root: str | Path) -> ProjectPathConfig | None:
@@ -187,6 +192,21 @@ def _repository_relative_path(path: str | Path, root: Path) -> str | None:
         candidate = root / candidate
     try:
         relative = candidate.resolve().relative_to(root)
+    except (OSError, ValueError):
+        return None
+    return relative.as_posix()
+
+
+def _lexical_repository_relative_path(
+    path: str | Path,
+    root: Path,
+) -> str | None:
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    try:
+        absolute = Path(os.path.abspath(os.path.normpath(candidate)))
+        relative = absolute.relative_to(root)
     except (OSError, ValueError):
         return None
     return relative.as_posix()
