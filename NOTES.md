@@ -39,3 +39,14 @@
 - Text fallback references receive the file being scanned explicitly, so
   ranges can never combine coordinates from one document with another
   document's name.
+
+### F4 — Include source-map stop-gap
+
+- Added a rename regression using a resolved include file.
+- Rename now returns no edit when preprocessing maps any emitted line to a
+  foreign file. This deliberately favors a safe refusal over potentially
+  rewriting unrelated text until full source-map translation lands in
+  Batch 8.
+- Batch 2 full result: 817 passed, 1 skipped, 44 warnings, and 60 subtests
+  passed.
+- Batch 2 golden snapshot classification: identical.

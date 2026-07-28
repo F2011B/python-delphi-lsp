@@ -5,10 +5,13 @@ from unittest import mock
 
 from lsprotocol.types import (
     TEXT_DOCUMENT_DID_CHANGE,
+    TEXT_DOCUMENT_RENAME,
+    Position,
     TextDocumentSyncKind,
 )
 
 from delphi_lsp.lsp_server import (
+    WorkspaceConfig,
     build_outline_semantic_model,
     create_server,
     iter_symbols,
@@ -117,3 +120,36 @@ def test_text_references_are_attributed_to_the_file_being_scanned(tmp_path) -> N
 
     assert len(references) == 2
     assert {item.file_name for item in references} == {current_file}
+
+
+def test_rename_aborts_when_an_include_makes_ranges_unsafe(tmp_path) -> None:
+    include_path = tmp_path / 'Shared.inc'
+    include_path.write_text('const Included = 1;\n', encoding='utf-8')
+    source_path = tmp_path / 'IncludeRename.pas'
+    source = (
+        'unit IncludeRename;\n'
+        'interface\n'
+        '{$I Shared.inc}\n'
+        'type\n'
+        '  TLocal = Integer;\n'
+        'var\n'
+        '  Value: TLocal;\n'
+        'implementation\n'
+        'end.\n'
+    )
+    uri = source_path.as_uri()
+    server = create_server()
+    handler = server.lsp.fm.features[TEXT_DOCUMENT_RENAME]
+    assert isinstance(handler, partial)
+    state = inspect.getclosurevars(handler.func).nonlocals['state']
+    state.configure(WorkspaceConfig(include_paths=[str(tmp_path)]))
+    state.update_document(uri, source)
+    params = SimpleNamespace(
+        text_document=SimpleNamespace(uri=uri),
+        position=Position(line=6, character=11),
+        new_name='TRenamed',
+    )
+
+    result = handler(params)
+
+    assert result is None

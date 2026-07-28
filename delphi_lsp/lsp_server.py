@@ -320,6 +320,24 @@ class LspWorkspaceState:
             defines=self.config.defines,
         )
 
+    def has_foreign_source_map(self, uri: str) -> bool:
+        file_name = uri_to_path(uri)
+        text = self.text_for_uri(uri)
+        if text is None:
+            return False
+        preprocessed = Preprocessor(
+            defines=self.config.defines,
+            include_paths=self.config.include_paths,
+            include_loader=workspace_include_loader(
+                self._project_config_for(Path(file_name)),
+                self.config.include_paths,
+            ),
+        ).process(text, file_name)
+        return any(
+            entry.file_name != file_name
+            for entry in preprocessed.source_map
+        )
+
     def text_for_uri(self, uri: str) -> Optional[str]:
         doc = self.documents.get(uri)
         if doc is not None:
@@ -1915,6 +1933,8 @@ def create_server():
     def rename(ls: LanguageServer, params: RenameParams) -> Optional[WorkspaceEdit]:
         symbol = _symbol_at_position(params.text_document.uri, params.position)
         if symbol is None:
+            return None
+        if state.has_foreign_source_map(params.text_document.uri):
             return None
         text = state.text_for_uri(params.text_document.uri)
         semantic_symbol: Symbol | None = None
