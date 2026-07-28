@@ -264,3 +264,11 @@
   `assert result is None` for include-bearing rename became exact assertions
   for the two safe mapped edits. The temporary Batch 2 stop-gap is no longer
   needed because ranges are now mapped instead of discarded.
+
+### F15 — Canonical LSP paths
+
+- Added a platform-independent Windows-path regression covering drive paths
+  and UNC file URIs.
+- URI-derived paths, workspace scan results, cache keys, source aggregation,
+  model lookup, and open-document URI lookup now share native `Path`
+  spelling. File URI hosts are retained as UNC paths.

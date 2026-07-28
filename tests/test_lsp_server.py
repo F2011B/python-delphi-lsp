@@ -1,5 +1,6 @@
 import inspect
 from functools import partial
+from pathlib import PureWindowsPath
 from types import SimpleNamespace
 from unittest import mock
 
@@ -25,6 +26,16 @@ from delphi_lsp.lsp_server import (
 )
 from delphi_lsp.project_discovery import SKIP_DIRS
 from delphi_lsp.semantic import SymbolKind
+
+
+def test_uri_paths_use_native_spelling_and_preserve_unc_hosts() -> None:
+    with mock.patch.object(lsp_server, 'Path', PureWindowsPath):
+        assert lsp_server.uri_to_path(
+            'file:///c:/repo/src/Unit1.pas'
+        ) == r'c:\repo\src\Unit1.pas'
+        assert lsp_server.uri_to_path(
+            'file://server/share/Unit1.pas'
+        ) == r'\\server\share\Unit1.pas'
 
 
 def test_server_advertises_full_document_synchronization() -> None:

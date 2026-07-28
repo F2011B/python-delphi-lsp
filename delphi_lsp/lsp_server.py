@@ -251,10 +251,14 @@ class LspWorkspaceState:
                         and project_config.excludes_workspace_path(path)
                     ):
                         continue
-                    files.append(str(path))
+                    files.append(_normalize_path(str(path)))
         return files
 
     def _refresh_file_cache(self) -> None:
+        self.workspace_files = {
+            _normalize_path(path)
+            for path in self.workspace_files
+        }
         to_remove = [path for path in self.file_cache if path not in self.workspace_files]
         for path in to_remove:
             self.file_cache.pop(path, None)
@@ -274,11 +278,11 @@ class LspWorkspaceState:
 
     def _collect_sources(self) -> dict[str, str]:
         sources = {
-            path: snapshot.text
+            _normalize_path(path): snapshot.text
             for path, snapshot in self.file_cache.items()
         }
         for doc in self.documents.values():
-            sources[doc.file_name] = doc.text
+            sources[_normalize_path(doc.file_name)] = doc.text
         return sources
 
     def _rebuild(self) -> None:
@@ -419,7 +423,7 @@ class LspWorkspaceState:
     def model_for_path(self, path: str) -> Optional[SemanticModel]:
         if self.workspace is None:
             return None
-        return self.workspace.models.get(path)
+        return self.workspace.models.get(_normalize_path(path))
 
     def iter_models(self) -> Iterable[SemanticModel]:
         if self.workspace is None:
@@ -427,8 +431,9 @@ class LspWorkspaceState:
         return self.workspace.models.values()
 
     def uri_for_file_name(self, file_name: str) -> Optional[str]:
+        normalized = _normalize_path(file_name)
         for doc in self.documents.values():
-            if doc.file_name == file_name:
+            if doc.file_name == normalized:
                 return doc.uri
         return None
 
@@ -448,6 +453,10 @@ BUILTIN_TYPES = {
 }
 
 
+def _normalize_path(path: str) -> str:
+    return str(Path(path))
+
+
 def uri_to_path(uri: str) -> str:
     parsed = urlparse(uri)
     if parsed.scheme and parsed.scheme != 'file':
@@ -455,7 +464,9 @@ def uri_to_path(uri: str) -> str:
     path = unquote(parsed.path)
     if path.startswith('/') and len(path) > 3 and path[2] == ':':
         path = path[1:]
-    return path or uri
+    if parsed.netloc:
+        path = f'//{parsed.netloc}{path}'
+    return _normalize_path(path) if path else uri
 
 
 def outline_source(text: str, *, defines: Iterable[str] | None = None) -> str:
