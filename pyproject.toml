@@ -68,4 +68,7 @@ delphi_lsp = ["py.typed"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "--timeout=120 --timeout-method=thread"
+addopts = "--timeout=120 --timeout-method=thread -m 'not perf'"
+markers = [
+  "perf: opt-in benchmarks that require an externally prepared real-world corpus",
+]

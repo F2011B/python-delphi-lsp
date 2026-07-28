@@ -50,7 +50,12 @@
       "revision": "a8e7ad4e2f2f6d3bdc240850075d85e659a42ff8",
       "paths": ["."],
       "extensions": [".pas", ".inc"],
-      "anchors": []
+      "anchors": [
+        "compiler/compiler.pas",
+        "compiler/pp.pas",
+        "rtl/inc/system.inc",
+        "rtl/objpas/classes/classes.inc"
+      ]
     },
     {
       "name": "castle-engine",

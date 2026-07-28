@@ -48,7 +48,7 @@ def test_lock_has_schema_and_required_corpora() -> None:
         assert corpora[name]["paths"]
         assert set(corpora[name]["extensions"]) <= {".pas", ".inc"}
     assert lock["vendor_corpora"] is False
-    assert corpora["FPCSource"]["anchors"] == []
+    assert corpora["FPCSource"]["anchors"]
 
 
 def test_deterministic_round_robin_selection_is_stable(tmp_path: Path) -> None:
