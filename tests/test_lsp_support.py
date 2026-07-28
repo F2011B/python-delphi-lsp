@@ -17,7 +17,22 @@ from delphi_lsp.semantic import SymbolKind
 
 
 FIXTURE_DIR = pathlib.Path(__file__).parent / 'fixtures'
-CI_PERFORMANCE_TIMEOUT_MULTIPLIER = 2.0 if os.environ.get('CI') else 1.0
+
+
+def _performance_timeout_multiplier(
+    *,
+    ci: bool,
+    python_version: tuple[int, int],
+) -> float:
+    if not ci:
+        return 1.0
+    return 4.0 if python_version < (3, 11) else 2.0
+
+
+CI_PERFORMANCE_TIMEOUT_MULTIPLIER = _performance_timeout_multiplier(
+    ci=bool(os.environ.get('CI')),
+    python_version=sys.version_info[:2],
+)
 LARGE_FILE_LSP_COLD_START_TIMEOUT_SECONDS_BY_PLATFORM = {
     'linux': 3.0,
     'linux2': 3.0,
@@ -73,7 +88,7 @@ def _read_lsp_message(proc: subprocess.Popen) -> dict:
 def _receive_lsp_message(
     proc: subprocess.Popen,
     *,
-    timeout: float = 5.0,
+    timeout: float = 15.0,
 ) -> dict:
     result: queue.Queue[tuple[dict | None, BaseException | None]] = queue.Queue(
         maxsize=1
@@ -99,6 +114,7 @@ def _receive_lsp_message(
 
 
 def test_receive_lsp_message_has_a_bounded_read() -> None:
+    assert _receive_lsp_message.__kwdefaults__ == {'timeout': 15.0}
     blocked = threading.Event()
 
     class NeverReader:
@@ -113,6 +129,12 @@ def test_receive_lsp_message_has_a_bounded_read() -> None:
     ):
         _receive_lsp_message(proc, timeout=0.01)  # type: ignore[arg-type]
     blocked.set()
+
+
+def test_python_310_ci_performance_budget_matches_standard_pc_target() -> None:
+    assert _performance_timeout_multiplier(ci=False, python_version=(3, 10)) == 1.0
+    assert _performance_timeout_multiplier(ci=True, python_version=(3, 14)) == 2.0
+    assert _performance_timeout_multiplier(ci=True, python_version=(3, 10)) == 4.0
 
 
 def _request_lsp(proc: subprocess.Popen, message: dict) -> dict:

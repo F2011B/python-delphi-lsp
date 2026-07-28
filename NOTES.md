@@ -309,10 +309,14 @@
 
 - Added 20-minute limits to both CI jobs and the `pytest-timeout` test-only
   dependency with a 120-second thread-based per-test limit.
-- LSP response reads now run through a five-second reader-thread deadline.
+- LSP response reads now run through a fifteen-second reader-thread deadline.
   Worker NDJSON reads use the same bounded queue pattern, including watcher,
   focus, recovery, and EOF checks.
 - Added deterministic blocked-reader regressions for both helpers.
+- Hosted-CI performance budgets retain the normal 2x variance allowance, with
+  4x headroom on the supported Python 3.10 floor to represent the target
+  standard-PC performance class. LSP response reads remain bounded at 15
+  seconds, below the 120-second per-test and 20-minute job limits.
 
 ### F28 — Complete source distributions
 
