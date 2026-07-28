@@ -113,6 +113,39 @@ class WorkspaceTests(unittest.TestCase):
         )
         self.assertIn("IncludeMap.pas", result.preprocessed)
 
+    def test_global_symbol_index_does_not_duplicate_imported_scopes(self) -> None:
+        result = build_workspace_semantics(
+            {
+                "Base.pas": (
+                    "unit Base;\n"
+                    "interface\n"
+                    "procedure Shared;\n"
+                    "implementation\n"
+                    "procedure Shared;\n"
+                    "begin\n"
+                    "end;\n"
+                    "end.\n"
+                ),
+                "Middle.pas": (
+                    "unit Middle;\n"
+                    "interface\n"
+                    "uses Base;\n"
+                    "implementation\n"
+                    "end.\n"
+                ),
+                "Top.pas": (
+                    "unit Top;\n"
+                    "interface\n"
+                    "uses Middle;\n"
+                    "implementation\n"
+                    "end.\n"
+                ),
+            }
+        )
+
+        base_symbols = result.models["Base.pas"].unit_scope.lookup_local("Shared")
+        assert result.index.lookup("Shared") == base_symbols
+
 
 if __name__ == '__main__':
     unittest.main()

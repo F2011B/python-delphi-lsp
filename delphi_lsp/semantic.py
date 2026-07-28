@@ -371,5 +371,3 @@ class SymbolIndex:
             for symbol in symbols:
                 key = normalize_name(symbol.name)
                 self.name_index.setdefault(key, []).append(symbol)
-        for child_scope in scope.imports:
-            self._index_scope(child_scope, seen)

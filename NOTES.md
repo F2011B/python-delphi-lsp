@@ -292,3 +292,15 @@
 - Workspace exclusion checks now require both lexical and resolved
   containment. A path outside the configured root, including an in-root
   symlink that escapes it, is excluded instead of silently re-admitted.
+
+### F24 — Flat global symbol indexing
+
+- Added a three-unit transitive-uses regression that compares the global
+  lookup exactly with the declaring unit's symbols.
+- `SymbolIndex` no longer recursively re-indexes imported scopes when a unit
+  is registered. Each unit already registers its own symbols, while semantic
+  import resolution remains unchanged.
+- Existing assertion setup updated: the cyclic-import test now registers both
+  unit scopes before checking both global lookups. Its former single
+  registration encoded the duplicate-producing transitive indexing behavior;
+  it still verifies cyclic imports terminate and each symbol appears once.

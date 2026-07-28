@@ -30,6 +30,7 @@ class SemanticTests(unittest.TestCase):
 
         index = SymbolIndex()
         index.register_unit('Left', left)
+        index.register_unit('Right', right)
 
         self.assertEqual([symbol.name for symbol in index.lookup('LeftValue')], ['LeftValue'])
         self.assertEqual([symbol.name for symbol in index.lookup('RightValue')], ['RightValue'])
