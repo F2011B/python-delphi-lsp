@@ -119,3 +119,33 @@ def test_tolerant_parser_recovers_and_always_makes_progress() -> None:
     assert result.problems
     assert all(problem.line >= 1 and problem.column >= 1 for problem in result.problems)
 
+
+def test_less_than_in_statement_does_not_swallow_following_declarations() -> None:
+    source = """
+unit LessThanUnit;
+interface
+implementation
+
+procedure First;
+var
+  Index: Integer;
+begin
+  while Index < 10 do
+    Index := Index + 1;
+end;
+
+procedure AfterComparison;
+begin
+end;
+
+end.
+"""
+
+    result = DelphiAstParser(source, "LessThanUnit.pas").parse()
+    routine_names = [
+        node.get_attribute(AttributeName.anName)
+        for node in walk(result.root)
+        if node.typ == SyntaxNodeType.ntMethod
+    ]
+
+    assert routine_names == ["First", "AfterComparison"]

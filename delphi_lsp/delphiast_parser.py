@@ -1018,7 +1018,10 @@ class DelphiAstParser:
             separator = "then" if word == "if" else "do"
             if word == "for":
                 separator = "do"
-            expression_tokens = self._collect_until({separator, ";", "end"})
+            expression_tokens = self._collect_until(
+                {separator, ";", "end"},
+                track_angles=False,
+            )
             expression = self._expression_direct(expression_tokens)
             if expression is not None:
                 node.add_child(expression)
@@ -1038,7 +1041,9 @@ class DelphiAstParser:
             node = self._node(SyntaxNodeType.ntRepeat, token, compound=True)
             self._parse_statements(node, {"until"})
             self._accept("until")
-            expression = self._expression_direct(self._collect_until({";", "end"}))
+            expression = self._expression_direct(
+                self._collect_until({";", "end"}, track_angles=False)
+            )
             if expression is not None:
                 node.add_child(expression)
             return node
@@ -1048,7 +1053,9 @@ class DelphiAstParser:
             token = self._advance()
             node = self._node(SyntaxNodeType.ntCase, token, compound=True)
             selector = self._node(SyntaxNodeType.ntCaseSelector, token)
-            expression = self._expression_direct(self._collect_until({"of"}))
+            expression = self._expression_direct(
+                self._collect_until({"of"}, track_angles=False)
+            )
             if expression is not None:
                 selector.add_child(expression)
             node.add_child(selector)
@@ -1060,7 +1067,8 @@ class DelphiAstParser:
             return None
         token = self._peek()
         values = self._collect_until(
-            {";", "end", "else", "until", "except", "finally"}
+            {";", "end", "else", "until", "except", "finally"},
+            track_angles=False,
         )
         if not values:
             return None
@@ -1097,7 +1105,10 @@ class DelphiAstParser:
                         SyntaxNodeType.ntExceptionHandler,
                         self._peek(-1),
                     )
-                    self._collect_until({"do", ";", "end"})
+                    self._collect_until(
+                        {"do", ";", "end"},
+                        track_angles=False,
+                    )
                     self._accept("do")
                     statement = self._parse_statement()
                     if statement is not None:
@@ -1373,11 +1384,13 @@ class DelphiAstParser:
         stops: set[str],
         *,
         max_retained: Optional[int] = None,
+        track_angles: bool = True,
     ) -> list[Token]:
         values: list[Token] = []
         round_depth = 0
         square_depth = 0
         angle_depth = 0
+        previous: Optional[Token] = None
         while not self._eof():
             word = self._normalized()
             if round_depth == square_depth == angle_depth == 0 and word in stops:
@@ -1393,10 +1406,19 @@ class DelphiAstParser:
                 square_depth += 1
             elif token.value == "]":
                 square_depth = max(0, square_depth - 1)
-            elif token.value == "<":
+            elif (
+                track_angles
+                and token.value == "<"
+                and previous is not None
+                and previous.kind is TokenKind.IDENTIFIER
+                and previous.end == token.start
+            ):
                 angle_depth += 1
-            elif token.value == ">":
+            elif track_angles and token.value == ">":
                 angle_depth = max(0, angle_depth - 1)
+            if token.normalized in {";", "then", "do", "begin", "end"}:
+                angle_depth = 0
+            previous = token
         return values
 
     def _skip_balanced_until(self, stops: set[str]) -> None:

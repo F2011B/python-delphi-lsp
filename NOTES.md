@@ -83,3 +83,11 @@
 - Batch 3 full result: 821 passed, 1 skipped, 70 warnings, and 60 subtests
   passed.
 - Batch 3 golden snapshot classification: identical.
+
+### F2 — Less-than statement recovery
+
+- Added a hand-parser regression with a `while Index < 10` followed by a
+  second routine declaration.
+- Statement and condition collectors no longer track angle brackets.
+  Declaration collectors retain generic-aware tracking, narrowed to an
+  identifier immediately adjacent to `<`, with statement-boundary recovery.
