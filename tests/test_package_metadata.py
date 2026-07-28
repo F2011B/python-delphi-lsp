@@ -146,6 +146,7 @@ def test_ci_covers_cross_platform_test_matrix_and_release_build() -> None:
     assert 'python -m twine check dist/*' in workflow
     assert 'python -m pytest sdist-smoke/tests' in workflow
     assert 'pip install dist/*.whl' in workflow
+    assert "package / 'py.typed'" in workflow
 
 
 def test_sdist_includes_files_required_by_packaged_tests() -> None:
@@ -168,6 +169,15 @@ def test_sdist_includes_files_required_by_packaged_tests() -> None:
     assert 'include scripts/ollama/ornith-lspctx.Modelfile' in manifest
     assert 'include tests/corpora.performance.lock.json' in manifest
     assert 'recursive-include docs *.md' in manifest
+    assert 'include delphi_lsp/py.typed' in manifest
+
+
+def test_distribution_declares_and_contains_pep561_marker() -> None:
+    pyproject = (ROOT / 'pyproject.toml').read_text(encoding='utf-8')
+
+    assert '[tool.setuptools.package-data]' in pyproject
+    assert 'delphi_lsp = ["py.typed"]' in pyproject
+    assert (ROOT / 'delphi_lsp' / 'py.typed').is_file()
 
 
 def test_release_3_0_0_notes_document_protocol_cpg_and_performance_gate() -> None:

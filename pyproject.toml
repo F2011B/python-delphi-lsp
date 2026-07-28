@@ -62,6 +62,9 @@ delphi-lsp-agent = "delphi_lsp.agent_cli:main"
 [tool.setuptools]
 packages = ["delphi_lsp"]
 
+[tool.setuptools.package-data]
+delphi_lsp = ["py.typed"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]

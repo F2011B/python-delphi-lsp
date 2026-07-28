@@ -323,3 +323,10 @@
 - A local clean-room Python 3.14 run passed with 850 tests, 2 platform skips,
   84 warnings, and 60 subtests; both release-note tests found their packaged
   docs.
+
+### F29 — PEP 561 typing marker
+
+- Added `delphi_lsp/py.typed`, declared it as setuptools package data, and
+  included it explicitly in source archives.
+- Package metadata tests and the wheel smoke step now require the marker.
+  A locally built wheel was inspected and contains `delphi_lsp/py.typed`.

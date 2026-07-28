@@ -48,4 +48,4 @@ jobs:
           python -m pytest sdist-smoke/tests
       - run: python -m venv smoke-venv
       - run: smoke-venv/bin/python -m pip install dist/*.whl
-      - run: smoke-venv/bin/python -c "import delphi_lsp; print(delphi_lsp.__name__)"
+      - run: smoke-venv/bin/python -c "import delphi_lsp, pathlib; package = pathlib.Path(delphi_lsp.__file__).parent; assert (package / 'py.typed').is_file(); print(delphi_lsp.__name__)"
