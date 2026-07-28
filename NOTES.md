@@ -65,3 +65,10 @@
   `SymbolIndex` from cached models rather than adding mutable unregister
   operations to `SymbolIndex`; this preserves deterministic registration
   order and avoids stale name-index entries.
+
+### F14 / F36 — Bounded workspace-symbol query cache
+
+- Added an eviction regression that distinguishes LRU behavior from FIFO.
+- Query-specific workspace semantic results now use an eight-entry
+  `OrderedDict`; hits refresh recency and insertion evicts the least recently
+  used entry.

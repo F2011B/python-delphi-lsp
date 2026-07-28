@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Optional
@@ -31,6 +32,8 @@ from .project_config import (
     workspace_include_loader,
 )
 from ._version import __version__
+
+_WORKSPACE_SYMBOL_QUERY_CACHE_SIZE = 8
 
 
 @dataclass
@@ -69,7 +72,9 @@ class LspWorkspaceState:
     documents: dict[str, DocumentSnapshot] = field(default_factory=dict)
     workspace: Optional[WorkspaceSemanticResult] = None
     workspace_symbol_index: Optional[WorkspaceSemanticResult] = None
-    workspace_symbol_query_cache: dict[str, WorkspaceSemanticResult] = field(default_factory=dict)
+    workspace_symbol_query_cache: OrderedDict[str, WorkspaceSemanticResult] = field(
+        default_factory=OrderedDict,
+    )
     workspace_files: set[str] = field(default_factory=set)
     file_cache: dict[str, FileSnapshot] = field(default_factory=dict)
     project_configs: tuple[ProjectPathConfig, ...] = field(
@@ -89,7 +94,7 @@ class LspWorkspaceState:
         self.file_cache = {}
         self.workspace = None
         self.workspace_symbol_index = None
-        self.workspace_symbol_query_cache = {}
+        self.workspace_symbol_query_cache.clear()
         if config.eager_index:
             self.index_workspace()
 
@@ -166,6 +171,7 @@ class LspWorkspaceState:
             return self.workspace_symbol_index
         cached = self.workspace_symbol_query_cache.get(normalized_query)
         if cached is not None:
+            self.workspace_symbol_query_cache.move_to_end(normalized_query)
             return cached
         if not self.workspace_files and self.config.roots:
             self.workspace_files = set(self._scan_workspace_files())
@@ -182,20 +188,25 @@ class LspWorkspaceState:
         if result is None:
             result = WorkspaceSemanticResult(models={}, index=SymbolIndex())
         self.workspace_symbol_query_cache[normalized_query] = result
+        while (
+            len(self.workspace_symbol_query_cache)
+            > _WORKSPACE_SYMBOL_QUERY_CACHE_SIZE
+        ):
+            self.workspace_symbol_query_cache.popitem(last=False)
         return result
 
     def update_document(self, uri: str, text: str) -> None:
         file_name = uri_to_path(uri)
         self.documents[uri] = DocumentSnapshot(uri=uri, file_name=file_name, text=text)
         self.workspace_symbol_index = None
-        self.workspace_symbol_query_cache = {}
+        self.workspace_symbol_query_cache.clear()
         self._rebuild()
 
     def remove_document(self, uri: str) -> None:
         if uri in self.documents:
             self.documents.pop(uri)
             self.workspace_symbol_index = None
-            self.workspace_symbol_query_cache = {}
+            self.workspace_symbol_query_cache.clear()
             self._rebuild()
 
     def _scan_workspace_files(self) -> list[str]:
@@ -261,7 +272,7 @@ class LspWorkspaceState:
     def _rebuild(self) -> None:
         sources = self._collect_sources()
         self.workspace_symbol_index = None
-        self.workspace_symbol_query_cache = {}
+        self.workspace_symbol_query_cache.clear()
         if not sources:
             self.workspace = None
             return

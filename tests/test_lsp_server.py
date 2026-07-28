@@ -209,3 +209,16 @@ def test_document_notifications_are_dispatched_off_the_event_loop() -> None:
         handler = server.lsp.fm.features[method]
         assert isinstance(handler, partial)
         assert is_thread_function(handler)
+
+
+def test_workspace_symbol_query_cache_is_a_bounded_lru() -> None:
+    state = LspWorkspaceState()
+
+    for query in 'abcdefghi':
+        state.workspace_symbols_for_query(query)
+    state.workspace_symbols_for_query('b')
+    state.workspace_symbols_for_query('j')
+
+    assert len(state.workspace_symbol_query_cache) == 8
+    assert 'b' in state.workspace_symbol_query_cache
+    assert 'c' not in state.workspace_symbol_query_cache
