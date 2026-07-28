@@ -199,3 +199,29 @@ end.
         )
         for node in walk(declarations["TAfter"])
     )
+
+
+def test_half_typed_enum_value_reports_a_problem_without_raising() -> None:
+    source = """
+unit IncompleteEnum;
+interface
+type
+  TAlign = (alNone = 0, alTop =);
+implementation
+end.
+"""
+
+    result = DelphiAstParser(source, "IncompleteEnum.pas").parse()
+    enum_names = [
+        child.value
+        for node in walk(result.root)
+        if node.typ == SyntaxNodeType.ntEnum
+        for child in node.child_nodes
+        if isinstance(child, ValuedSyntaxNode)
+    ]
+
+    assert enum_names == ["alNone", "alTop"]
+    assert any(
+        "Expected enum value after '='" in problem.message
+        for problem in result.problems
+    )

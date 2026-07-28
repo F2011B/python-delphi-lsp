@@ -576,11 +576,17 @@ class DelphiAstParser:
                 item.add_child(self._valued(SyntaxNodeType.ntName, item_token, name))
                 if self._accept("="):
                     value_tokens = self._collect_until({",", ")"})
-                    value = self._node(SyntaxNodeType.ntValue, value_tokens[0])
-                    expression = self._expression_direct(value_tokens)
-                    if expression is not None:
-                        value.add_child(expression)
-                    item.add_child(value)
+                    if value_tokens:
+                        value = self._node(SyntaxNodeType.ntValue, value_tokens[0])
+                        expression = self._expression_direct(value_tokens)
+                        if expression is not None:
+                            value.add_child(expression)
+                        item.add_child(value)
+                    else:
+                        self._problem(
+                            "Expected enum value after '='",
+                            item_token,
+                        )
                 type_node.add_child(item)
             else:
                 self._advance()

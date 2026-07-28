@@ -100,3 +100,10 @@
   Helpers consume their target type before entering the normal class body.
 - A defensive type-body guard prevents stray `of` or `helper` tokens from
   consuming subsequent declarations during tolerant recovery.
+
+### F5 — Incomplete enum values
+
+- Added a regression for `(alNone = 0, alTop =)`.
+- Empty enum-value token lists now add a precise parser problem while
+  preserving both enum items, instead of indexing an empty list and raising
+  `IndexError`.
