@@ -75,6 +75,27 @@ def test_globs_distinguish_single_and_recursive_segments(tmp_path: Path) -> None
     assert config.selects(tmp_path / "services" / "api" / "v2" / "Server.dpr")
 
 
+def test_repeated_recursive_glob_segments_are_collapsed(
+    tmp_path: Path,
+) -> None:
+    repeated = "**/" * 20 + "node_modules/**"
+    _write_config(
+        tmp_path,
+        f'[workspace]\nexclude = ["{repeated}"]\n',
+    )
+
+    config = load_project_path_config(tmp_path)
+
+    assert config is not None
+    assert config.workspace_exclude == ("**/node_modules/**",)
+    assert config.excludes_workspace_path(
+        tmp_path / "apps" / "web" / "node_modules" / "package" / "Unit.pas"
+    )
+    assert not config.excludes_workspace_path(
+        tmp_path / "apps" / "web" / "sources" / "Unit.pas"
+    )
+
+
 def test_missing_configuration_is_not_an_active_filter(tmp_path: Path) -> None:
     assert load_project_path_config(tmp_path) is None
 

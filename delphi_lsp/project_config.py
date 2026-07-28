@@ -173,6 +173,7 @@ def _normalize_pattern(value: str, *, config_path: Path, setting: str) -> str:
     while pattern.startswith("./"):
         pattern = pattern[2:]
     pattern = pattern.rstrip("/")
+    pattern = re.sub(r"(?:\*\*/)+", "**/", pattern)
     if not pattern:
         raise ProjectConfigError(
             f"{config_path}: {setting} patterns must not be empty."

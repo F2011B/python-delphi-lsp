@@ -375,3 +375,11 @@
 - DPR, CFG, and DOF discovery now uses `read_source_text`, matching parser,
   include-loader, indexer, and LSP handling for BOMs, UTF-16, normalized line
   endings, and decoding failures.
+
+### F37 — Bounded recursive-glob compilation
+
+- Added a 20-segment recursive-glob regression that verifies normalized
+  configuration and matching behavior.
+- Consecutive `**/` segments are collapsed at configuration load time, so the
+  regex compiler emits one optional recursive group instead of an unbounded
+  sequence with combinatorial non-match backtracking.
