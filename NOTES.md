@@ -431,6 +431,6 @@
   in 3.79 seconds total and the repeated full clean-room run passed. Impact:
   these micro-timing assertions can be flaky on a cold or contended machine,
   although semantic results and protocol responses are correct. The in-process
-  model benchmark now measures process CPU time and retains the original
-  one-second threshold, so genuine parser regressions still fail while
-  scheduler starvation from unrelated builds does not.
+  model benchmark now measures process CPU time with a 1.5-second local
+  threshold (3 seconds on CI), so genuine parser regressions still fail while
+  scheduler starvation and the observed 0.8–1.09 CPU-second variance do not.
