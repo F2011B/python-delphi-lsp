@@ -711,8 +711,12 @@ def _serve_worker(context: AgentContext, input_stream: BinaryIO, output_stream: 
         except BrokenPipeError:
             raise
         except AgentProtocolError as error:
-            message = _SOURCE_UNAVAILABLE_MESSAGE if error.code == "source_unavailable" else error.message
-            message = _worker_error(error.code, message)
+            error_message = (
+                _SOURCE_UNAVAILABLE_MESSAGE
+                if error.code == "source_unavailable"
+                else error.message
+            )
+            message = _worker_error(error.code, error_message)
         except Exception as error:
             error_stream.write(f"{type(error).__name__}\n")
             error_stream.flush()

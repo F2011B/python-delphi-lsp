@@ -394,3 +394,39 @@
   without bound. Excess connections are closed immediately.
 - The first newline-terminated authentication record has a 250 ms deadline;
   authenticated response I/O retains the existing two-second socket timeout.
+
+## Final verification
+
+- Tests improved from `812 passed, 1 skipped, 11 warnings, 60 subtests` to
+  `859 passed, 1 skipped, 84 warnings, 60 subtests`; the additional warnings
+  are pygls deprecations exercised by the expanded LSP/package coverage.
+- Ruff is exactly at its Layer-1 baseline of 323 diagnostics. Mypy is exactly
+  at its baseline of 114 errors in 17 files. Four import-order findings and
+  four pre-existing type-check findings in touched files were removed to
+  restore those boundaries after the feature commits.
+- The final golden diff contains 53 logical value changes, all classified:
+  - F26: 45 metrics paths change from fixture-root absolute paths to stable
+    repository-relative paths.
+  - F10: one project maintainability value improves from `0.0` to the
+    source-line-weighted `51.91223967859085`.
+  - F4: one include-bearing unit name column maps from preprocessed column 5
+    back to original-source column 3.
+  - F3: three logical `unit_types.pas` values improve: the bogus helper field
+    becomes the real `Help` procedure, syntax problems decrease 4→3, and
+    resolved references increase 3→4.
+  - F2: three logical `unit_statements.pas` values change: cyclomatic
+    complexity 5→8, maintainability
+    `41.670635083303196`→`41.26712631137338`, and one previously hidden
+    tolerant-recovery problem becomes visible.
+- Across all 45 fixture files, every symbol and resolved-reference count is
+  greater than or equal to baseline, and no previously clean file raises.
+- Build and Twine checks pass for the 3.1.0 sdist and wheel. A clean Python
+  3.14 wheel import contains `py.typed`; an extracted sdist test run passes
+  with `858 passed, 2 skipped, 84 warnings, 60 subtests`.
+- New unrelated observation (not changed): the first cold sdist run
+  transiently exceeded four one-to-two-second timing assertions in
+  `tests/test_lsp_support.py` (100k-line model/workspace-symbol tests around
+  lines 1289, 1354, 1424, and 1750). The same four tests immediately passed
+  in 3.79 seconds total and the repeated full clean-room run passed. Impact:
+  these micro-timing assertions can be flaky on a cold or contended machine;
+  semantic results and protocol responses were correct.

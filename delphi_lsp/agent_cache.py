@@ -1,24 +1,24 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Collection, Mapping
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, fields, is_dataclass, replace
 import argparse
 import contextlib
 import hmac
 import json
 import math
 import os
-from pathlib import Path
+import re
 import secrets
 import socket
 import stat
 import subprocess
 import sys
-import re
 import tempfile
 import threading
 import time
+from collections.abc import Callable, Collection, Mapping
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, fields, is_dataclass, replace
+from pathlib import Path
 from types import ModuleType
 
 from watchfiles import watch
@@ -28,7 +28,6 @@ from .agent_context import AgentContext
 from .agent_protocol import AgentProtocolError
 from .project_config import ProjectPathConfig, load_project_path_config
 from .project_discovery import SKIP_DIRS
-
 
 DEFAULT_MAX_MEMORY_BYTES = 512 * 1024**2
 DEFAULT_MAX_DISK_CACHE_BYTES = 512 * 1024**2

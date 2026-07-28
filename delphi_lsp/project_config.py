@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import os
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable, Mapping
-import os
-import re
 
 from .preprocessor import IncludeLoader
 from .source_reader import read_source_text
@@ -13,7 +13,7 @@ from .source_reader import read_source_text
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - exercised by Python 3.10 CI
-    import tomli as tomllib
+    import tomli as tomllib  # type: ignore[import-not-found,no-redef]
 
 
 CONFIG_FILE_NAME = ".delphi-lsp.toml"

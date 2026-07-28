@@ -17,7 +17,6 @@ from delphi_lsp.lsp_server import (
 )
 from delphi_lsp.parser import parse
 
-
 FIXTURE_DIR = pathlib.Path(__file__).parent / 'fixtures'
 
 
