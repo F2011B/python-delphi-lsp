@@ -11,6 +11,23 @@ from delphi_lsp.project_indexer import ProjectIndexer, ProjectProblemType
 
 
 class ProjectIndexerTests(unittest.TestCase):
+    def test_malformed_bom_source_becomes_a_cant_open_problem(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / 'Malformed.dpr'
+            project.write_bytes(b'\xef\xbb\xbf\xff')
+
+            result = ProjectIndexer().index(str(project))
+
+            self.assertEqual(len(result.problems), 1)
+            self.assertEqual(
+                result.problems[0].problem_type,
+                ProjectProblemType.CANT_OPEN_FILE,
+            )
+            self.assertEqual(
+                result.problems[0].file_name,
+                str(project.resolve()),
+            )
+
     def test_workspace_exclude_blocks_dependency_and_include_reads(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repository = Path(tmp)

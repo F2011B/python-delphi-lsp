@@ -262,7 +262,7 @@ class ProjectIndexer:
     def _read_file(self, file_path: Path) -> Optional[str]:
         try:
             return read_source_text(file_path)
-        except OSError as exc:
+        except (OSError, UnicodeError) as exc:
             self._problems.append(
                 ProjectProblem(
                     problem_type=ProjectProblemType.CANT_OPEN_FILE,

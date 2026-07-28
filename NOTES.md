@@ -124,3 +124,22 @@
   enclosing routines after recursion was enabled. A second regression keeps
   bodyless `forward`, `external`, and `abstract` routines as siblings of the
   next declaration.
+- Batch 4 full result: 827 passed, 1 skipped, 70 warnings, and 60 subtests
+  passed.
+- Batch 4 snapshot classification:
+  - F3 changes `unit_types.pas`: the bogus `helper` field becomes the real
+    `Help` procedure, syntax problems decrease 4→3, and resolved references
+    increase 3→4.
+  - F2 changes `unit_statements.pas`: recovered control flow raises
+    cyclomatic complexity 5→8 and changes maintainability
+    41.670635083303196→41.26712631137338. One recovery problem at the
+    pre-existing `case ... else` boundary is now visible; symbols remain 4
+    and resolved references remain 22.
+  - Agent-layer payloads are unchanged. No clean fixture raises, and no
+    fixture loses symbols or resolved references.
+
+### F12 — Malformed BOM source handling
+
+- Added an indexer regression using a UTF-8 BOM followed by invalid UTF-8.
+- `_read_file` now routes `UnicodeError` through the existing per-file
+  `CANT_OPEN_FILE` problem path instead of aborting the entire index.
