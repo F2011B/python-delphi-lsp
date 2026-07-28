@@ -151,6 +151,45 @@ end.
     assert routine_names == ["First", "AfterComparison"]
 
 
+def test_less_than_recovery_continues_after_an_inline_asm_block() -> None:
+    source = """
+unit LessThanAsm;
+interface
+implementation
+
+procedure First;
+var
+  Index: Integer;
+begin
+  while Index < 10 do
+    Index := Index + 1;
+  asm
+    mov eax, ebx
+  end;
+  Index := 11;
+end;
+
+procedure AfterAsm;
+begin
+end;
+
+end.
+"""
+
+    result = DelphiAstParser(source, "LessThanAsm.pas").parse()
+    methods = {
+        node.get_attribute(AttributeName.anName): node
+        for node in walk(result.root)
+        if node.typ == SyntaxNodeType.ntMethod
+    }
+
+    assert list(methods) == ["First", "AfterAsm"]
+    assert sum(
+        node.typ == SyntaxNodeType.ntAssign
+        for node in walk(methods["First"])
+    ) == 2
+
+
 def test_metaclass_and_helper_types_preserve_following_declarations() -> None:
     source = """
 unit TypeForms;

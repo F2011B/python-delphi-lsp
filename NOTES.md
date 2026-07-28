@@ -91,6 +91,11 @@
 - Statement and condition collectors no longer track angle brackets.
   Declaration collectors retain generic-aware tracking, narrowed to an
   identifier immediately adjacent to `<`, with statement-boundary recovery.
+- The first Batch 4 snapshot exposed an adjacent recovery boundary: once F2
+  revealed later statements, inline `asm ... end` was mistaken for the
+  enclosing routine end and reduced resolved references from 22 to 21 in
+  `unit_statements.pas`. A dedicated regression now keeps the post-assembly
+  assignment attached; the reference count is restored to 22.
 
 ### F3 — Metaclass and class-helper parsing
 

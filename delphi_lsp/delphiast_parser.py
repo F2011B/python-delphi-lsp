@@ -1094,6 +1094,15 @@ class DelphiAstParser:
             self._parse_statements(node, {"end"})
             self._accept("end")
             return node
+        if word == "asm":
+            node = self._node(
+                SyntaxNodeType.ntStatements,
+                self._advance(),
+                compound=True,
+            )
+            self._synchronize({"end"})
+            self._accept("end")
+            return node
         if word in _STATEMENT_TERMINATORS:
             return None
         token = self._peek()
