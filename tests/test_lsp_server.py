@@ -22,6 +22,7 @@ from delphi_lsp.lsp_server import (
     iter_symbols,
     text_references_for_symbol,
 )
+from delphi_lsp.project_discovery import SKIP_DIRS
 from delphi_lsp.semantic import SymbolKind
 
 
@@ -222,3 +223,26 @@ def test_workspace_symbol_query_cache_is_a_bounded_lru() -> None:
     assert len(state.workspace_symbol_query_cache) == 8
     assert 'b' in state.workspace_symbol_query_cache
     assert 'c' not in state.workspace_symbol_query_cache
+
+
+def test_lsp_workspace_scan_prunes_shared_skip_directories(tmp_path) -> None:
+    source_dir = tmp_path / 'src'
+    source_dir.mkdir()
+    source_path = source_dir / 'Canonical.pas'
+    source_path.write_text(
+        'unit Canonical;\ninterface\nimplementation\nend.\n',
+        encoding='utf-8',
+    )
+    for index, directory_name in enumerate(sorted(SKIP_DIRS)):
+        skipped_dir = tmp_path / directory_name
+        skipped_dir.mkdir()
+        (skipped_dir / f'Copy{index}.pas').write_text(
+            f'unit Copy{index};\ninterface\nimplementation\nend.\n',
+            encoding='utf-8',
+        )
+    state = LspWorkspaceState()
+    state.configure(WorkspaceConfig(roots=[str(tmp_path)]))
+
+    files = state._scan_workspace_files()
+
+    assert files == [str(source_path)]

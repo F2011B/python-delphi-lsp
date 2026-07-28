@@ -72,3 +72,14 @@
 - Query-specific workspace semantic results now use an eight-entry
   `OrderedDict`; hits refresh recency and insertion evicts the least recently
   used entry.
+
+### F21 — Shared workspace directory pruning
+
+- Added a regression containing Delphi sources beneath every shared
+  `SKIP_DIRS` name and one canonical source outside them.
+- The LSP walker now applies the same skip-directory set as project discovery
+  and the agent workspace, preventing duplicate build/worktree sources from
+  entering the semantic index.
+- Batch 3 full result: 821 passed, 1 skipped, 70 warnings, and 60 subtests
+  passed.
+- Batch 3 golden snapshot classification: identical.

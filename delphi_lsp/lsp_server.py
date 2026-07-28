@@ -25,7 +25,7 @@ from .semantic import (
 from .semantic_builder import SemanticBuilder, SemanticModel
 from .source_reader import read_source_text
 from .workspace import WorkspaceSemanticResult, build_workspace_semantics
-from .project_discovery import discover_delphi_project
+from .project_discovery import SKIP_DIRS, discover_delphi_project
 from .project_config import (
     ProjectPathConfig,
     load_project_path_config,
@@ -225,7 +225,8 @@ class LspWorkspaceState:
                 directory_names[:] = [
                     name
                     for name in directory_names
-                    if (
+                    if name not in SKIP_DIRS
+                    and (
                         project_config is None
                         or not project_config.excludes_workspace_path(current / name)
                     )
