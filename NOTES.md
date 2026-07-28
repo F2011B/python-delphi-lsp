@@ -176,3 +176,10 @@
   scan and verifies the immediately following request rescans.
 - A monotonic revision epoch now guards timestamp write-back, so an in-flight
   refresh cannot erase a newer watcher invalidation.
+
+### F18 — Watcher health
+
+- Added a regression that simulates a watcher returning unexpectedly.
+- The service records watcher failure, exposes `watcher_active: false` in
+  status, and invalidates the revision cache before every subsequent request
+  so results degrade to per-request validation rather than silent staleness.

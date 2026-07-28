@@ -73,6 +73,39 @@ def test_workspace_change_watcher_invalidates_when_backend_fails(
     assert invalidations == [None]
 
 
+def test_dead_cache_watcher_is_reported_and_forces_revalidation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from delphi_lsp import agent_cache
+    from delphi_lsp.agent_cache import CacheMetadata, _CacheService
+
+    write_source(tmp_path / "Demo.dpr", "program Demo; begin end.")
+    metadata = CacheMetadata(
+        2, str(tmp_path.resolve()), os.getpid(), 1, "x" * 32, "test",
+        "", 1024 * 1024, 0, 10, time.time(),
+    )
+    service = _CacheService(metadata)
+    monkeypatch.setattr(
+        agent_cache,
+        "watch_workspace_changes",
+        lambda *_args, **_kwargs: None,
+    )
+
+    agent_cache._watch_workspace(service)
+
+    assert service.status()["watcher_active"] is False
+    invalidations: list[None] = []
+    monkeypatch.setattr(
+        service.context,
+        "invalidate_revision_cache",
+        lambda: invalidations.append(None),
+    )
+    service.cache_state = "ready"
+    service.request({"action": "open"})
+    assert invalidations == [None]
+
+
 def test_current_process_rss_dispatches_platform_measurements(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -695,6 +695,7 @@ class _CacheService:
         self._context: AgentContext | None = None
         self.context_ready = threading.Event()
         self.watcher_ready = threading.Event()
+        self.watcher_failed = threading.Event()
         self.budget = CacheBudget(metadata.max_memory_bytes)
         self.stats = CacheStats()
         self.lock = threading.Lock()
@@ -813,6 +814,8 @@ class _CacheService:
                 f"Cache workspace discovery or warm-up failed.{detail}",
             )
         self.watcher_ready.wait(timeout=_WATCHER_READY_TIMEOUT_SECONDS)
+        if self.watcher_failed.is_set():
+            self.context.invalidate_revision_cache()
         with self.lock:
             self.last_activity = time.monotonic()
             before = self.last_revision
@@ -885,6 +888,7 @@ class _CacheService:
             "idle_timeout": self.metadata.idle_timeout, "idle_remaining": max(0.0, self.metadata.idle_timeout - idle),
             "workspace_revision": self.last_revision,
             "startup_error": self.startup_error,
+            "watcher_active": not self.watcher_failed.is_set(),
         }
 
 
@@ -929,12 +933,16 @@ def _watch_workspace(service: _CacheService) -> None:
     service.context_ready.wait()
     if service.shutdown.is_set() or service._context is None:
         return
-    watch_workspace_changes(
-        service.metadata.root,
-        stop_event=service.shutdown,
-        on_change=service._context.invalidate_revision_cache,
-        on_ready=service.watcher_ready.set,
-    )
+    try:
+        watch_workspace_changes(
+            service.metadata.root,
+            stop_event=service.shutdown,
+            on_change=service._context.invalidate_revision_cache,
+            on_ready=service.watcher_ready.set,
+        )
+    finally:
+        if not service.shutdown.is_set():
+            service.watcher_failed.set()
 
 
 def _serve_connection(connection: socket.socket, service: _CacheService) -> None:
