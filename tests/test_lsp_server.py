@@ -5,12 +5,17 @@ from unittest import mock
 
 from lsprotocol.types import (
     TEXT_DOCUMENT_DID_CHANGE,
+    TEXT_DOCUMENT_DID_CLOSE,
+    TEXT_DOCUMENT_DID_OPEN,
     TEXT_DOCUMENT_RENAME,
     Position,
     TextDocumentSyncKind,
 )
+from pygls.feature_manager import is_thread_function
 
+from delphi_lsp import lsp_server
 from delphi_lsp.lsp_server import (
+    LspWorkspaceState,
     WorkspaceConfig,
     build_outline_semantic_model,
     create_server,
@@ -153,3 +158,54 @@ def test_rename_aborts_when_an_include_makes_ranges_unsafe(tmp_path) -> None:
     result = handler(params)
 
     assert result is None
+
+
+def test_document_updates_reparse_only_the_changed_file(tmp_path) -> None:
+    first_path = tmp_path / 'First.pas'
+    second_path = tmp_path / 'Second.pas'
+    first_source = 'unit First;\ninterface\nimplementation\nend.\n'
+    second_source = 'unit Second;\ninterface\nimplementation\nend.\n'
+    first_path.write_text(first_source, encoding='utf-8')
+    second_path.write_text(second_source, encoding='utf-8')
+    state = LspWorkspaceState()
+    state.configure(WorkspaceConfig(roots=[str(tmp_path)]))
+    state.index_workspace()
+    unchanged_model = state.workspace.models[str(second_path)]
+
+    with mock.patch.object(
+        lsp_server,
+        'build_outline_semantic_model',
+        wraps=lsp_server.build_outline_semantic_model,
+    ) as build_outline:
+        state.update_document(
+            first_path.as_uri(),
+            first_source.replace('interface', 'interface\nuses Second;'),
+        )
+
+    assert [call.args[1] for call in build_outline.call_args_list] == [
+        str(first_path)
+    ]
+    assert state.workspace.models[str(second_path)] is unchanged_model
+
+    with mock.patch.object(
+        lsp_server,
+        'build_outline_semantic_model',
+        wraps=lsp_server.build_outline_semantic_model,
+    ) as build_outline:
+        state.remove_document(first_path.as_uri())
+
+    assert build_outline.call_count == 0
+    assert state.workspace.models[str(second_path)] is unchanged_model
+
+
+def test_document_notifications_are_dispatched_off_the_event_loop() -> None:
+    server = create_server()
+
+    for method in (
+        TEXT_DOCUMENT_DID_OPEN,
+        TEXT_DOCUMENT_DID_CHANGE,
+        TEXT_DOCUMENT_DID_CLOSE,
+    ):
+        handler = server.lsp.fm.features[method]
+        assert isinstance(handler, partial)
+        assert is_thread_function(handler)

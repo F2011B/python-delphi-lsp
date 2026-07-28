@@ -46,6 +46,7 @@ class FileSnapshot:
     path: str
     text: str
     mtime: float
+    semantic: Optional[SemanticModel] = None
 
 
 @dataclass
@@ -385,14 +386,24 @@ class LspWorkspaceState:
     ) -> Optional[WorkspaceSemanticResult]:
         if not sources:
             return None
-        models = {
-            file_name: build_outline_semantic_model(
+        models: dict[str, SemanticModel] = {}
+        for file_name, text in sources.items():
+            cached = self.file_cache.get(file_name)
+            if (
+                cached is not None
+                and cached.text == text
+                and cached.semantic is not None
+            ):
+                models[file_name] = cached.semantic
+                continue
+            model = build_outline_semantic_model(
                 text,
                 file_name,
                 defines=self.config.defines,
             )
-            for file_name, text in sources.items()
-        }
+            models[file_name] = model
+            if cached is not None and cached.text == text:
+                cached.semantic = model
         index = SymbolIndex()
         for model in models.values():
             index.register_unit(model.unit_scope.name, model.unit_scope)
@@ -1844,11 +1855,13 @@ def create_server():
         )
 
     @server.feature(TEXT_DOCUMENT_DID_OPEN)
+    @server.thread()
     def did_open(ls: LanguageServer, params) -> None:
         state.update_document(params.text_document.uri, params.text_document.text)
         _publish_diagnostics(ls, params.text_document.uri)
 
     @server.feature(TEXT_DOCUMENT_DID_CHANGE)
+    @server.thread()
     def did_change(ls: LanguageServer, params) -> None:
         if not params.content_changes:
             return
@@ -1857,6 +1870,7 @@ def create_server():
         _publish_diagnostics(ls, params.text_document.uri)
 
     @server.feature(TEXT_DOCUMENT_DID_CLOSE)
+    @server.thread()
     def did_close(ls: LanguageServer, params) -> None:
         state.remove_document(params.text_document.uri)
         ls.publish_diagnostics(params.text_document.uri, [])

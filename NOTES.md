@@ -50,3 +50,18 @@
 - Batch 2 full result: 817 passed, 1 skipped, 44 warnings, and 60 subtests
   passed.
 - Batch 2 golden snapshot classification: identical.
+
+### F7 / F11 — Incremental LSP outline rebuild
+
+- Added a measured regression that records outline-builder calls across
+  document update and close, plus a dispatch regression for all three
+  document lifecycle notifications.
+- Unchanged disk snapshots retain their semantic outline model. Rebuilding
+  the shared workspace index re-registers those models and parses only the
+  changed document.
+- `didOpen`, `didChange`, and `didClose` are marked for pygls thread-pool
+  dispatch so parsing does not block the protocol event loop.
+- The implementation deliberately rebuilds the lightweight shared
+  `SymbolIndex` from cached models rather than adding mutable unregister
+  operations to `SymbolIndex`; this preserves deterministic registration
+  order and avoids stale name-index entries.
