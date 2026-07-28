@@ -1618,23 +1618,19 @@ def create_server():
             CompletionItem,
             CompletionItemKind,
             CompletionList,
-            CompletionOptions,
             CompletionParams,
             DefinitionParams,
             Hover,
             HoverParams,
             InitializeParams,
-            InitializeResult,
             Location,
             Position,
             Range,
             ReferenceParams,
             RenameParams,
-            ServerCapabilities,
             SymbolInformation,
             SymbolKind as LspSymbolKind,
             TextDocumentSyncKind,
-            TextDocumentSyncOptions,
             TextEdit,
             WorkspaceEdit,
             WorkspaceSymbolParams,
@@ -1655,7 +1651,11 @@ def create_server():
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise RuntimeError('pygls and lsprotocol are required for the LSP server') from exc
 
-    server = LanguageServer('delphi_lsp', __version__)
+    server = LanguageServer(
+        'delphi_lsp',
+        __version__,
+        text_document_sync_kind=TextDocumentSyncKind.Full,
+    )
     state = LspWorkspaceState()
 
     def _symbol_kind(symbol: Symbol) -> LspSymbolKind:
@@ -1729,7 +1729,7 @@ def create_server():
         return items
 
     @server.feature(INITIALIZE)
-    def initialize(ls: LanguageServer, params: InitializeParams) -> InitializeResult:
+    def initialize(ls: LanguageServer, params: InitializeParams) -> None:
         roots: list[str] = []
         if params.workspace_folders:
             roots.extend(uri_to_path(folder.uri) for folder in params.workspace_folders)
@@ -1748,21 +1748,6 @@ def create_server():
             auto_discover_paths=bool(auto_discover_paths),
         )
         state.configure(config)
-
-        capabilities = ServerCapabilities(
-            text_document_sync=TextDocumentSyncOptions(
-                open_close=True,
-                change=TextDocumentSyncKind.Full,
-            ),
-            definition_provider=True,
-            references_provider=True,
-            hover_provider=True,
-            completion_provider=CompletionOptions(trigger_characters=['.']),
-            rename_provider=True,
-            document_symbol_provider=True,
-            workspace_symbol_provider=True,
-        )
-        return InitializeResult(capabilities=capabilities)
 
     def _publish_diagnostics(ls: LanguageServer, uri: str) -> None:
         diagnostics = state.diagnostics_for_uri(uri)
@@ -1840,7 +1825,7 @@ def create_server():
     def did_change(ls: LanguageServer, params) -> None:
         if not params.content_changes:
             return
-        text = params.content_changes[-1].text
+        text = ls.workspace.get_text_document(params.text_document.uri).source
         state.update_document(params.text_document.uri, text)
         _publish_diagnostics(ls, params.text_document.uri)
 
