@@ -301,3 +301,32 @@ end.
         for child in outer.child_nodes
     ) == 1
     assert inner.find_node(SyntaxNodeType.ntStatements) is not None
+
+
+def test_forward_routine_does_not_capture_the_next_routine() -> None:
+    source = """
+unit ForwardPair;
+interface
+implementation
+
+procedure First; forward;
+
+procedure Second;
+begin
+end;
+
+end.
+"""
+
+    result = DelphiAstParser(source, "ForwardPair.pas").parse()
+    methods = [
+        node
+        for node in walk(result.root)
+        if node.typ == SyntaxNodeType.ntMethod
+    ]
+
+    assert [
+        node.get_attribute(AttributeName.anName)
+        for node in methods
+    ] == ["First", "Second"]
+    assert methods[0].parent_node is methods[1].parent_node

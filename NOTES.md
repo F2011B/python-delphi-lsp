@@ -120,3 +120,7 @@
 - Local routine declarations are now parsed recursively during the enclosing
   routine's declaration phase. The nested routine and both statement blocks
   remain attached to their correct owners.
+- The Batch 4 snapshot also caught forward declarations being mistaken for
+  enclosing routines after recursion was enabled. A second regression keeps
+  bodyless `forward`, `external`, and `abstract` routines as siblings of the
+  next declaration.

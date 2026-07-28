@@ -911,6 +911,15 @@ class DelphiAstParser:
         self._parse_method_directives(node)
         if not parse_body:
             return node
+        if any(
+            node.has_attribute(attribute)
+            for attribute in (
+                AttributeName.anAbstract,
+                AttributeName.anExternal,
+                AttributeName.anForwarded,
+            )
+        ):
+            return node
 
         while (
             self._normalized() in {"label", "const", "type", "var", "threadvar"}
